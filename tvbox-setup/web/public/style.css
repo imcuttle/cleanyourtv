@@ -511,3 +511,14 @@ nav a svg { display: none; }
   header { padding-top: calc(6px + env(safe-area-inset-top)); padding-bottom: 6px; }
   .hero { height: 100vh; }
 }
+
+/* 后退 / 前进 / 刷新: only in an installed window on a PC-sized screen (html.app-win, see app.js) */
+.hnav { display: none; gap: 4px; margin-right: -12px; }
+@media (min-width: 761px) and (hover: hover) and (pointer: fine) {
+  html.app-win .hnav { display: flex; }
+}
+.hnav button { width: 34px; height: 34px; border-radius: 50%; border: 0; background: #ffffff1a; color: #fff; display: grid; place-items: center; padding: 0; transition: background .15s, opacity .15s; }
+.hnav button svg { width: 18px; height: 18px; }
+.hnav button:hover:not(:disabled) { background: #ffffff3d; }
+.hnav button:disabled { opacity: .3; cursor: default; }
+.hnav button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }

@@ -1219,7 +1219,33 @@ function pvReset() {
   pvKey = ''; pvWant = null; pvBusy = false;
   tip.hidden = true; tip.classList.remove('ready');
 }
+// ---------- 后退 / 前进 / 刷新 (installed window: no browser toolbar) ----------
+// The buttons appear only in a standalone / app window on a PC-sized screen (a normal tab has the browser's own;
+// phones have swipe gestures). Back and forward just walk the history, so they also close the detail sheet and
+// the player, which are history entries. localStorage.navBtns = '1' / '0' forces them on / off.
+const appWin = matchMedia('(display-mode: standalone), (display-mode: minimal-ui), (display-mode: window-controls-overlay), (display-mode: fullscreen)');
+const syncAppWin = () => document.documentElement.classList.toggle('app-win', localStorage.navBtns === '1' || (localStorage.navBtns !== '0' && appWin.matches));
+syncAppWin(); appWin.addEventListener?.('change', syncAppWin);
+let lastGo = 0;
+// A second step within 250 ms is dropped: some shells also handle Alt+← themselves, and two steps would skip a page.
+const go = n => { if (Date.now() - lastGo < 250) return; lastGo = Date.now(); history.go(n); };
+const syncNav = () => {
+  const n = window.navigation;
+  $('#navBack').disabled = n ? !n.canGoBack : history.length <= 1;
+  $('#navFwd').disabled = n ? !n.canGoForward : false;
+};
+$('#navBack').onclick = () => go(-1);
+$('#navFwd').onclick = () => go(1);
+$('#navReload').onclick = () => location.reload();
+window.navigation?.addEventListener('currententrychange', syncNav);
+addEventListener('popstate', syncNav); addEventListener('hashchange', syncNav);
+syncNav();
+
 addEventListener('keydown', e => {
+  if ((e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight'))
+    || (e.metaKey && !e.altKey && !e.ctrlKey && (e.key === '[' || e.key === ']')) ) {
+    if (!e.target.matches?.('input, textarea')) { e.preventDefault(); return go(e.key === 'ArrowLeft' || e.key === '[' ? -1 : 1); }
+  }
   if (e.key === 'Escape' && !player.hidden && !$('.plist').hidden) { e.preventDefault(); return togglePlist(false); }
   if (e.target.matches('input, textarea')) return;
   if (e.key === 'Escape' && (playerOpen() || $('#modal'))) history.back();

@@ -18,6 +18,12 @@
 </head>
 <body>
 <header id="top">
+  <!-- Back / forward / reload: an installed (standalone) window has no browser toolbar. Shown only there on PC. -->
+  <div class="hnav" id="hnav">
+    <button id="navBack" type="button" title="后退 (Alt+←)" aria-label="后退" disabled><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <button id="navFwd" type="button" title="前进 (Alt+→)" aria-label="前进" disabled><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <button id="navReload" type="button" title="刷新 (F5)" aria-label="刷新"><svg viewBox="0 0 24 24"><path d="M19 8a8 8 0 1 0 1.5 6M19 3v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  </div>
   <a class="logo" href="#/">TVBOX</a>
   <nav>
     <a href="#/" data-nav="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span>首页</span></a>
