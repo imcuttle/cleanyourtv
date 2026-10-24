@@ -119,3 +119,21 @@ adb shell pm grant com.fongmi.android.tv android.permission.WRITE_EXTERNAL_STORA
 
 That one line is worth remembering — it looked exactly like "the config is broken" for a long
 time, and re-ordering the config never helped.
+
+## 点播 — more sites for the web / iOS front-ends
+
+Probed 2026-10-24 from the laptop (`ac=detail&pg=1`, all 20 items had a direct m3u8):
+
+| Site | API | Note |
+|---|---|---|
+| 360 | `https://360zy.com/api.php/provide/vod` | AES-128 streams; flaky (timed out later the same day) |
+| 樱花 | `https://m3u8.apiyhzy.com/api.php/provide/vod` | |
+| 魔都 | `https://www.mdzyapi.com/api.php/provide/vod` | AES-128 streams; strong on 动漫 |
+| 丫丫 | `https://cj.yayazy.net/api.php/provide/vod` | many categories incl. 4K, Netflix, 短剧 |
+| 闪电 | `https://sdzyapi.com/api.php/provide/vod` | same category tree as 丫丫 |
+| 电影天堂 | `http://caiji.dyttzyapi.com/api.php/provide/vod` | plain http |
+
+Dead from this network: 红牛, 天空, 卧龙, 光速, 新浪, 无尽, 极速, 金鹰, 百度, ikun, 最大, 茅台, 虎牙, 1080, 优质, 火狐, 速播, 如意, 旺旺, 豆瓣资源.
+
+索尼 answers lists but Cloudflare blocks `wd=` searches (403), so it never shows up in search
+results. 海外看 fails TLS from here.

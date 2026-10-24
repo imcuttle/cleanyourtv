@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#141414">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="referrer" content="no-referrer">
+<title>TVBOX</title>
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="top">
+  <a class="logo" href="#/">TVBOX</a>
+  <nav>
+    <a href="#/" data-nav="home">首页</a>
+    <a href="#/live" data-nav="live">直播</a>
+    <a href="#/downloads" data-nav="downloads">下载</a>
+    <a href="#/settings" data-nav="settings">设置</a>
+  </nav>
+  <div class="right">
+    <form id="searchForm" class="search"><input id="q" type="search" placeholder="搜片名，所有源一起搜" autocomplete="off"></form>
+    <div class="picker">
+      <button id="siteBtn" class="sitebtn" type="button"><span id="siteName">选择源</span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div id="siteMenu" class="menu" hidden></div>
+    </div>
+    <span id="levelTag" class="level" hidden></span>
+  </div>
+</header>
+<main id="view"></main>
+
+<div id="player" hidden>
+  <video id="video" controls playsinline autoplay></video>
+  <div class="pbar">
+    <button class="icon" data-act="close" title="关闭 (Esc)">✕</button>
+    <div class="ptitle"></div>
+    <span class="local" hidden>本地</span>
+    <button class="pill" data-act="prev">上一集</button>
+    <button class="pill" data-act="next">下一集</button>
+    <button class="pill" data-act="list">选集</button>
+  </div>
+  <div class="pmsg"></div>
+  <aside class="plist" hidden></aside>
+</div>
+
+<script src="vendor/hls.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
