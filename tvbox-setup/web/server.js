@@ -1715,7 +1715,7 @@ async function api(route, q, res, req) {
     } catch (e) { return send(res, 200, { ok: false, error: e.message }); }
   }
   if (route === 'recognize' && write) return send(res, 200, await recognize((await readBody(req)).text));
-  if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ffmpeg: !!FFMPEG });
+  if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ffmpeg: !!FFMPEG, loopback: isLoopback(req) });
 
   // ---- 本地媒体: folders, scan, and the CMS API for TVBox / FongMi ----
   if (route === 'local') {
@@ -1723,6 +1723,18 @@ async function api(route, q, res, req) {
       urls: lanIps().map(ip => `http://${ip}:${PORT}/api/local/vod`) });
     if (!pinOk(req)) return needPin(res);
     return send(res, 200, await rpc('localSave', await readBody(req)));
+  }
+  // Open a local file in this computer's default player / show it in the file manager. Only for a browser running
+  // on this same machine (see isLoopback), and only for files in the scan index that the safety level lets through.
+  if (route === 'local/open' && write) {
+    if (!isLoopback(req)) return send(res, 403, { error: '只有在这台电脑本机（localhost）上打开才能调用系统播放器' });
+    const b = await readBody(req);
+    const f = localIndex().byFile.get(str(b.id));
+    if (!f || !localCfg.enabled || !localCatOk(localIndex().catById.get(f.item.cat))) return send(res, 404, { error: '找不到文件' });
+    if (!['play', 'reveal'].includes(b.action)) return send(res, 400, { error: 'action 要么是 play 要么是 reveal' });
+    if (!await fsp.stat(f.path).then(st => st.isFile(), () => false)) return send(res, 404, { error: '文件已不在磁盘上，重新扫描一下' });
+    try { await openPath(f.path, b.action === 'reveal'); } catch (e) { return send(res, 500, { error: '打开失败：' + (e.message || e) }); }
+    return send(res, 200, { ok: true });
   }
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
   if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
@@ -1950,6 +1962,31 @@ rpcHandlers.downloads = async ({ method, id, action, body: b }) => {
   return { body: { jobs: jobs.map(j => ({ ...jobView(j), qpos: queue.indexOf(j.id) + 1 })), free, dir: DL, maxJobs: MAX_JOBS } };
 };
 
+// True only for a browser on this very machine: the socket peer is loopback AND the request is addressed to
+// localhost (a page on another site that resolves its own name to 127.0.0.1 — DNS rebinding — carries its own
+// Host / Origin and is refused).
+function isLoopback(req) {
+  const peer = str(req.socket.remoteAddress).replace(/^::ffff:/, '');
+  if (!(peer === '127.0.0.1' || peer === '::1')) return false;
+  const loop = h => { try { const n = new URL('http://' + h).hostname; return n === 'localhost' || n === '127.0.0.1' || n === '[::1]'; } catch { return false; } };
+  if (!loop(req.headers.host || '')) return false;
+  const o = req.headers.origin;
+  if (o && o !== 'null') { try { if (!loop(new URL(o).host)) return false; } catch { return false; } }
+  return true;
+}
+// Hand a file to the OS. Arguments go as an array (no shell), so file names can't inject commands.
+function openPath(file, reveal) {
+  const [cmd, args] = process.platform === 'darwin' ? ['open', reveal ? ['-R', file] : [file]]
+    : process.platform === 'win32' ? (reveal ? ['explorer.exe', ['/select,' + file]] : ['rundll32', ['url.dll,FileProtocolHandler', file]])
+    : ['xdg-open', [reveal ? path.dirname(file) : file]];
+  return new Promise((ok, bad) => {
+    const p = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    p.on('error', bad);
+    p.unref();
+    // `open` / `xdg-open` return at once; explorer.exe exits non-zero even on success, so only a spawn error counts.
+    setTimeout(ok, 150);
+  });
+}
 function lanIps() {
   return Object.values(os.networkInterfaces()).flat()
     .filter(i => i && i.family === 'IPv4' && !i.internal && !i.address.startsWith('169.254.')).map(i => i.address);

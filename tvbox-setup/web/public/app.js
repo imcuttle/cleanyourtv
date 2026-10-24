@@ -61,6 +61,14 @@ const qc = (() => {
 const Q_RANK = { '抢先': 0, '标清': 1, '720P': 2, 'HD': 2, '超清': 3, '1080P': 4, '蓝光': 4, '4K': 5 };
 const bestQ = qs => qs.filter(Boolean).sort((a, b) => (Q_RANK[b] ?? -1) - (Q_RANK[a] ?? -1))[0] || '';
 const vodQ = it => (it.site && it.id && qc.get(`v|${it.site}|${it.id}`)) || it.quality || '';
+// 本地媒体 on this very machine (localhost): hand a file to the system's default player / show it in Finder
+// or Explorer. The server refuses anyone who isn't the loopback browser, so other devices never see the buttons.
+const localFileId = url => (/\/media\/[fh]\/([0-9a-f]+)/.exec(url || '') || [])[1] || '';
+const openLocal = (url, action) => {
+  const id = localFileId(url);
+  if (!id) return Promise.resolve(toast('不是本地文件'));
+  return req('POST', '/api/local/open', { id, action }).then(() => toast(action === 'reveal' ? '已在文件夹中显示' : '已交给系统播放器'), e => toast(e.message));
+};
 const DB_ROWS = [['tv', '豆瓣热门剧集'], ['movie', '豆瓣热门电影'], ['show', '豆瓣热门综艺'], ['anime', '豆瓣热门动漫']];
 const dbRows = () => { try { return { tv: true, movie: true, show: true, anime: true, ...JSON.parse(localStorage.dbRows || '{}') }; } catch { return { tv: true, movie: true, show: true, anime: true }; } };
 
@@ -784,6 +792,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
   let d;
   try { [d] = await Promise.all([api('detail', { site, id }, m.ctl.signal), refreshDownloads(m.ctl.signal)]); }
   catch (e) { if (isAbort(e)) return; m.firstChild.innerHTML = `<button class="close">✕</button><div class="body"><div class="err">详情加载失败：${esc(e.message)}</div></div>`; m.querySelector('.close').onclick = () => history.back(); return; }
+  const canOpen = d.local && !!(await infoP().catch(() => ({}))).loopback;
   const h0 = hist.get(site, id);
   let line = h0 && d.lines[h0.line] ? h0.line : 0, dlMode = false, alts = null, dbPic = '';
   const render = () => {
@@ -796,6 +805,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
           ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
             ${d.local ? '' : '<button class="btn more dlbtn" id="dlToggle">⬇ 下载</button>'}` : ''}
+          ${canOpen && eps.length ? `<button class="btn more" id="extPlay" title="用系统默认播放器打开${eps.length > 1 ? ' ' + esc(eps[resumeIdx].name) : ''}">↗ 默认播放器</button><button class="btn more" id="extReveal" title="在文件夹中显示这个文件">⌕ 显示文件</button>` : ''}
           ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
         </div></div></div>
       <div class="body">
@@ -837,6 +847,10 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     };
     if ($('#dlAllPause', m)) $('#dlAllPause', m).onclick = () => Promise.all(state.downloads.filter(j => j.site === site && j.vid === id && ACTIVE.includes(j.status)).map(j => req('PATCH', `/api/downloads?id=${j.id}&action=pause`))).then(() => refreshDownloads(m.ctl.signal)).then(paintDl);
     try { paintDl(); } catch (err) { console.error('paintDl', err); }
+    if ($('#extPlay', m)) {
+      $('#extPlay', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'play');
+      $('#extReveal', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'reveal');
+    }
     if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
@@ -1027,6 +1041,7 @@ function openPlayer(startAt) {
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
   $('[data-act=star]').hidden = !live;
+  $('[data-act=ext]').hidden = !(cur.kind === 'vod' && cur.d.local && serverInfo?.loopback);
   if (live) $('[data-act=star]').textContent = liveFavs.has(e.url) ? '★ 已收藏' : '☆ 收藏';
   renderPlist();
   const local = cur.kind === 'vod' ? dlFor(cur.d.site, cur.d.id, e.url) : null;
@@ -1108,6 +1123,7 @@ player.addEventListener('click', e => {
   if (act === 'next') step(1);
   if (act === 'prev') step(-1);
   if (act === 'list') return togglePlist();
+  if (act === 'ext') { video.pause(); return openLocal(cur.eps[cur.ep].url, 'play'); }
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); $('[data-act=star]').textContent = liveFavs.has(c.url) ? '★ 已收藏' : '☆ 收藏'; return; }
   if (!$('.plist').hidden && !e.target.closest('.plist, .pbar')) togglePlist(false);
 });
