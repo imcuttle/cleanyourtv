@@ -155,29 +155,47 @@ function defaults() {
 //   adult: 1       hidden unless 安全级别 = 全部
 //   categories: [] TVBox-style whitelist of category names
 function normalize(cfg) {
-  const seen = new Set(), keys = new Set(['local']); // "local" = the built-in 本地媒体 source
-  const sites = [];
+  const sigKey = new Map(), keys = new Set(['local']), remap = new Map(); // remap: key as written → final key
+  const out = [];
   for (const s of cfg.sites || []) {
-    if (!s || !/^https?:\/\//.test(str(s.api).trim()) || (s.type !== undefined && Number(s.type) !== 1)) continue;
+    if (!s) continue;
+    if (Array.isArray(s.members)) { out.push({ group: s }); continue; }
+    if (!/^https?:\/\//.test(str(s.api).trim()) || (s.type !== undefined && Number(s.type) !== 1)) continue;
     const api = str(s.api).trim();
     const categories = Array.isArray(s.categories) ? s.categories.map(String).filter(Boolean) : [];
-    const sig = api + '|' + categories.join(',');
-    if (seen.has(sig)) continue;
-    seen.add(sig);
+    // Same link (ignoring ac/pg/t/wd params, fragment, trailing slash) is the same source: keep the first.
+    const sig = normApi(api) + '|' + categories.join(',');
+    const written = str(s.key || s.name || api).trim();
+    if (sigKey.has(sig)) { if (!remap.has(written)) remap.set(written, sigKey.get(sig)); continue; }
     const name = str(s.name || s.key || api).trim();
-    let key = str(s.key || name).trim(), n = 2;
-    while (keys.has(key)) key = `${str(s.key || name).trim()}${n++}`;
+    let key = written, n = 2;
+    while (keys.has(key)) key = `${written}${n++}`;
     keys.add(key);
+    sigKey.set(sig, key);
+    if (!remap.has(written)) remap.set(written, key);
     const site = { key, name, type: 1, api };
     if (Number(s.kids)) site.kids = 1;
     if (Number(s.adult)) site.adult = 1;
     if (categories.length) site.categories = categories;
-    sites.push(site);
+    out.push(site);
+  }
+  // 聚合源: {key, name, members: [site keys]} searches / lists / plays through all of its members at once.
+  const sites = [];
+  for (const o of out) {
+    if (!o.group) { sites.push(o); continue; }
+    const g = o.group, name = str(g.name || g.key).trim();
+    const members = [...new Set(g.members.map(k => remap.get(str(k).trim())).filter(Boolean))];
+    if (!name || !members.length) continue;
+    const written = str(g.key || name).trim();
+    let key = written, n = 2;
+    while (keys.has(key)) key = `${written}${n++}`;
+    keys.add(key);
+    sites.push({ key, name, type: 1, members });
   }
   const liveSeen = new Set();
   const lives = (cfg.lives || []).filter(l => l && typeof l.url === 'string' && l.url.trim())
     .map(l => ({ name: str(l.name || l.url).trim(), url: l.url.trim(), ...(l.from ? { from: str(l.from) } : {}) }))
-    .filter(l => !liveSeen.has(l.url) && liveSeen.add(l.url));
+    .filter(l => { const k = /^https?:\/\//.test(l.url) ? normUrl(l.url) : l.url; return !liveSeen.has(k) && liveSeen.add(k); });
   return { sites, lives };
 }
 
@@ -193,8 +211,14 @@ const ADULT = /伦理|理论|三级|福利|写真|里番|两性|擦边|成人|�
 const KIDS_CATS = /动漫|动画|儿童|少儿|卡通|亲子|早教|绘本/;
 
 function visibleSites() {
-  const sites = safety.level === 'kids' ? config.sites.filter(s => s.kids)
-    : safety.level === 'standard' ? config.sites.filter(s => !s.adult) : config.sites;
+  const ok = s => safety.level === 'kids' ? s.kids : safety.level === 'standard' ? !s.adult : true;
+  const byKey = new Map(config.sites.filter(s => !s.members && ok(s)).map(s => [s.key, s]));
+  const sites = [];
+  for (const s of config.sites) {
+    if (!s.members) { if (byKey.has(s.key)) sites.push(s); continue; }
+    const memberSites = s.members.map(k => byKey.get(k)).filter(Boolean);
+    if (memberSites.length) sites.push({ ...s, memberSites });
+  }
   const loc = localSite();
   return loc ? [loc, ...sites] : sites;
 }
@@ -417,6 +441,66 @@ function lines(d) {
   });
 }
 
+// ---- 聚合源: one entry that fans out to several 点播源 and merges the answers ----
+// A member that fails is skipped for a minute, so one dead source never slows the rest down.
+const deadUntil = new Map();
+const dedupKey = it => it.name.replace(/\s+/g, '') + '|' + (it.year || '');
+const catKey = n => str(n).replace(/片$/, '');
+const packParts = parts => 'g.' + Buffer.from(JSON.stringify(parts)).toString('base64url');
+const unpackParts = id => { try { return JSON.parse(Buffer.from(str(id).slice(2), 'base64url').toString('utf8')); } catch { return []; } };
+async function eachMember(group, fn) {
+  let ms = group.memberSites.filter(m => (deadUntil.get(m.key) || 0) < Date.now());
+  if (!ms.length) ms = group.memberSites;
+  const res = await Promise.all(ms.map(m => fn(m).then(v => ({ m, v }), () => { deadUntil.set(m.key, Date.now() + 60e3); return null; })));
+  return res.filter(Boolean);
+}
+async function groupCategories(g) {
+  const seen = new Map();
+  for (const { v } of await eachMember(g, m => categories(m))) for (const c of v) if (!seen.has(catKey(c.name))) seen.set(catKey(c.name), { id: catKey(c.name), pid: '', name: c.name });
+  return [...seen.values()];
+}
+async function memberList(site, t, pg) {
+  // Whitelisted (e.g. 少儿) sites: "latest" comes from their first allowed category.
+  if (!t && (site.categories || safety.level === 'kids')) t = (await categories(site))[0]?.id || '';
+  const b = await cmsGet(site, { ac: 'detail', t, pg }, false, 8000);
+  return { list: (b.list || []).map(d => item(site, d)).filter(it => itemOk(site, it)), page: Number(b.page) || 1, pagecount: Number(b.pagecount) || 1 };
+}
+async function groupList(g, t, pg) {
+  const res = (await eachMember(g, async m => {
+    let id = '';
+    if (t) { const c = (await categories(m)).find(c => catKey(c.name) === t); if (!c) return null; id = c.id; }
+    return memberList(m, id, pg);
+  })).filter(r => r.v);
+  const merged = new Map();
+  const rounds = Math.max(0, ...res.map(r => r.v.list.length));
+  for (let i = 0; i < rounds; i++) for (const { m, v } of res) {
+    const it = v.list[i]; if (!it) continue;
+    const k = dedupKey(it), e = merged.get(k);
+    if (e) { e.parts.push([m.key, it.id]); if (!e.pic) e.pic = it.pic; }
+    else merged.set(k, { ...it, parts: [[m.key, it.id]] });
+  }
+  return { list: [...merged.values()].map(({ parts, ...it }) => ({ ...it, site: g.key, siteName: g.name, id: packParts(parts), sources: parts.length })),
+    page: Number(pg) || 1, pagecount: Math.max(1, ...res.map(r => r.v.pagecount)) };
+}
+async function groupDetail(g, id) {
+  const parts = unpackParts(id), found = new Map();
+  const fetchOne = async (m, vid) => (await cmsGet(m, { ac: 'detail', ids: vid }, false, 8000).catch(() => ({}))).list?.[0];
+  await Promise.all(parts.map(async ([k, vid]) => {
+    const m = g.memberSites.find(x => x.key === k); if (!m) return;
+    const d = await fetchOne(m, vid); if (d) found.set(m.key, { m, d });
+  }));
+  const first = [...found.values()][0];
+  if (!first) return null;
+  // Members that were not on the page this title came from: look the title up by name.
+  const base = item(first.m, first.d), want = dedupKey(base);
+  await Promise.all(g.memberSites.filter(m => !found.has(m.key) && (deadUntil.get(m.key) || 0) < Date.now()).map(async m => {
+    const b = await cmsGet(m, { ac: 'detail', wd: base.name }, false, 8000).catch(() => null);
+    const d = (b?.list || []).find(d => dedupKey(item(m, d)) === want);
+    if (d) found.set(m.key, { m, d });
+  }));
+  return { first, all: [...found.values()] };
+}
+
 async function categories(site) {
   const b = await cmsGet(site, { ac: 'list' });
   const all = (b.class || []).map(c => ({ id: str(c.type_id), pid: str(c.type_pid), name: str(c.type_name) }));
@@ -491,8 +575,6 @@ async function peek(url, max = 2e6) {
 function classifyText(text) {
   const t = str(text).trim();
   if (!t) return null;
-  if (/#EXT-X-(TARGETDURATION|STREAM-INF|MEDIA-SEQUENCE)/.test(t)) return { kind: 'stream' };
-  if (/#EXTINF|#genre#/.test(t)) return { kind: 'list', channels: parseLive(t).groups.reduce((n, g) => n + g.channels.length, 0) };
   if (/^[{[]/.test(t)) {
     try {
       const o = parseJsonLoose(t);
@@ -500,6 +582,8 @@ function classifyText(text) {
       if (o && (Array.isArray(o.class) || Array.isArray(o.list))) return { kind: 'vod', total: Number(o.total) || 0 };
     } catch {}
   }
+  if (/#EXT-X-(TARGETDURATION|STREAM-INF|MEDIA-SEQUENCE)/.test(t)) return { kind: 'stream' };
+  if (/#EXTINF|#genre#/.test(t)) return { kind: 'list', channels: parseLive(t).groups.reduce((n, g) => n + g.channels.length, 0) };
   const rows = t.split(/\r?\n/).filter(l => /^[^,#\s][^,]{0,40},\s*(https?|rtmp|rtsp):\/\//.test(l.trim()));
   if (rows.length >= 2) return { kind: 'list', channels: parseLive(t).groups.reduce((n, g) => n + g.channels.length, 0) || rows.length };
   return null;
@@ -511,9 +595,13 @@ async function recognize(input) {
   const unknown = [];
   const direct = classifyText(text);
   if (direct?.kind === 'config') {
-    const f = await configFrom(direct.obj, null);
+    // Exported source sets embed edited / local channel lists as {name, text}; keep those as pasted lists.
+    const embedded = (Array.isArray(direct.obj.lives) ? direct.obj.lives : []).filter(l => l && typeof l.text === 'string' && l.text.trim());
+    const f = await configFrom({ ...direct.obj, lives: (direct.obj.lives || []).filter(l => !(l && l.text)) }, null);
     sites = f.sites.map(s => ({ ...s, info: '来自粘贴的配置' }));
-    lives = f.lives.map(l => ({ ...l, info: '来自粘贴的配置' }));
+    lives = [...f.lives.map(l => ({ ...l, info: '来自粘贴的配置' })),
+      ...embedded.map(l => ({ name: str(l.name) || '分享的频道', text: l.text.trim() + '\n', ok: true,
+        info: `${parseLive(l.text).groups.reduce((n, g) => n + g.channels.length, 0)} 个频道（含频道列表）` }))];
   } else if (direct?.kind === 'list') {
     lives.push({ name: `剪贴板频道 ${direct.channels}台`, text: text.trim() + '\n', ok: true, info: `${direct.channels} 个频道` });
   } else {
@@ -572,8 +660,8 @@ async function recognize(input) {
     if (config.lives.some(l => l.url === 'local:' + f)) haveText.add(textKey(await fsp.readFile(path.join(LIVES, f), 'utf8').catch(() => '')));
   }
   const seenS = new Set(), seenL = new Set();
-  sites = sites.filter(s => { const k = normApi(s.api) + '|' + (s.categories || []).join(','); return !seenS.has(k) && seenS.add(k); })
-    .map(s => ({ ...s, api: normApi(s.api), exists: !s.categories && haveApi.has(normApi(s.api)) }));
+  sites = sites.filter(s => { const k = s.members ? 'g|' + s.name + '|' + s.members.join(',') : normApi(s.api) + '|' + (s.categories || []).join(','); return !seenS.has(k) && seenS.add(k); })
+    .map(s => s.members ? { ...s, exists: config.sites.some(g => g.members && g.name === s.name) } : { ...s, api: normApi(s.api), exists: !s.categories && haveApi.has(normApi(s.api)) });
   lives = lives.filter(l => { const k = l.text ? textKey(l.text) : normUrl(l.url); return !seenL.has(k) && seenL.add(k); })
     .map(l => ({ ...l, exists: l.text ? haveText.has(textKey(l.text)) : haveUrl.has(normUrl(l.url)) }));
   return { sites, lives, unknown };
@@ -1910,6 +1998,10 @@ async function api(route, q, res, req) {
     if (!pinOk(req)) return needPin(res);
     return leader('config', { op: 'liveRaw', body: await readBody(req) });
   }
+  if (route === 'live/merge' && write) {
+    if (!pinOk(req)) return needPin(res);
+    return leader('config', { op: 'liveMerge', body: await readBody(req) });
+  }
   if (route === 'live/thumb' || route === 'live/preview') {
     const u = q.get('u') || '';
     if (!/^https?:\/\//.test(u)) return send(res, 400, { error: 'bad url' });
@@ -1952,7 +2044,7 @@ async function api(route, q, res, req) {
   }
 
   // ---- 直播 ----
-  if (route === 'sites') return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids }) => ({ key, name, kids: !!kids })), live: safety.level === 'kids' ? [] : config.lives.map((l, i) => ({ key: String(i), name: l.name })) });
+  if (route === 'sites') return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, memberSites }) => ({ key, name, kids: !!kids, adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: safety.level === 'kids' ? [] : config.lives.map((l, i) => ({ key: String(i), name: l.name })) });
   if (route === 'live') {
     if (safety.level === 'kids') return send(res, 200, { groups: [] });
     const src = config.lives[Number(q.get('src')) || 0];
@@ -1964,11 +2056,11 @@ async function api(route, q, res, req) {
   if (route === 'person') {
     const name = (q.get('name') || '').trim();
     if (!name) return send(res, 400, { error: '缺少名字' });
-    return send(res, 200, { list: await person(name, q.get('role'), SITES) });
+    return send(res, 200, { list: await person(name, q.get('role'), SITES.filter(s => !s.memberSites)) });
   }
   if (route === 'search') {
     const wd = (q.get('wd') || '').trim();
-    const out = await Promise.all(SITES.map(s => cmsGet(s, { ac: 'detail', wd }, false, 8000)
+    const out = await Promise.all(SITES.filter(s => !s.memberSites).map(s => cmsGet(s, { ac: 'detail', wd }, false, 8000)
       .then(b => ({ site: s.key, list: (b.list || []).map(d => ({ d, it: item(s, d) })).filter(x => itemOk(s, x.it)) }))
       .catch(e => ({ site: s.name, error: e.message, list: [] }))));
     // Many sites' `wd` also matches vod_actor / vod_director. Any credited name containing the query counts;
@@ -1993,7 +2085,18 @@ async function api(route, q, res, req) {
   const site = SITES.find(s => s.key === q.get('site')) || SITES[0];
   if (!site) return send(res, 404, { error: safety.level === 'kids' ? '儿童模式下没有少儿源，去「设置」添加' : '还没有点播源，去「设置」里添加' });
 
-  if (route === 'categories') return send(res, 200, { categories: await categories(site) });
+  if (route === 'categories') return send(res, 200, { categories: site.memberSites ? await groupCategories(site) : await categories(site) });
+  if (route === 'list' && site.memberSites) return send(res, 200, await groupList(site, q.get('t') || '', q.get('pg') || '1'));
+  if (route === 'detail' && site.memberSites) {
+    const gd = await groupDetail(site, q.get('id'));
+    if (!gd) return send(res, 404, { error: '没有这部（聚合源里的成员都打不开或没有）' });
+    const { first, all } = gd, it = item(first.m, first.d);
+    if (!itemOk(first.m, it)) return send(res, 403, { error: '当前安全级别下不可看' });
+    const ls = all.flatMap(({ m, d }) => lines(d).map(l => ({ ...l, name: `${m.name} · ${l.name}` })));
+    const d = first.d;
+    return send(res, 200, { ...it, site: site.key, siteName: site.name, id: q.get('id'), quality: it.quality || bestQuality(ls.map(l => l.quality)), blurb: clean(d.vod_content),
+      actor: str(d.vod_actor), director: str(d.vod_director), actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: ls });
+  }
   if (route === 'list') {
     let t = q.get('t') || '';
     // Whitelisted (e.g. 少儿) sites: "latest" comes from their first allowed category.
@@ -2034,6 +2137,30 @@ rpcHandlers.config = async ({ op, body: b }) => {
     await fsp.writeFile(path.join(LIVES, file), str(b.text));
     broadcastReload();
     return { body: { url: 'local:' + file } };
+  } else if (op === 'liveMerge') {
+    // Merge several live sources into one local m3u: same group name joins, same stream url is kept once.
+    const srcs = (Array.isArray(b.sources) ? b.sources : []).filter(s => s && s.url);
+    const groups = new Map(), seen = new Set(), failed = [];
+    let dup = 0;
+    await Promise.all(srcs.map(async s => {
+      try { s.parsed = parseLive(await liveText(str(s.url), true), { url: str(s.url), name: str(s.name) }).groups; }
+      catch (e) { failed.push(str(s.name) || str(s.url)); }
+    }));
+    for (const s of srcs) for (const g of s.parsed || []) for (const c of g.channels) {
+      if (seen.has(c.url)) { dup++; continue; }
+      seen.add(c.url);
+      if (!groups.has(g.name)) groups.set(g.name, []);
+      groups.get(g.name).push(c);
+    }
+    if (!seen.size) return { code: 422, body: { error: '选中的直播源里没解析出频道' + (failed.length ? '（打不开：' + failed.join('、') + '）' : '') } };
+    const clean = t => str(t).replace(/["\r\n]/g, ' ').trim();
+    const out = ['#EXTM3U'];
+    for (const [g, chs] of groups) for (const c of chs)
+      out.push(`#EXTINF:-1${c.logo ? ` tvg-logo="${clean(c.logo)}"` : ''} group-title="${clean(g)}",${clean(c.name).replace(/,/g, ' ')}`, c.url);
+    const file = crypto.randomBytes(5).toString('hex') + '.m3u';
+    await fsp.writeFile(path.join(LIVES, file), out.join('\n') + '\n');
+    broadcastReload();
+    return { body: { url: 'local:' + file, channels: seen.size, groups: groups.size, dup, failed } };
   } else if (op === 'import') {
     if (!/^https?:\/\//.test(b.url || '')) return { code: 400, body: { error: '要 http(s) 地址' } };
     const found = await importFrom(b.url);
@@ -2057,7 +2184,16 @@ rpcHandlers.config = async ({ op, body: b }) => {
       } else if (/^https?:\/\//.test(str(l.url))) lives.push({ name: str(l.name) || hostOf(l.url), url: str(l.url) });
     }
     const haveApi = new Set(config.sites.filter(s => !s.categories).map(s => normApi(s.api)));
-    const sites = (Array.isArray(b.sites) ? b.sites : []).filter(s => s.categories || !haveApi.has(normApi(s.api)));
+    const incoming = Array.isArray(b.sites) ? b.sites : [];
+    const apiOf = new Map(incoming.filter(s => !s.members).map(s => [str(s.key), s.api]));
+    const sites = incoming.filter(s => s.members || s.categories || !haveApi.has(normApi(s.api)));
+    // A pasted group refers to its members by key; re-point them at whatever source has the same link here.
+    for (const g of sites.filter(s => s.members)) {
+      g.members = g.members.map(k => {
+        const api = apiOf.get(str(k)); if (!api) return k;
+        return config.sites.find(x => x.api && normApi(x.api) === normApi(api) && !x.categories)?.key || str(k);
+      });
+    }
     const before = { s: config.sites.length, l: config.lives.length };
     config = normalize({ sites: [...config.sites, ...sites], lives: [...config.lives, ...lives] });
     extra = { added: { sites: config.sites.length - before.s, lives: config.lives.length - before.l } };

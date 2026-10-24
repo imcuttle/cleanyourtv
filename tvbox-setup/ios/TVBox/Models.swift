@@ -7,6 +7,7 @@ struct Site: Identifiable, Hashable, Codable {
     var kids: Bool? = nil        // shown in 儿童 mode
     var adult: Bool? = nil       // only shown at 安全级别 = 全部
     var categories: [String]? = nil  // TVBox-style whitelist of category names
+    var members: [String]? = nil     // 聚合源: keys of the member sites; browsed / searched / played through all of them
     var id: String { key }
 }
 
@@ -114,11 +115,22 @@ enum Safety {
     }
 
     static func visible(_ sites: [Site]) -> [Site] {
+        let ok: (Site) -> Bool
         switch level {
-        case "kids": return sites.filter { $0.kids == true }
-        case "standard": return sites.filter { $0.adult != true }
-        default: return sites
+        case "kids": ok = { $0.kids == true }
+        case "standard": ok = { $0.adult != true }
+        default: ok = { _ in true }
         }
+        let keys = Set(sites.filter { $0.members == nil && ok($0) }.map(\.key))
+        // A 聚合源 shows up when at least one of its members is allowed at this level.
+        return sites.filter { $0.members == nil ? keys.contains($0.key) : ($0.members ?? []).contains { keys.contains($0) } }
+    }
+
+    /// 成人 sources (or a 聚合源 containing one) get no 豆瓣 rows on the home page.
+    static func adultSite(_ s: Site) -> Bool {
+        if s.adult == true { return true }
+        guard let m = s.members else { return false }
+        return Config.shared.sites.contains { $0.adult == true && m.contains($0.key) }
     }
 }
 
@@ -126,6 +138,33 @@ enum Safety {
 final class Config: ObservableObject {
     static let shared = Config()
     @Published var sites: [Site] { didSet { save() } }
+
+    /// Same link (ignoring ac / pg / t / wd params, fragment, trailing slash) = same source: keep the first and point
+    /// 聚合源 members at it. Run when leaving 设置, not on every keystroke. Returns how many were removed.
+    @discardableResult func dedupe() -> Int {
+        var seen: [String: String] = [:], remap: [String: String] = [:], out: [Site] = []
+        for s in sites {
+            if s.members != nil || !s.api.hasPrefix("http") { out.append(s); continue }
+            let sig = Recognizer.normApi(s.api) + "|" + (s.categories ?? []).joined(separator: ",")
+            if let keep = seen[sig] { remap[s.key] = keep; continue }
+            seen[sig] = s.key
+            out.append(s)
+        }
+        var seenLive = Set<String>()
+        let ls = lives.filter { l in
+            l.text != nil || !l.url.hasPrefix("http") || seenLive.insert(Recognizer.normURL(l.url)).inserted
+        }
+        let removed = (sites.count - out.count) + (lives.count - ls.count)
+        guard removed > 0 else { return 0 }
+        sites = out.map { s in
+            guard var m = s.members else { return s }
+            m = m.map { remap[$0] ?? $0 }
+            var u = Set<String>(); m = m.filter { u.insert($0).inserted }
+            var s = s; s.members = m; return s
+        }
+        lives = ls
+        return removed
+    }
     @Published var lives: [LiveSource] {
         didSet {
             if lives.contains(where: { $0.uid == nil }) { lives = Config.withIDs(lives) }
@@ -223,5 +262,53 @@ final class Config: ObservableObject {
         for n in newLives where !l.contains(where: { n.text == nil ? $0.url == n.url : $0.text?.trimmingCharacters(in: .whitespacesAndNewlines) == n.text?.trimmingCharacters(in: .whitespacesAndNewlines) }) { l.append(n) }
         sites = s
         lives = l
+    }
+}
+
+/// Reachability of each 点播源. Only rows that are actually on screen in the source picker ask for a ping
+/// (6 at a time, one retry); results are kept for 5 minutes so scrolling back / switching is instant.
+@MainActor
+final class SiteHealth: ObservableObject {
+    static let shared = SiteHealth()
+    struct Entry { var ok: Bool; var text: String; var at: Date }
+    @Published private(set) var entries: [String: Entry] = [:]
+    private var busy = Set<String>()
+    private var queue: [String] = []
+    private var running = 0
+
+    func label(_ s: Site) -> String? {
+        guard let e = entries[s.api] else { return nil }
+        return e.ok ? e.text : "不通"
+    }
+    func isDead(_ s: Site) -> Bool { entries[s.api].map { !$0.ok } ?? false }
+
+    /// Called from a row's onAppear.
+    func request(_ s: Site, force: Bool = false) {
+        guard !s.api.isEmpty, !busy.contains(s.api) else { return }
+        if !force, let e = entries[s.api], Date().timeIntervalSince(e.at) < 300 { return }
+        busy.insert(s.api)
+        queue.append(s.api)
+        drain()
+    }
+
+    private func drain() {
+        while running < 6, !queue.isEmpty {
+            let api = queue.removeFirst()
+            running += 1
+            Task {
+                var r = ""
+                for k in 0...1 {
+                    if k > 0 { try? await Task.sleep(nanoseconds: 600_000_000) }
+                    r = await API.checkSite(api)
+                    if r.hasPrefix("✓") { break }
+                }
+                let ok = r.hasPrefix("✓")
+                let ms = r.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+                entries[api] = Entry(ok: ok, text: ok ? ms : "不通", at: Date())
+                busy.remove(api)
+                running -= 1
+                drain()
+            }
+        }
     }
 }

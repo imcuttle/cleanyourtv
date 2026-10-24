@@ -64,6 +64,7 @@ enum API {
 
     /// Leaf categories only (top-level ones return empty lists on these sites), filtered by 安全级别.
     static func categories(_ site: Site) async throws -> [VodCategory] {
+        if site.members != nil { return await groupCategories(site) }
         let obj = try await get(site, ["ac": "list"])
         let all = (obj["class"] as? [[String: Any]] ?? []).map {
             VodCategory(id: str($0["type_id"]), pid: str($0["type_pid"]), name: str($0["type_name"]))
@@ -95,6 +96,7 @@ enum API {
     }
 
     static func list(_ site: Site, typeId: String, page: Int) async throws -> ([VodItem], Int) {
+        if site.members != nil { return try await groupList(site, typeId: typeId, page: page) }
         var t = typeId
         // Whitelisted (少儿) sites / kids mode: "latest" comes from the first allowed category.
         if t.isEmpty, !(site.categories ?? []).isEmpty || Safety.level == "kids" {
@@ -119,7 +121,8 @@ enum API {
 
     /// 苹果CMS has no actor filter, but some sites' `wd` also matches credits. Search every site (two pages),
     /// keep titles whose credits really contain the name, one per title + year, newest first.
-    static func person(_ name: String, role: String, sites: [Site]) async -> [VodItem] {
+    static func person(_ name: String, role: String, sites allSites: [Site]) async -> [VodItem] {
+        let sites = allSites.filter { $0.members == nil }
         let field = role == "director" ? "vod_director" : "vod_actor"
         let found = await withTaskGroup(of: [(Site, [String: Any])].self) { group in
             for s in sites { for pg in [1, 2] {
@@ -153,8 +156,9 @@ enum API {
 
     /// Same requests as searchAll (shared cache), plus works whose 演员 / 导演 credits contain the query —
     /// many sites' `wd` also matches those fields. Grouped per credited person (exact name first, then most works).
-    static func searchWithCredits(_ wd: String, sites: [Site]) async -> (items: [VodItem], failed: [String], people: [PersonHit]) {
-        await withTaskGroup(of: (Int, [[String: Any]]?).self) { group in
+    static func searchWithCredits(_ wd: String, sites allSites: [Site]) async -> (items: [VodItem], failed: [String], people: [PersonHit]) {
+        let sites = allSites.filter { $0.members == nil }   // a 聚合源 is just its members; they are searched directly
+        return await withTaskGroup(of: (Int, [[String: Any]]?).self) { group in
             for (i, s) in sites.enumerated() {
                 group.addTask { (i, (try? await get(s, ["ac": "detail", "wd": wd], timeout: 8))?["list"] as? [[String: Any]]) }
             }
@@ -187,6 +191,7 @@ enum API {
     }
 
     static func detail(_ item: VodItem) async throws -> VodDetail {
+        if item.site.members != nil { return try await groupDetail(item) }
         let obj = try await get(item.site, ["ac": "detail", "ids": item.vodId])
         guard let d = (obj["list"] as? [[String: Any]])?.first else { throw URLError(.zeroByteResource) }
         let froms = str(d["vod_play_from"]).components(separatedBy: "$$$")
@@ -207,6 +212,121 @@ enum API {
                          director: str(d["vod_director"]), content: clean(str(d["vod_content"])), lines: lines,
                          actors: splitPeople(str(d["vod_actor"])), directors: splitPeople(str(d["vod_director"])),
                          typeId: str(d["type_id"]), typeName: str(d["type_name"]), lang: str(d["vod_lang"]))
+    }
+
+    // MARK: - 聚合源
+    // One entry that fans out to several 点播源 and merges the answers. A member that fails is skipped for a minute.
+
+    private final class DeadSet: @unchecked Sendable {
+        private let lock = NSLock()
+        private var until: [String: Date] = [:]
+        func mark(_ k: String) { lock.lock(); until[k] = Date().addingTimeInterval(60); lock.unlock() }
+        func isDead(_ k: String) -> Bool { lock.lock(); defer { lock.unlock() }; return (until[k] ?? .distantPast) > Date() }
+    }
+    private static let dead = DeadSet()
+
+    static func groupMembers(_ g: Site) -> [Site] {
+        let all = Config.shared.sites
+        let ms = Safety.visible((g.members ?? []).compactMap { k in all.first { $0.key == k && $0.members == nil } })
+        let live = ms.filter { !dead.isDead($0.key) }
+        return live.isEmpty ? ms : live
+    }
+
+    private static func catKey(_ n: String) -> String { n.hasSuffix("片") ? String(n.dropLast()) : n }
+    private static func dedupKey(_ name: String, _ year: String) -> String { name.filter { !$0.isWhitespace } + "|" + year }
+    private static func pack(_ parts: [(String, String)]) -> String {
+        let json = (try? JSONSerialization.data(withJSONObject: parts.map { [$0.0, $0.1] })) ?? Data()
+        return "g." + json.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    }
+    private static func unpack(_ id: String) -> [(String, String)] {
+        var b = String(id.dropFirst(2)).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        b += String(repeating: "=", count: (4 - b.count % 4) % 4)
+        guard let d = Data(base64Encoded: b), let a = try? JSONSerialization.jsonObject(with: d) as? [[String]] else { return [] }
+        return a.compactMap { $0.count == 2 ? ($0[0], $0[1]) : nil }
+    }
+
+    static func groupCategories(_ g: Site) async -> [VodCategory] {
+        let ms = groupMembers(g)
+        let lists = await withTaskGroup(of: (Int, [VodCategory])?.self) { group in
+            for (i, m) in ms.enumerated() { group.addTask {
+                do { return (i, try await categories(m)) } catch { dead.mark(m.key); return nil }
+            } }
+            var r: [(Int, [VodCategory])] = []
+            for await x in group { if let x { r.append(x) } }
+            return r.sorted { $0.0 < $1.0 }
+        }
+        var seen = Set<String>(), out: [VodCategory] = []
+        for (_, cs) in lists { for c in cs where seen.insert(catKey(c.name)).inserted { out.append(VodCategory(id: catKey(c.name), pid: "", name: c.name)) } }
+        return out
+    }
+
+    static func groupList(_ g: Site, typeId: String, page: Int) async throws -> ([VodItem], Int) {
+        let ms = groupMembers(g)
+        let res = await withTaskGroup(of: (Int, Site, [VodItem], Int)?.self) { group in
+            for (i, m) in ms.enumerated() { group.addTask {
+                do {
+                    var t = ""
+                    if !typeId.isEmpty {
+                        guard let c = try await categories(m).first(where: { catKey($0.name) == typeId }) else { return nil }
+                        t = c.id
+                    }
+                    let r = try await list(m, typeId: t, page: page)
+                    return (i, m, r.0, r.1)
+                } catch { dead.mark(m.key); return nil }
+            } }
+            var r: [(Int, Site, [VodItem], Int)] = []
+            for await x in group { if let x { r.append(x) } }
+            return r.sorted { $0.0 < $1.0 }
+        }
+        if res.isEmpty { throw URLError(.cannotConnectToHost) }
+        var order: [String] = [], merged: [String: (VodItem, [(String, String)])] = [:]
+        for round in 0..<(res.map { $0.2.count }.max() ?? 0) {
+            for (_, m, items, _) in res where round < items.count {
+                let it = items[round], k = dedupKey(it.name, it.year)
+                if var e = merged[k] { e.1.append((m.key, it.vodId)); if e.0.pic.isEmpty { e.0 = VodItem(site: g, vodId: "", name: e.0.name, pic: it.pic, remarks: e.0.remarks, typeName: e.0.typeName, year: e.0.year, blurb: e.0.blurb, typeId: e.0.typeId) }; merged[k] = e }
+                else { merged[k] = (it, [(m.key, it.vodId)]); order.append(k) }
+            }
+        }
+        let out = order.compactMap { k -> VodItem? in
+            guard let (it, parts) = merged[k] else { return nil }
+            return VodItem(site: g, vodId: pack(parts), name: it.name, pic: it.pic, remarks: it.remarks, typeName: it.typeName, year: it.year, blurb: it.blurb, typeId: it.typeId)
+        }
+        return (out, res.map { $0.3 }.max() ?? 1)
+    }
+
+    static func groupDetail(_ item: VodItem) async throws -> VodDetail {
+        let ms = groupMembers(item.site)
+        func one(_ m: Site, _ id: String) async -> VodDetail? {
+            try? await detail(VodItem(site: m, vodId: id, name: item.name, pic: "", remarks: "", typeName: ""))
+        }
+        var found: [(Int, Site, VodDetail)] = []
+        let parts = unpack(item.vodId)
+        await withTaskGroup(of: (Int, Site, VodDetail)?.self) { group in
+            for (i, m) in ms.enumerated() {
+                guard let id = parts.first(where: { $0.0 == m.key })?.1 else { continue }
+                group.addTask { await one(m, id).map { (i, m, $0) } }
+            }
+            for await x in group { if let x { found.append(x) } }
+        }
+        // Members that were not on the page this title came from: look it up by name.
+        let have = Set(found.map { $0.1.key }), want = dedupKey(item.name, item.year)
+        await withTaskGroup(of: (Int, Site, VodDetail)?.self) { group in
+            for (i, m) in ms.enumerated() where !have.contains(m.key) {
+                group.addTask {
+                    guard let obj = try? await get(m, ["ac": "detail", "wd": item.name], timeout: 8),
+                          let hit = items(m, obj).first(where: { dedupKey($0.name, $0.year) == want }) else { return nil }
+                    return await one(m, hit.vodId).map { (i, m, $0) }
+                }
+            }
+            for await x in group { if let x { found.append(x) } }
+        }
+        found.sort { $0.0 < $1.0 }
+        guard let first = found.first?.2 else { throw URLError(.zeroByteResource) }
+        let lines = found.flatMap { (_, m, d) in d.lines.map { PlayLine(name: "\(m.name) · \($0.name)", episodes: $0.episodes) } }
+        var out = first
+        out = VodDetail(year: first.year, area: first.area, actor: first.actor, director: first.director, content: first.content, lines: lines,
+                        actors: first.actors, directors: first.directors, typeId: first.typeId, typeName: first.typeName, lang: first.lang)
+        return out
     }
 
     // MARK: - Source checks

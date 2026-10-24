@@ -340,6 +340,65 @@ const javIO = new IntersectionObserver(es => es.forEach(e => {
 function observeJav(root = document) { $$('.card[data-jav]', root).forEach(el => { if (!el.dataset.jobs) { el.dataset.jobs = 1; javIO.observe(el); } }); }
 
 // ---------- boot / source picker ----------
+// Source menu: only rows inside the menu's viewport are pinged (IntersectionObserver, 6 at a time, one retry).
+// Results are kept 5 min, so scrolling back / switching is instant.
+const siteHealth = new Map(); // api -> { ok, ms, total, at }
+const healthBusy = new Set();
+const HEALTH_TTL = 5 * 60e3;
+let menuIO = null, healthQ = [], healthRun = 0;
+function renderMenu() {
+  const h = s => siteHealth.get(s.api);
+  const tag = s => { const t = h(s); return s.group ? `<b class="hs">聚合 ${s.group}</b>` : !s.api || s.local ? '' : !t ? '<b class="hs">…</b>' : t.ok ? `<b class="hs ok">${t.ms}ms</b>` : '<b class="hs bad">不通</b>'; };
+  $('#siteMenu').innerHTML = `<div class="mhead">点播源 · ${state.sites.length}<span class="mre" data-re="1" title="重新测速可见的源">重测</span></div>` + state.sites.map(s =>
+    `<button data-k="${esc(s.key)}" class="${s.key === state.site ? 'on' : ''}${h(s) && !h(s).ok ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${tag(s)}${s.key === 'local' || s.local ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('');
+  watchMenu();
+}
+function watchMenu() {
+  if (menuIO) menuIO.disconnect();
+  if ($('#siteMenu').hidden) return;
+  menuIO = new IntersectionObserver(es => es.forEach(en => {
+    if (!en.isIntersecting) return;
+    const s = state.sites.find(x => x.key === en.target.dataset.k);
+    if (s && s.api && !s.local) queueHealth(s);
+  }), { root: $('#siteMenu') });
+  $$('#siteMenu button[data-k]').forEach(b => menuIO.observe(b));
+}
+function queueHealth(s, force) {
+  const t = siteHealth.get(s.api);
+  if (healthBusy.has(s.api) || (!force && t && Date.now() - t.at < HEALTH_TTL)) return;
+  healthBusy.add(s.api); healthQ.push(s); drainHealth();
+}
+async function drainHealth() {
+  while (healthRun < 6 && healthQ.length) {
+    const s = healthQ.shift(); healthRun++;
+    (async () => {
+      let r;
+      for (let k = 0; k < 2; k++) {
+        r = await api('check', { api: s.api }, null).catch(e => ({ ok: false, error: e.message }));
+        if (r.ok) break;
+      }
+      siteHealth.set(s.api, { ok: !!r.ok, ms: r.ms, total: r.total, at: Date.now() });
+      healthBusy.delete(s.api); healthRun--;
+      const b = $(`#siteMenu button[data-k="${CSS.escape(s.key)}"]`);
+      if (b && !$('#siteMenu').hidden) {
+        const t = siteHealth.get(s.api);
+        let hs = $('.hs', b);
+        if (!hs) { hs = document.createElement('b'); b.insertBefore(hs, $('em.x', b)); }
+        hs.className = 'hs ' + (t.ok ? 'ok' : 'bad'); hs.textContent = t.ok ? t.ms + 'ms' : '不通';
+        b.classList.toggle('dead', !t.ok);
+      }
+      drainHealth();
+    })();
+  }
+}
+function pingMenu(force) {
+  if (force) $$('#siteMenu button[data-k]').forEach(b => {
+    const s = state.sites.find(x => x.key === b.dataset.k), r = b.getBoundingClientRect(), m = $('#siteMenu').getBoundingClientRect();
+    if (s && s.api && !s.local && r.bottom > m.top && r.top < m.bottom) queueHealth(s, true);
+  });
+  else watchMenu();
+}
+
 async function loadSites() {
   const j = await api('sites', {}, null);
   state.sites = j.sites; state.lives = j.live; state.level = j.level;
@@ -355,11 +414,27 @@ async function loadSites() {
   chartCat = null;
   $('#levelTag').textContent = j.level === 'kids' ? '儿童模式' : '无限制';
   $('#levelTag').className = 'level ' + j.level;
-  $('#siteMenu').innerHTML = `<div class="mhead">点播源 · ${state.sites.length}</div>` + state.sites.map(s =>
-    `<button data-k="${esc(s.key)}" class="${s.key === state.site ? 'on' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}</button>`).join('');
+  renderMenu();
 }
-$('#siteBtn').onclick = e => { e.stopPropagation(); $('#siteMenu').hidden = !$('#siteMenu').hidden; $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); };
-$('#siteMenu').onclick = e => {
+$('#siteBtn').onclick = e => { e.stopPropagation(); $('#siteMenu').hidden = !$('#siteMenu').hidden; $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) pingMenu(); };
+$('#siteMenu').onclick = async e => {
+  if (e.target.closest('[data-re]')) { e.stopPropagation(); return pingMenu(true); }
+  const del = e.target.closest('[data-del]');
+  if (del) {
+    e.stopPropagation();
+    const key = del.dataset.del, s = state.sites.find(x => x.key === key); if (!s) return;
+    if (!confirm(`删除点播源「${s.name}」？`)) return;
+    try {
+      const cfg = await get('/api/config');
+      await req('PUT', '/api/config', { ...cfg, sites: cfg.sites.filter(x => x.key !== key) });
+      const was = state.site === key;
+      apiMemo.clear(); state.cats = []; await loadSites();
+      toast(`已删除「${s.name}」`);
+      if (was) route();
+      else if (location.hash.startsWith('#/settings')) renderSettings();
+    } catch (err) { toast(err.message); }
+    return;
+  }
   const b = e.target.closest('button[data-k]'); if (!b) return;
   state.site = localStorage.site = b.dataset.k; state.cats = [];
   closeMenu();
@@ -620,6 +695,7 @@ async function renderHome() {
   const favList = favs.all().filter(f => state.sites.some(s => s.key === f.site)).slice(0, 30);
   const kids = state.level === 'kids';
   const own = site === 'local'; // 本地媒体: its own folders only, no 豆瓣
+  const adultSite = !!state.sites.find(x => x.key === site)?.adult; // 成人源: no 豆瓣 rows either
   view.innerHTML = `
     <div class="hero" id="hero"></div>
     <div class="rows">
@@ -633,7 +709,7 @@ async function renderHome() {
     </div>`;
   hero(latest.list.slice(0, 6));
   observeRatings(view);
-  if (!kids && !own) {
+  if (!kids && !own && !adultSite) {
     // Which 豆瓣 rows to show is a per-browser setting (设置 → 首页豆瓣分类); only the enabled ones are fetched.
     const on = dbRows(), kinds = DB_ROWS.filter(([k]) => on[k]);
     Promise.all(kinds.map(([k]) => api('douban/hot', { type: k }).catch(() => ({ list: [] })))).then(res => {
@@ -1518,18 +1594,149 @@ const thumbIO = new IntersectionObserver(es => es.forEach(e => {
   thumbPump();
 }), { rootMargin: '300px' });
 
+// ---- 直播源 picker: one fixed-size button + a popover (search, delete, bulk). Switching only reloads #liveBody. ----
+const liveHealth = new Map();           // url -> { ok, text }
+const lm = { cfg: [], bulk: false, sel: new Set(), q: '', busy: false };
+const liveUrlOf = key => lm.cfg[Number(key)]?.url || '';
+async function lmRefresh() { lm.cfg = (await get('/api/config', null)).lives || []; }
+function lmRender() {
+  const box = $('#llist'); if (!box) return;
+  const cur = localStorage.live, q = lm.q.toLowerCase();
+  const rows = state.lives.filter(l => !q || l.name.toLowerCase().includes(q));
+  box.innerHTML = rows.map(l => {
+    const h = liveHealth.get(liveUrlOf(l.key));
+    const st = h === 'busy' ? '<b class="hs">测速中…</b>' : h ? `<b class="hs ${h.ok ? 'ok' : 'bad'}">${esc(h.text)}</b>` : '';
+    return `<div class="lrow ${l.key === cur ? 'on' : ''} ${h && h !== 'busy' && !h.ok ? 'dead' : ''}" data-k="${esc(l.key)}">
+      ${lm.bulk ? `<input type="checkbox" class="lsel" ${lm.sel.has(l.key) ? 'checked' : ''}>` : ''}<span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${st}
+      <em class="x" data-del="${esc(l.key)}" title="删除这个直播源">×</em></div>`;
+  }).join('') || '<div class="lan" style="padding:10px">没有匹配的直播源</div>';
+  $('#lmCount').textContent = lm.bulk ? `已选 ${lm.sel.size} / ${state.lives.length}` : `${state.lives.length} 个`;
+  $('#lmBar').hidden = !lm.bulk;
+  $('#lmBulk').classList.toggle('on', lm.bulk);
+}
+async function lmSave(mutate) {
+  const curUrl = liveUrlOf(localStorage.live);
+  const cfg = await get('/api/config', null);
+  await req('PUT', '/api/config', { ...cfg, lives: mutate(cfg.lives) });
+  await Promise.all([loadSites(), lmRefresh()]);
+  const i = lm.cfg.findIndex(l => l.url === curUrl);
+  localStorage.live = String(i >= 0 ? i : 0);
+  lm.sel.clear();
+  $('#lmName').textContent = state.lives.find(l => l.key === localStorage.live)?.name || '无直播源';
+  lmRender();
+  if (i < 0 && location.hash.startsWith('#/live')) loadLiveBody();
+}
+async function lmTest(keys) {
+  const q = keys.filter(k => liveUrlOf(k));
+  keys.forEach(k => liveHealth.set(liveUrlOf(k), 'busy')); lmRender();
+  await Promise.all(Array.from({ length: Math.min(3, q.length) }, async () => {
+    while (q.length) {
+      const k = q.shift(), url = liveUrlOf(k), name = state.lives.find(l => l.key === k)?.name || '';
+      let j;
+      for (let t = 0; t < 3; t++) {            // network blips: retry twice before calling a source dead
+        if (t) await new Promise(ok => setTimeout(ok, 600 * t));
+        j = await api('checklive', { url, name }, null).catch(e => ({ ok: false, error: e.message }));
+        if (j.ok) break;
+      }
+      liveHealth.set(url, { ok: !!j.ok, text: j.channels ? `${j.channels}台 · ${j.alive}/${j.sampled}` : '不通' });
+      lmRender();
+    }
+  }));
+}
+async function lmOp(op) {
+  if (lm.busy) return;
+  const keys = state.lives.map(l => l.key), sel = keys.filter(k => lm.sel.has(k));
+  const dropKeys = ks => { const s = new Set(ks.map(Number)); return lives => lives.filter((_, i) => !s.has(i)); };
+  try {
+    lm.busy = true;
+    if (op === 'all') { const all = sel.length === keys.length; lm.sel = new Set(all ? [] : keys); }
+    else if (op === 'invert') lm.sel = new Set(keys.filter(k => !lm.sel.has(k)));
+    else if (op === 'test') await lmTest(sel.length ? sel : keys);
+    else if (op === 'delsel') {
+      if (!sel.length) return toast('先勾选要删除的直播源');
+      if (confirm(`删除选中的 ${sel.length} 个直播源？`)) { await lmSave(dropKeys(sel)); toast(`已删除 ${sel.length} 个`); }
+    } else if (op === 'delbad') {
+      const todo = keys.filter(k => !liveHealth.get(liveUrlOf(k)));
+      if (todo.length) { toast(`还有 ${todo.length} 个没测过，先测速…`); await lmTest(todo); }
+      const bad = keys.filter(k => { const h = liveHealth.get(liveUrlOf(k)); return h && h !== 'busy' && !h.ok; });
+      if (!bad.length) return toast('没有不通的直播源');
+      if (confirm(`删除 ${bad.length} 个不通的直播源？（已自动重试 2 次）`)) { await lmSave(dropKeys(bad)); toast(`已删除 ${bad.length} 个`); }
+    } else if (op === 'merge') {
+      if (sel.length < 2) return toast('至少勾选 2 个直播源');
+      const name = prompt(`把选中的 ${sel.length} 个直播源合并成一个（同分组归并，相同地址去重）。\n新源名称：`, '合并直播源');
+      if (!name) return;
+      const out = await req('POST', '/api/live/merge', { sources: sel.map(k => ({ name: state.lives.find(l => l.key === k).name, url: liveUrlOf(k) })) });
+      const first = Math.min(...sel.map(Number)), drop = new Set(sel.map(Number));
+      await lmSave(lives => lives.flatMap((l, i) => i === first ? [{ name, url: out.url }] : drop.has(i) ? [] : [l]));
+      toast(`合并完成：${out.groups} 个分组、${out.channels} 个频道，去重 ${out.dup}`);
+    }
+  } catch (e) { toast(e.message); }
+  finally { lm.busy = false; lmRender(); }
+}
+document.addEventListener('click', e => {
+  const m = $('#liveMenu'); if (!m || m.hidden) return;
+  if (e.target.closest('.lpick') || e.target.closest('#liveMenu')) return;
+  m.hidden = true; $('#liveBtn')?.classList.remove('open');
+});
+
+let liveSrc = '';
 async function renderLive() {
   if (!state.lives.length) {
     view.innerHTML = `<div class="page"><h1>直播</h1><p class="empty">${state.level === 'kids' ? '儿童模式下直播已关闭。' : '没有直播源，去 <a href="#/settings"><u>设置</u></a> 添加。'}</p></div>`;
     return;
   }
-  const src = state.lives.some(l => l.key === localStorage.live) ? localStorage.live : state.lives[0].key;
-  view.innerHTML = `<div class="page"><div class="pagehead"><h1>直播</h1>
-    <div class="seg">${state.lives.map(l => `<button data-src="${esc(l.key)}" class="${l.key === src ? 'on' : ''}">${esc(l.name)}</button>`).join('')}</div>
-    <input id="chq" class="find" type="search" placeholder="搜频道"></div>
-    <div id="liveBody">${spinner}</div></div>`;
-  $$('[data-src]').forEach(b => b.onclick = () => { localStorage.live = b.dataset.src; newPage(); renderLive().catch(e => { if (!isAbort(e)) toast(e.message); }); });
+  if (!state.lives.some(l => l.key === localStorage.live)) localStorage.live = state.lives[0].key;
+  // The frame is built once; switching source only swaps #liveBody (no re-layout of the header, no jump).
+  if (!$('#liveHead')) {
+    view.innerHTML = `<div class="page"><div class="pagehead" id="liveHead"><h1>直播</h1>
+      <div class="lpick"><button id="liveBtn" class="sitebtn lbtn" type="button"><span id="lmName"></span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <div id="liveMenu" class="menu lmenu" hidden>
+          <div class="lm-top"><input id="lmq" class="find" type="search" placeholder="搜直播源" autocomplete="off"><button class="small" id="lmBulk" type="button">批量</button></div>
+          <div class="lm-bar" id="lmBar" hidden>
+            <button class="small" data-lm="all">全选</button><button class="small" data-lm="invert">反选</button><button class="small" data-lm="test">测速</button>
+            <button class="small" data-lm="merge">合并</button><button class="small dng" data-lm="delsel">删除选中</button><button class="small dng" data-lm="delbad">删除不通的</button></div>
+          <div class="lm-list" id="llist"></div>
+          <div class="lm-foot"><span id="lmCount" class="lan"></span><a href="#/settings" class="lan"><u>在设置里管理</u></a></div>
+        </div></div>
+      <input id="chq" class="find" type="search" placeholder="搜频道"></div>
+      <div id="liveBody"></div></div>`;
+    $('#liveBtn').onclick = async e => {
+      e.stopPropagation();
+      const m = $('#liveMenu'); m.hidden = !m.hidden; $('#liveBtn').classList.toggle('open', !m.hidden);
+      if (!m.hidden) { lmRender(); await lmRefresh().catch(() => {}); lmRender(); $('.lrow.on', m)?.scrollIntoView({ block: 'nearest' }); }
+    };
+    $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lmRender(); };
+    $('#lmBulk').onclick = () => { lm.bulk = !lm.bulk; lm.sel.clear(); lmRender(); };
+    $('#lmBar').onclick = e => { const b = e.target.closest('[data-lm]'); if (b) lmOp(b.dataset.lm); };
+    $('#liveMenu').onclick = e => {
+      const del = e.target.closest('[data-del]');
+      if (del) {
+        e.stopPropagation();
+        const k = del.dataset.del, l = state.lives.find(x => x.key === k); if (!l) return;
+        if (confirm(`删除直播源「${l.name}」？`)) lmSave(lives => lives.filter((_, i) => i !== Number(k))).then(() => toast(`已删除「${l.name}」`), err => toast(err.message));
+        return;
+      }
+      const row = e.target.closest('.lrow'); if (!row) return;
+      if (lm.bulk) { const k = row.dataset.k; lm.sel.has(k) ? lm.sel.delete(k) : lm.sel.add(k); return lmRender(); }
+      localStorage.live = row.dataset.k;
+      $('#liveMenu').hidden = true; $('#liveBtn').classList.remove('open');
+      $('#lmName').textContent = l2name(); newPage(); loadLiveBody();
+    };
+    lmRefresh().catch(() => {});
+  }
+  $('#lmName').textContent = l2name();
+  return loadLiveBody();
+}
+const l2name = () => state.lives.find(l => l.key === localStorage.live)?.name || '无直播源';
+async function loadLiveBody() {
+  const src = localStorage.live; liveSrc = src;
+  $('#liveBody').innerHTML = spinner;
+  $('#chq').value = '';
+  try { return await renderLiveBody(src); } catch (e) { if (!isAbort(e)) toast(e.message); }
+}
+async function renderLiveBody(src) {
   const [{ groups }, info] = await Promise.all([api('live', { src }), infoP()]);
+  if (src !== liveSrc || !$('#liveBody')) return groups;
   // gi = -1 is the ★ 收藏 group (channels starred from any live source).
   let gi = liveFavs.all().length ? -1 : 0;
   const paint = () => {
@@ -1731,15 +1938,35 @@ function installSection() {
     <button class="small" id="installBtn" ${installEvt ? '' : 'hidden'}>安装</button></div></section>`;
 }
 
+const testCache = new Map();
 async function renderSettings() {
   const [cfg, info, safety] = await Promise.all([get('/api/config'), get('/api/info').catch(() => ({ urls: [] })), get('/api/safety')]);
   const flags = x => `<label class="flag"><input type="checkbox" class="kids" ${x.kids ? 'checked' : ''}>少儿</label><label class="flag"><input type="checkbox" class="adult" ${x.adult ? 'checked' : ''}>成人</label>`;
-  const rowsHtml = (list, kind) => list.map((x, i) => `<div class="srow" data-i="${i}" ${x.categories ? `data-cats="${esc(JSON.stringify(x.categories))}"` : ''}>
-      <span class="lan">${i + 1}</span>
+  const cacheOf = x => testCache.get(String(x.api || x.url || '').trim());
+  const stOf = x => { const t = cacheOf(x); return t ? `<span class="${t.cls}" title="${esc(t.title)}">${esc(t.text)}</span>` : '<span class="status"></span>'; };
+  const rowHtml = (x, kind, i) => x.members ? `<div class="srow grp" data-i="${i}" data-key="${esc(x.key)}" data-members="${esc(JSON.stringify(x.members))}">
+      <label class="selcell"><input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
+      <input class="nm" value="${esc(x.name)}" placeholder="名称">
+      <input class="url" value="${esc('聚合 ' + x.members.length + ' 个源：' + x.members.map(k => (cfg.sites.find(s => s.key === k) || {}).name || k).join('、'))}" readonly>
+      <span class="ops"><span class="tagl">聚合源</span><button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`
+    : `<div class="srow" data-i="${i}" ${x.key && kind === 'site' ? `data-key="${esc(x.key)}"` : ''} ${x.from ? `data-from="${esc(x.from)}"` : ''} ${x.categories ? `data-cats="${esc(JSON.stringify(x.categories))}"` : ''} ${cacheOf(x) ? `data-ok="${cacheOf(x).cls === 'status ok' ? 1 : 0}"` : ''}>
+      <label class="selcell"><input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="${esc(kind === 'site' ? x.api : x.url)}" placeholder="${kind === 'site' ? 'https://example.com/api.php/provide/vod' : 'https://…/live.m3u / .m3u8 / .txt'}">
-      <span class="ops">${kind === 'site' ? `${flags(x)}<span class="status"></span><button data-op="test">测速</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}<span class="status"></span><button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
-        <button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`).join('');
+      <span class="ops">${kind === 'site' ? `${flags(x)}${stOf(x)}<button data-op="test">测速</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
+        <button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`;
+  const rowsHtml = (list, kind) => list.map((x, i) => rowHtml(x, kind, i)).join('');
+  const FOLD_AT = 8; // more sources than this: the list starts collapsed
+  const fold = (kind, n) => n > FOLD_AT ? `<div class="foldbar" data-foldbar="${kind}"><button class="small" data-foldbtn="${kind}">展开全部 ${n} 个</button><span class="lan" data-foldpeek="${kind}"></span></div>` : '';
+  const setFold = (kind, open) => {
+    const box = $(`[data-fold=${kind}]`), btn = $(`[data-foldbtn=${kind}]`); if (!box || !btn) return;
+    box.hidden = !open;
+    btn.textContent = open ? '收起' : `展开全部 ${$$('.srow', box).length} 个`;
+  };
+  const bulk = kind => `<div class="actions bulk" data-kind="${kind}"><label class="flag"><input type="checkbox" data-bulk="all">全选</label>
+      <button class="small" data-bulk="invert">反选</button><button class="small" data-bulk="delsel">删除选中</button>
+      <button class="small" data-bulk="delbad">删除不通的</button><button class="small" data-bulk="retry">重测不通的</button><button class="small" data-bulk="export">导出选中</button>
+      <button class="small" data-bulk="merge" title="${kind === 'live' ? '把选中的直播源合成一个频道列表（同分组归并、相同地址去重）' : '把选中的点播源聚合成一个入口：搜索/浏览/播放线路同时覆盖所有成员，同名影片合并'}">${kind === 'live' ? '合并选中' : '聚合选中'}</button><span class="lan" data-bulk="count"></span></div>`;
   view.innerHTML = `<div class="page set"><h1>设置</h1>
     <p class="lan">修改保存在服务端，局域网里所有浏览器共享。${info.urls.length ? '其他设备打开：' + info.urls.map(u => `<code>${esc(u)}</code>`).join(' ') : ''}</p>
     ${installSection()}
@@ -1749,16 +1976,16 @@ async function renderSettings() {
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
     <section><h2>点播源</h2><p class="hint">苹果CMS 接口（<code>…/api.php/provide/vod</code>，返回 JSON）。需要 spider jar / 解析的 type 3 源浏览器跑不了，导入时会自动跳过。</p>
-      <div id="sites">${rowsHtml(cfg.sites, 'site')}</div>
-      <div class="actions"><button class="small" id="addSite">+ 添加点播源</button><button class="small" id="testAll">全部测速</button></div></section>
+      ${fold('site', cfg.sites.length)}<div class="foldbox" data-fold="site" ${cfg.sites.length > FOLD_AT ? 'hidden' : ''}>${bulk('site')}<div id="sites">${rowsHtml(cfg.sites, 'site')}</div></div>
+      <div class="actions"><button class="small" id="addSite">+ 添加点播源</button><button class="small" id="testAll">全部测速</button><button class="small" id="stopTest">停止测速</button></div></section>
     <section id="localSec"><h2>本地媒体 <span class="tagl">内置源</span></h2><p class="lan">加载中…</p></section>
     <section><h2>直播源</h2><p class="hint">支持 m3u / m3u8 频道列表、TVBox txt（<code>频道名,地址</code> + <code>分组,#genre#</code>），或者单条 .m3u8 播放地址。内置文件直接写文件名。「编辑文本」可以直接改频道列表。</p>
-      <div id="lives">${rowsHtml(cfg.lives, 'live')}</div>
+      ${fold('live', cfg.lives.length)}<div class="foldbox" data-fold="live" ${cfg.lives.length > FOLD_AT ? 'hidden' : ''}>${bulk('live')}<div id="lives">${rowsHtml(cfg.lives, 'live')}</div></div>
       <div class="actions"><button class="small" id="addLive">+ 添加直播源</button><button class="small" id="testLives">全部测速</button></div></section>
     <div class="actions savebar"><button class="btn red" id="save">保存</button><span class="lan" id="dirty"></span></div>
     <section><h2>从剪贴板识别</h2><p class="hint">复制一段含源地址的文字（接口地址、m3u/txt 链接、直播流、TVBox 配置 JSON 或整段频道列表都行），在任意页面按 <code>Ctrl/⌘ + V</code>，或者粘到下面。识别后列出新源，确认后去重添加。</p>
       <div class="field"><textarea id="clipText" placeholder="粘贴到这里" style="min-height:110px"></textarea></div>
-      <div class="actions"><button class="small" id="clipRead">读取剪贴板</button><button class="small" id="clipGo">识别</button></div></section>
+      <div class="actions"><button class="small" id="clipRead">读取剪贴板</button><button class="small" id="clipGo">识别</button><button class="small" id="exportAll">导出全部到剪贴板</button></div></section>
     <section><h2>导入 TVBox 配置</h2><p class="hint">粘贴 TVBox 配置地址（单仓或多仓 <code>{"urls":[…]}</code>），把其中能直连的点播源和直播源合并进来。</p>
       <div class="field"><input id="impUrl" placeholder="https://…/config.json"><label class="lan"><input type="checkbox" id="impReplace"> 替换现有</label><button class="small" id="imp">导入</button></div></section>
     <section><h2>高级：直接编辑 JSON</h2><p class="hint">格式 <code>{"sites":[{"key","name","api","kids","adult","categories"}],"lives":[{"name","url"}]}</code>，可整份复制到别的设备。</p>
@@ -1767,34 +1994,66 @@ async function renderSettings() {
 
   const collect = (box, kind) => $$('.srow', box).map(r => {
     const name = $('.nm', r).value.trim(), url = $('.url', r).value.trim();
+    if (r.dataset.members) return { key: r.dataset.key, name: name || r.dataset.key, type: 1, members: JSON.parse(r.dataset.members), api: 'group' };
     if (kind !== 'site') return { name: name || url, url, ...(r.dataset.from ? { from: r.dataset.from } : {}) };
-    const s = { key: name || url, name: name || url, type: 1, api: url };
+    const s = { key: r.dataset.key || name || url, name: name || url, type: 1, api: url };
     if ($('.kids', r).checked) s.kids = 1;
     if ($('.adult', r).checked) s.adult = 1;
     if (r.dataset.cats) s.categories = JSON.parse(r.dataset.cats);
     return s;
   }).filter(x => (x.api || x.url));
   const current = () => ({ sites: collect($('#sites'), 'site'), lives: collect($('#lives'), 'live') });
-  const dirty = () => { $('#dirty').textContent = '有未保存的修改'; };
-  const redraw = c => { $('#sites').innerHTML = rowsHtml(c.sites, 'site'); $('#lives').innerHTML = rowsHtml(c.lives, 'live'); dirty(); };
+  const dirty = () => { const d = $('#dirty'); if (d) d.textContent = '有未保存的修改'; };
+  const renumber = () => { $$('#sites, #lives').forEach(box => $$('.srow', box).forEach((r, i) => { r.dataset.i = i; $('.lan', r).textContent = i + 1; })); };
+  const refreshCount = () => $$('.bulk').forEach(b => {
+    const box = $(b.dataset.kind === 'site' ? '#sites' : '#lives'), n = $$('.sel:checked', box).length, all = $$('.srow', box).length;
+    $('[data-bulk=count]', b).textContent = n ? `已选 ${n} / ${all}` : `共 ${all}`;
+    $('[data-bulk=all]', b).checked = n > 0 && n === all; });
+  const addRow = (kind, x, before) => {
+    if ($(`[data-fold=${kind}]`)?.hidden) setFold(kind, true);
+    const box = $(kind === 'site' ? '#sites' : '#lives');
+    const tpl = document.createElement('div'); tpl.innerHTML = rowHtml(x, kind, 0);
+    const row = tpl.firstElementChild;
+    box.insertBefore(row, before || null); renumber(); dirty(); refreshCount();
+    return row;
+  };
+  const dropRows = rows => { rows.forEach(r => r.remove()); renumber(); dirty(); refreshCount(); };
   const persist = async c => {
     await req('PUT', '/api/config', c);
     state.cats = []; apiMemo.clear(); await loadSites(); toast('已保存'); renderSettings();
   };
-  const test = async r => {
-    const st = $('.status', r); st.className = 'status'; st.textContent = '测试中…';
-    const url = $('.url', r).value.trim();
-    if (r.parentElement.id === 'lives') {
-      const j = await api('checklive', { url, name: $('.nm', r).value.trim() }).catch(e => ({ ok: false, error: e.message }));
-      st.className = 'status ' + (j.ok ? 'ok' : 'bad');
-      st.textContent = j.channels ? `${j.ms}ms · ${j.channels}台 · 抽测${j.alive}/${j.sampled}` : '不通';
-      st.title = j.error || '随机抽 8 个频道，能拿到数据的算可连';
-      return;
+  // Speed test: bounded concurrency (so hundreds of sources don't flood the network), auto retry on failure,
+  // results cached per url so they survive deleting / reordering / re-rendering.
+  const RETRIES = 2;
+  let testGen = 0;
+  const testOnce = async (url, name, live) => {
+    if (live) {
+      const j = await api('checklive', { url, name }).catch(e => ({ ok: false, error: e.message }));
+      return { ok: !!j.ok, text: j.channels ? `${j.ms}ms · ${j.channels}台 · 抽测${j.alive}/${j.sampled}` : '不通', title: j.error || '随机抽 8 个频道，能拿到数据的算可连' };
     }
     const j = await api('check', { api: url }).catch(e => ({ ok: false, error: e.message }));
-    st.className = 'status ' + (j.ok ? 'ok' : 'bad');
-    st.textContent = j.ok ? `${j.ms}ms · ${j.total}部` : '不通';
-    st.title = j.error || '';
+    return { ok: !!j.ok, text: j.ok ? `${j.ms}ms · ${j.total}部` : '不通', title: j.error || '' };
+  };
+  const test = async (r, gen = testGen) => {
+    const st = $('.status', r), url = $('.url', r).value.trim(), live = r.parentElement.id === 'lives';
+    if (!url || r.dataset.members) return;
+    st.className = 'status'; st.textContent = '测试中…';
+    let res;
+    for (let k = 0; k <= RETRIES; k++) {
+      if (gen !== testGen || !r.isConnected) return;
+      if (k) { st.textContent = `重试 ${k}/${RETRIES}…`; await new Promise(ok => setTimeout(ok, 600 * k)); if (gen !== testGen || !r.isConnected) return; }
+      res = await testOnce(url, $('.nm', r).value.trim(), live);
+      if (res.ok) break;
+    }
+    if (gen !== testGen || !r.isConnected) return;
+    const cls = 'status ' + (res.ok ? 'ok' : 'bad');
+    st.className = cls; st.textContent = res.text; st.title = res.title;
+    r.dataset.ok = res.ok ? '1' : '0';
+    testCache.set(url, { cls, text: res.text, title: res.title });
+  };
+  const testMany = async rows => {
+    const gen = testGen, q = [...rows], size = rows[0]?.parentElement.id === 'lives' ? 3 : 6;
+    await Promise.all(Array.from({ length: Math.min(size, q.length) }, async () => { while (q.length && gen === testGen) await test(q.shift(), gen); }));
   };
   const editText = async r => {
     const url = $('.url', r).value.trim(), name = $('.nm', r).value.trim() || url;
@@ -1829,15 +2088,101 @@ async function renderSettings() {
       catch (err) { toast(err.message); }
       return;
     }
+    const fb = e.target.dataset.foldbtn;
+    if (fb) return setFold(fb, $(`[data-fold=${fb}]`).hidden);
+    const bk = e.target.dataset.bulk;
+    if (bk) return bulkOp(e.target, bk);
+    if (e.target.classList.contains('sel')) return refreshCount();
     const op = e.target.dataset.op; if (!op) return;
-    const r = e.target.closest('.srow'), kind = r.parentElement.id === 'sites' ? 'site' : 'live';
-    if (op === 'test') return test(r);
+    const r = e.target.closest('.srow');
+    if (op === 'test') { testGen++; return test(r); }
     if (op === 'edit') return editText(r);
-    const c = current(), list = kind === 'site' ? c.sites : c.lives, i = +r.dataset.i;
-    if (op === 'del') list.splice(i, 1);
-    if (op === 'up' && i > 0) [list[i - 1], list[i]] = [list[i], list[i - 1]];
-    if (op === 'down' && i < list.length - 1) [list[i + 1], list[i]] = [list[i], list[i + 1]];
-    redraw(c);
+    if (op === 'del') return dropRows([r]);
+    if (op === 'up' && r.previousElementSibling) r.parentElement.insertBefore(r, r.previousElementSibling);
+    if (op === 'down' && r.nextElementSibling) r.parentElement.insertBefore(r.nextElementSibling, r);
+    renumber(); dirty();
+  };
+  // Export rows as a shareable JSON set. Local / edited live lists carry their channel text so the paste is self-contained.
+  const exportSources = async (siteRows, liveRows) => {
+    try {
+      const groups = siteRows.filter(r => r.dataset.members).map(r => ({ key: r.dataset.key, name: $('.nm', r).value.trim(), members: JSON.parse(r.dataset.members) }));
+      siteRows = siteRows.filter(r => !r.dataset.members);
+      const sites = siteRows.map(r => {
+        const s = { key: r.dataset.key || undefined, name: $('.nm', r).value.trim(), api: $('.url', r).value.trim() };
+        if ($('.kids', r).checked) s.kids = 1;
+        if ($('.adult', r).checked) s.adult = 1;
+        if (r.dataset.cats) s.categories = JSON.parse(r.dataset.cats);
+        return s;
+      }).filter(s => s.api);
+      const lives = [];
+      for (const r of liveRows) {
+        const l = { name: $('.nm', r).value.trim(), url: $('.url', r).value.trim() };
+        if (!l.url) continue;
+        if (!/^https?:\/\//.test(l.url)) {
+          const j = await api('live/raw', { url: l.url });
+          if (!j.text) continue;
+          lives.push({ name: l.name, text: j.text });
+        } else lives.push(l);
+      }
+      sites.push(...groups);
+      if (!sites.length && !lives.length) return toast('没有可导出的源');
+      const text = JSON.stringify({ tvbox: 1, sites, lives }, null, 1);
+      if (await copyText(text)) toast(`已复制 ${sites.length} 个点播源、${lives.length} 个直播源，到另一台设备粘贴即可导入`);
+      else { $('#clipText').value = text; $('#clipText').select(); toast('浏览器不让自动复制，已放进下面的框里，请手动复制'); }
+    } catch (err) { toast('导出失败：' + err.message); }
+  };
+  const bulkOp = async (btn, op) => {
+    const bar = btn.closest('.bulk'), kind = bar.dataset.kind, box = $(kind === 'site' ? '#sites' : '#lives'), rows = $$('.srow', box);
+    const sel = rows.filter(r => $('.sel', r).checked);
+    if (op === 'all') { rows.forEach(r => { $('.sel', r).checked = btn.checked; }); return refreshCount(); }
+    if (op === 'invert') { rows.forEach(r => { $('.sel', r).checked = !$('.sel', r).checked; }); return refreshCount(); }
+    if (op === 'delsel') {
+      if (!sel.length) return toast('先勾选要删除的源');
+      if (confirm(`删除选中的 ${sel.length} 个源？（点「保存」后生效）`)) dropRows(sel);
+      return;
+    }
+    if (op === 'export') {
+      if (!sel.length) return toast('先勾选要导出的源');
+      return exportSources(kind === 'site' ? sel : [], kind === 'live' ? sel : []);
+    }
+    if (op === 'retry') {
+      const bad = rows.filter(r => r.dataset.ok === '0');
+      if (!bad.length) return toast('没有不通的源');
+      testGen++; return testMany(bad);
+    }
+    if (op === 'delbad') {
+      const todo = rows.filter(r => !r.dataset.ok && !r.dataset.members && $('.url', r).value.trim());
+      if (todo.length) { toast(`还有 ${todo.length} 个没测过，先测速…`); testGen++; await testMany(todo); }
+      const bad = $$('.srow', box).filter(r => r.dataset.ok === '0');
+      if (!bad.length) return toast('没有不通的源');
+      if (confirm(`删除 ${bad.length} 个不通的源？（已自动重试 ${RETRIES} 次；点「保存」后生效）`)) dropRows(bad);
+      return;
+    }
+    if (op === 'merge' && kind === 'site') {
+      const mem = sel.filter(r => !r.dataset.members);
+      if (mem.length < 2) return toast('至少勾选 2 个点播源（聚合源不能再嵌套）');
+      const name = prompt(`把选中的 ${mem.length} 个点播源聚合成一个入口（同名影片合并，播放线路汇总，成员不通会自动跳过）。\n聚合源名称：`, '聚合源');
+      if (!name) return;
+      const keys = mem.map(r => r.dataset.key || $('.nm', r).value.trim() || $('.url', r).value.trim());
+      const row = addRow('site', { key: 'group-' + Date.now().toString(36), name, members: keys }, box.firstElementChild);
+      toast(`已生成聚合源「${name}」，成员保留；点「保存」生效`);
+      row.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    if (op === 'merge') {
+      if (sel.length < 2) return toast('至少勾选 2 个直播源');
+      const name = prompt(`把选中的 ${sel.length} 个直播源合并成一个（同分组归并，相同地址去重）。\n新源名称：`, '合并直播源');
+      if (!name) return;
+      btn.disabled = true;
+      try {
+        const out = await req('POST', '/api/live/merge', { sources: sel.map(r => ({ name: $('.nm', r).value.trim(), url: $('.url', r).value.trim() })) });
+        addRow('live', { name, url: out.url }, sel[0]);
+        dropRows(sel);
+        toast(`合并完成：${out.groups} 个分组、${out.channels} 个频道，去重 ${out.dup}${out.failed.length ? '，打不开：' + out.failed.join('、') : ''}`);
+        await persist(current());
+      } catch (err) { toast(err.message); }
+      finally { btn.disabled = false; }
+    }
   };
   $$('[data-dbrow]').forEach(c => c.onchange = () => { localStorage.dbRows = JSON.stringify({ ...dbRows(), [c.dataset.dbrow]: c.checked }); toast('已保存'); });
   view.oninput = e => { if (e.target.closest('.srow:not(.lrow)')) dirty(); };
@@ -1849,16 +2194,19 @@ async function renderSettings() {
     catch (err) { toast(err.message); }
   };
   if ($('#installBtn')) $('#installBtn').onclick = async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; $('#installBtn').hidden = true; };
-  $('#addSite').onclick = () => { const c = current(); c.sites.push({ name: '', api: ' ' }); redraw(c); $('#sites .srow:last-child .nm').focus(); };
-  $('#addLive').onclick = () => { const c = current(); c.lives.push({ name: '', url: ' ' }); redraw(c); $('#lives .srow:last-child .nm').focus(); };
-  $('#testAll').onclick = () => $$('#sites .srow').forEach(test);
-  $('#testLives').onclick = () => $$('#lives .srow').forEach(test);
+  $('#addSite').onclick = () => $('.nm', addRow('site', { name: '', api: '' })).focus();
+  $('#addLive').onclick = () => $('.nm', addRow('live', { name: '', url: '' })).focus();
+  $('#testAll').onclick = () => { testGen++; testMany($$('#sites .srow')); };
+  $('#testLives').onclick = () => { testGen++; testMany($$('#lives .srow')); };
+  $('#stopTest').onclick = () => { testGen++; $$('.srow .status').forEach(st => { if (/测试中|重试/.test(st.textContent)) { st.className = 'status'; st.textContent = ''; } }); };
+  refreshCount();
   $('#save').onclick = () => persist(current()).catch(err => toast(err.message));
   $('#saveRaw').onclick = () => { let c; try { c = JSON.parse($('#raw').value); } catch { return toast('JSON 格式不对'); } persist(c).catch(err => toast(err.message)); };
   $('#reset').onclick = async () => {
     if (!confirm('恢复成内置的默认源？')) return;
     try { await req('POST', '/api/config/reset', {}); await loadSites(); toast('已恢复默认'); renderSettings(); } catch (err) { toast(err.message); }
   };
+  $('#exportAll').onclick = () => exportSources($$('#sites .srow'), $$('#lives .srow'));
   $('#clipGo').onclick = () => { const t = $('#clipText').value.trim(); if (t) recognizeFlow(t); };
   $('#clipRead').onclick = async () => {
     try { const t = await navigator.clipboard.readText(); $('#clipText').value = t; if (t.trim()) recognizeFlow(t); }
@@ -1872,7 +2220,6 @@ async function renderSettings() {
       await loadSites(); toast(`导入 ${j.imported.sites} 个点播源、${j.imported.lives} 个直播源`); renderSettings();
     } catch (err) { toast('导入失败：' + err.message); $('#imp').disabled = false; $('#imp').textContent = '导入'; }
   };
-  if (cfg.sites.length) $('#testAll').click();
   localSettings().catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
 }
 
@@ -1968,6 +2315,14 @@ addEventListener('focus', async () => {
     recognizeFlow(t, true);
   } catch {}
 });
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.cssText = 'position:fixed;top:0;opacity:0'; document.body.append(ta); ta.select();
+  let ok = false; try { ok = document.execCommand('copy'); } catch {}
+  ta.remove(); return ok;
+}
 
 async function recognizeFlow(text, quiet) {
   if ($('#clipModal')) return;

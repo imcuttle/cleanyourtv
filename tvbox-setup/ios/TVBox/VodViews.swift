@@ -93,6 +93,7 @@ struct VodHomeView: View {
     @ObservedObject private var lib = Library.shared
     @AppStorage("safety.level") private var level = "standard"
     @AppStorage("siteKey") private var siteKey = ""
+    @State private var showPicker = false
     @AppStorage("douban.tv") private var dbTv = true
     @AppStorage("douban.movie") private var dbMovie = true
     @AppStorage("douban.show") private var dbShow = true
@@ -111,7 +112,7 @@ struct VodHomeView: View {
     private var sites: [Site] { Safety.visible(cfg.sites) }
     private var site: Site? { sites.first { $0.key == siteKey } ?? sites.first }
     // Reload only when what we show actually changes — not every time the view reappears (back-swipe).
-    private var loadKey: String { "\(site?.key ?? "")|\(site?.api ?? "")|\(level)|\(dbTv)\(dbMovie)\(dbShow)\(dbAnime)" }
+    private var loadKey: String { "\(site?.key ?? "")|\(site?.api ?? "")|\((site?.members ?? []).joined(separator: ","))|\(level)|\(dbTv)\(dbMovie)\(dbShow)\(dbAnime)" }
 
     var body: some View {
         ScrollView {
@@ -128,7 +129,7 @@ struct VodHomeView: View {
                 if latest.count > 6 {
                     vodRow(level == "kids" ? "少儿精选" : "最新更新", Array(latest.dropFirst(6)), VodCategory(id: "", pid: "", name: level == "kids" ? "少儿精选" : "最新更新"))
                 }
-                if level != "kids" {
+                if level != "kids", !(site.map(Safety.adultSite) ?? false) {
                     if dbTv, !tvHot.isEmpty { doubanRow("豆瓣热门剧集", tvHot) }
                     if dbMovie, !movieHot.isEmpty { doubanRow("豆瓣热门电影", movieHot) }
                     if dbShow, !showHot.isEmpty { doubanRow("豆瓣热门综艺", showHot) }
@@ -152,19 +153,17 @@ struct VodHomeView: View {
                 .shadow(color: .black.opacity(0.6), radius: 4)
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    ForEach(sites) { s in
-                        Button { siteKey = s.key } label: {
-                            if s.key == site?.key { Label(s.name, systemImage: "checkmark") } else { Text(s.name) }
-                        }
-                    }
-                } label: {
+                Button { showPicker = true } label: {
                     HStack(spacing: 4) {
                         Text(site?.name ?? "无源").font(.subheadline.weight(.semibold))
                         Image(systemName: "chevron.down").font(.caption2.weight(.bold))
                     }
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.6), radius: 4)
+                }
+                .popover(isPresented: $showPicker, attachmentAnchor: .point(.bottom), arrowEdge: .top) {
+                    SitePicker(sites: sites, current: site?.key) { siteKey = $0; showPicker = false }
+                        .presentationCompactAdaptation(.popover)
                 }
             }
         }
@@ -255,7 +254,7 @@ struct VodHomeView: View {
         }
         loading = true
         defer { loading = false }
-        if level != "kids" {
+        if level != "kids", !Safety.adultSite(site) {
             let (wantTv, wantMovie, wantShow, wantAnime) = (dbTv, dbMovie, dbShow, dbAnime)
             Task {
                 async let tv = wantTv ? API.doubanHot("tv") : []
@@ -785,5 +784,43 @@ struct SearchView: View {
         people = r.people
         searching = false
         status = r.failed.isEmpty ? "" : "\(r.failed.joined(separator: "/")) 未响应"
+    }
+}
+
+/// Source picker: each row pings itself when it scrolls into view, so only what you can see is tested.
+struct SitePicker: View {
+    let sites: [Site]
+    let current: String?
+    let pick: (String) -> Void
+    @ObservedObject private var health = SiteHealth.shared
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(sites) { s in
+                    Button { pick(s.key) } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark").font(.caption.weight(.bold)).opacity(s.key == current ? 1 : 0).frame(width: 14)
+                            Text(s.name).font(.subheadline).lineLimit(1)
+                            if s.kids == true { Tag(text: "少儿", color: .green) }
+                            Spacer(minLength: 12)
+                            if let m = s.members {
+                                Text("聚合 \(m.count)").font(.caption).foregroundStyle(Color.secondary)
+                            } else if !s.api.isEmpty {
+                                Text(health.label(s) ?? "…").font(.caption.monospacedDigit())
+                                    .foregroundStyle(health.isDead(s) ? Color.orange : health.label(s) == nil ? Color.secondary : Color.green)
+                            }
+                        }
+                        .opacity(health.isDead(s) ? 0.5 : 1)
+                        .padding(.horizontal, 14).padding(.vertical, 11)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onAppear { health.request(s) }
+                    Divider()
+                }
+            }
+        }
+        .frame(minWidth: 260, idealWidth: 300, maxHeight: 420)
     }
 }

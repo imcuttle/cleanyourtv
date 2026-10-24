@@ -13,6 +13,8 @@ struct Candidate: Identifiable {
     var kids = false
     var adult = false
     var categories: [String]? = nil
+    var key = ""               // the key it had where it was exported (聚合源 members refer to these)
+    var members: [String]? = nil   // set for a 聚合源
     var ok: Bool? = nil
     var info = ""
     var exists = false
@@ -72,12 +74,12 @@ enum Recognizer {
     static func classify(_ text: String) -> Kind? {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.isEmpty { return nil }
-        if t.range(of: "#EXT-X-(TARGETDURATION|STREAM-INF|MEDIA-SEQUENCE)", options: .regularExpression) != nil { return .stream }
-        if t.contains("#EXTINF") || t.contains("#genre#") { return .list(channelCount(t)) }
         if t.hasPrefix("{"), let o = API.parseJSON(t) as? [String: Any] {
             if o["sites"] != nil || o["urls"] != nil || o["lives"] != nil { return .config(o) }
             if o["class"] is [Any] || o["list"] is [Any] { return .vod(total: API.str(o["total"])) }
         }
+        if t.range(of: "#EXT-X-(TARGETDURATION|STREAM-INF|MEDIA-SEQUENCE)", options: .regularExpression) != nil { return .stream }
+        if t.contains("#EXTINF") || t.contains("#genre#") { return .list(channelCount(t)) }
         let rows = t.components(separatedBy: .newlines)
             .filter { $0.trimmingCharacters(in: .whitespaces).range(of: "^[^,#\\s][^,]{0,40},\\s*(https?|rtmp|rtsp)://", options: .regularExpression) != nil }
         if rows.count >= 2 { return .list(max(channelCount(t), rows.count)) }
@@ -113,9 +115,24 @@ enum Recognizer {
 
         switch classify(text) {
         case .config(let o):
-            let (s, l) = await API.configFrom(o, base: nil)
-            out += s.map { Candidate(kind: .site, name: $0.name, url: $0.api, kids: $0.kids == true, adult: $0.adult == true, categories: $0.categories, info: "来自粘贴的配置") }
+            // Exported source sets embed edited / local channel lists as {name, text}; keep those as pasted lists.
+            let rawLives = o["lives"] as? [[String: Any]] ?? []
+            let embedded = rawLives.filter { !API.str($0["text"]).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            var plain = o
+            plain["lives"] = rawLives.filter { API.str($0["text"]).isEmpty }
+            let (s, l) = await API.configFrom(plain, base: nil)
+            out += s.map { Candidate(kind: .site, name: $0.name, url: $0.api, kids: $0.kids == true, adult: $0.adult == true, categories: $0.categories, key: $0.key, info: "来自粘贴的配置") }
+            out += (o["sites"] as? [[String: Any]] ?? []).compactMap { g -> Candidate? in
+                guard let mem = (g["members"] as? [Any])?.map({ API.str($0) }).filter({ !$0.isEmpty }), !mem.isEmpty else { return nil }
+                let name = API.str(g["name"]).isEmpty ? API.str(g["key"]) : API.str(g["name"])
+                return name.isEmpty ? nil : Candidate(kind: .site, name: name, url: "", key: API.str(g["key"]), members: mem, ok: true, info: "聚合源 · \(mem.count) 个成员")
+            }
             out += l.map { Candidate(kind: .live, name: $0.name, url: $0.url, info: "来自粘贴的配置") }
+            out += embedded.map { e in
+                let t = API.str(e["text"]).trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
+                let name = API.str(e["name"])
+                return Candidate(kind: .live, name: name.isEmpty ? "分享的频道" : name, url: "", text: t, ok: true, info: "\(channelCount(t)) 个频道（含频道列表）")
+            }
         case .list(let n):
             out.append(Candidate(kind: .live, name: "剪贴板频道 \(n)台", url: "", text: text.trimmingCharacters(in: .whitespacesAndNewlines) + "\n", ok: true, info: "\(n) 个频道"))
         default:
@@ -200,12 +217,15 @@ enum Recognizer {
         let haveText = Set(existingLives.compactMap(\.text).map { trim($0) })
         var seenKeys = Set<String>()
         out = out.filter { c in
-            let key = c.kind == .site ? "s|" + normApi(c.url) + "|" + (c.categories ?? []).joined(separator: ",")
+            let key = c.members != nil ? "g|" + c.name + "|" + (c.members ?? []).joined(separator: ",")
+                : c.kind == .site ? "s|" + normApi(c.url) + "|" + (c.categories ?? []).joined(separator: ",")
                 : c.text != nil ? "t|" + trim(c.text) : "l|" + normURL(c.url)
             return seenKeys.insert(key).inserted
         }.map { c in
             var c = c
-            if c.kind == .site {
+            if c.members != nil {
+                c.exists = existingSites.contains { $0.members != nil && $0.name == c.name }
+            } else if c.kind == .site {
                 c.url = normApi(c.url)
                 c.exists = (c.categories ?? []).isEmpty && haveApi.contains(c.url)
             } else {
@@ -314,7 +334,7 @@ struct ClipboardImportView: View {
     }
 
     private func add() {
-        let s = picked.filter { $0.kind == .site }.map { c -> Site in
+        let s = picked.filter { $0.kind == .site && $0.members == nil }.map { c -> Site in
             var site = Site(key: c.name.isEmpty ? c.url : c.name, name: c.name.isEmpty ? Recognizer.host(c.url) : c.name, api: c.url)
             if c.kids { site.kids = true }
             if c.adult { site.adult = true }
@@ -327,6 +347,19 @@ struct ClipboardImportView: View {
         }
         let before = (cfg.sites.count, cfg.lives.count)
         cfg.merge(sites: s, lives: l, replace: false)
+        // A pasted 聚合源 names its members by the key they had on the other device; map them to the same link here.
+        let apiOfKey = Dictionary(items.filter { $0.kind == .site && $0.members == nil && !$0.key.isEmpty }.map { ($0.key, $0.url) }, uniquingKeysWith: { a, _ in a })
+        let groups = picked.filter { $0.members != nil }.compactMap { c -> Site? in
+            let mem = (c.members ?? []).compactMap { k -> String? in
+                if let api = apiOfKey[k], let hit = cfg.sites.first(where: { $0.members == nil && Recognizer.normApi($0.api) == Recognizer.normApi(api) }) { return hit.key }
+                return cfg.sites.contains { $0.key == k && $0.members == nil } ? k : nil
+            }
+            guard !mem.isEmpty else { return nil }
+            var g = Site(key: "group-" + UUID().uuidString.prefix(6), name: c.name, api: "")
+            g.members = mem
+            return g
+        }
+        cfg.sites.append(contentsOf: groups)
         UserDefaults.standard.set(UIPasteboard.general.changeCount, forKey: "clip.seen")
         message = nil
         dismiss()
