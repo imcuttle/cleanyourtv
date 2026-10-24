@@ -110,27 +110,41 @@ let memoSig = '';
 // callers' own caches (localStorage, apiMemo). batchFn(keys, settle): call settle(i, valueOrError) per key, or return
 // an array of results.
 class DataLoader {
-  constructor(batchFn, { maxBatch = 24, wait = 6, keep = 0 } = {}) {
-    this.fn = batchFn; this.maxBatch = maxBatch; this.wait = wait; this.keep = keep;
-    this.cache = new Map(); this.queue = []; this.timer = 0;
+  // wait: how long a normal key may sit in the queue. lazyWait / lazyMax: keys loaded with {lazy:true} (ratings, javdb,
+  // probes — things nobody is waiting on) are *debounced*: the batch leaves lazyWait ms after the last such key, but at
+  // most lazyMax ms after the first. Scrolling feeds IntersectionObserver a few cards every frame; a 6 ms window caught
+  // one frame at a time and sent near-single requests, a debounce lets the whole scroll burst ride one request.
+  // Any normal key in the queue pulls the departure forward to `wait`, and takes the lazy ones along.
+  constructor(batchFn, { maxBatch = 24, wait = 6, lazyWait = 80, lazyMax = 400, keep = 0 } = {}) {
+    Object.assign(this, { fn: batchFn, maxBatch, wait, lazyWait, lazyMax, keep });
+    this.cache = new Map(); this.queue = []; this.timer = 0; this.due = 0; this.first = 0; this.urgent = false;
   }
-  load(key) {
+  load(key, { lazy = false } = {}) {
     const hit = this.cache.get(key);
-    if (hit) return hit;
+    if (hit) { if (!lazy) this.hurry(); return hit; } // an urgent caller joining a lazy in-flight key speeds it up
     const p = new Promise((res, rej) => this.queue.push({ key, res, rej }));
     this.cache.set(key, p);
     p.then(() => this.drop(key, p), () => this.drop(key, p));
+    const now = Date.now();
+    if (this.queue.length === 1) { this.first = now; this.urgent = false; }
     if (this.queue.length >= this.maxBatch) this.flush();
-    else if (!this.timer) this.timer = setTimeout(() => this.flush(), this.wait);
+    else if (lazy && !this.urgent) this.schedule(Math.min(now + this.lazyWait, this.first + this.lazyMax));
+    else { this.urgent = true; this.schedule(now + this.wait); }
     return p;
   }
-  loadMany(keys) { return Promise.all(keys.map(k => this.load(k).catch(e => e))); }
+  hurry() { if (this.queue.length) { this.urgent = true; this.schedule(Date.now() + this.wait); } }
+  schedule(at) {
+    clearTimeout(this.timer);
+    this.due = at;
+    this.timer = setTimeout(() => this.flush(), Math.max(0, at - Date.now()));
+  }
+  loadMany(keys, opt) { return Promise.all(keys.map(k => this.load(k, opt).catch(e => e))); }
   drop(key, p) { const del = () => this.cache.get(key) === p && this.cache.delete(key); this.keep ? setTimeout(del, this.keep) : del(); }
   clear(key) { this.cache.delete(key); return this; }
   clearAll() { this.cache.clear(); return this; }
   prime(key, value) { if (!this.cache.has(key)) this.cache.set(key, Promise.resolve(value)); return this; }
   flush() {
-    clearTimeout(this.timer); this.timer = 0;
+    clearTimeout(this.timer); this.timer = 0; this.urgent = false;
     while (this.queue.length) this.run(this.queue.splice(0, this.maxBatch));
   }
   async run(batch) {
@@ -171,6 +185,8 @@ async function fetchBatch(keys, settle) {
   }
   line(buf + dec.decode());
 }
+// Background enrichment: nobody is waiting on these, so they are debounced into big batches (see DataLoader).
+const LAZY = /^(javdb|probe|douban\/rating)$/;
 const apiLoader = new DataLoader(fetchBatch);
 // A caller that leaves (page change, closed sheet) just stops waiting; the shared request itself is not cancelled.
 const withSignal = (p, signal) => !signal ? p : new Promise((ok, bad) => {
@@ -182,7 +198,7 @@ const withSignal = (p, signal) => !signal ? p : new Promise((ok, bad) => {
 const fetchApi = (route, params, signal) => {
   if (!BATCHABLE.test(route)) return get(`/api/${route}?` + new URLSearchParams(params), signal);
   const qs = new URLSearchParams(params); qs.sort();
-  return withSignal(apiLoader.load(`${route}?${qs}`), signal === undefined ? pageCtl.signal : signal || undefined);
+  return withSignal(apiLoader.load(`${route}?${qs}`, { lazy: LAZY.test(route) }), signal === undefined ? pageCtl.signal : signal || undefined);
 };
 const api = (route, params = {}, signal) => {
   const ttl = MEMO_TTL[route];
@@ -270,16 +286,22 @@ function observeRatings(root = document) { $$('.db[data-n]:not([data-javfb])', r
 
 // ---------- javdb (成人元数据, lazy, cached) ----------
 const javCode = s => {
-  const up = String(s ?? '').toUpperCase();
+  // Literal escape debris from mangled names ("SNIS-989\\b中文", "\\bSNIS-989", "\\w@…") must not glue onto the code
+  // as a letter ("\\bSNIS" would read as BSNIS): a backslash + letter is just a separator.
+  const up = String(s ?? '').replace(/\\[A-Za-z]/g, ' ').toUpperCase();
   // Release-name words that look like LETTERS+DIGITS but are not a 番号.
   const STOP = /^(?:AAC|AC|DTS|DDP|HEVC|AVC|HDR|UHD|FHD|WEB|BD|DVD|MP|EP|HD|HQ|CD|VOL|NO|PART|CAM|TS|SE)$/;
   // IPX00988 → IPX-988, ABP-0123 → ABP-123 (zero-padded to 5 on some sites); real 4-digit codes (DV-1656) stay.
   const num = n => n.length > 3 ? n.replace(/^0+/, '').padStart(3, '0') : n;
+  // What may follow the digits: end, any non-alphanumeric (CJK titles, @ . - [ space …), or a tag glued on directly
+  // (SNIS-989UC, MIDA-829restored, ABP-123C). The tag must end there so "ABC-123DEF" is not read as ABC-123.
+  const MULTI = 'UNCENSORED|DECENSORED|RESTORED|RESTORE|MOSAIC|LEAKED|LEAK|SUBBED|SUB|ENG|CHS|CHT|CH|CN|JP|UC|UHD|FHD|HD|4K|8K|1080P|720P|60FPS|HEVC|H265|X265|REMUX|UNCUT';
+  const tail = `(?=$|[^A-Z0-9]|(?:(?:${MULTI})+|[CURABDE])(?![A-Z0-9]))`; // several tags may be glued: SNIS-989UCrestored
   const pats = [
-    [/(?:^|[^A-Z0-9])(FC2)[\s\-_]?(PPV)[\s\-_]?(\d{5,8})(?![A-Z0-9])/g, m => `${m[1]}-${m[2]}-${m[3]}`],
-    [/(?:^|[^A-Z0-9])([A-Z]{2,6})[\-_](\d{2,5})(?![A-Z0-9])/g, m => `${m[1]}-${num(m[2])}`],
-    [/(?:^|[^A-Z0-9])(\d{6})[\-_](\d{3})(?![A-Z0-9])/g, m => `${m[1]}-${m[2]}`],
-    [/(?:^|[^A-Z0-9])([A-Z]{2,6})(\d{2,5})(?![A-Z0-9])/g, m => STOP.test(m[1]) ? '' : `${m[1]}-${num(m[2])}`],
+    [new RegExp(`(?:^|[^A-Z0-9])(FC2)[\\s\\-_]?(PPV)[\\s\\-_]?(\\d{5,8})${tail}`, 'g'), m => `${m[1]}-${m[2]}-${m[3]}`],
+    [new RegExp(`(?:^|[^A-Z0-9])([A-Z]{2,6})[\\-_](\\d{2,5})${tail}`, 'g'), m => `${m[1]}-${num(m[2])}`],
+    [new RegExp(`(?:^|[^A-Z0-9])(\\d{6})[\\-_](\\d{3})${tail}`, 'g'), m => `${m[1]}-${m[2]}`],
+    [new RegExp(`(?:^|[^A-Z0-9])([A-Z]{2,6})(\\d{2,5})${tail}`, 'g'), m => STOP.test(m[1]) ? '' : `${m[1]}-${num(m[2])}`],
   ];
   for (const [re, fmt] of pats) for (const m of up.matchAll(re)) { const c = fmt(m); if (c) return c; }
   return '';

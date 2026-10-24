@@ -724,16 +724,22 @@ function javText(url) {
 // Dash-required LETTERS-DIGITS comes before the no-dash fallback, so messy source names like
 // "第一会所…@SIS001@SONE-123" or "169bbs.com@SONE-645 [4k]" resolve to the real 番号, not the site id.
 const javCode = s => {
-  const up = str(s).toUpperCase();
+  // Literal escape debris from mangled names ("SNIS-989\\b中文", "\\bSNIS-989", "\\w@…") must not glue onto the code
+  // as a letter ("\\bSNIS" would read as BSNIS): a backslash + letter is just a separator.
+  const up = str(s).replace(/\\[A-Za-z]/g, ' ').toUpperCase();
   // Release-name words that look like LETTERS+DIGITS but are not a 番号.
   const STOP = /^(?:AAC|AC|DTS|DDP|HEVC|AVC|HDR|UHD|FHD|WEB|BD|DVD|MP|EP|HD|HQ|CD|VOL|NO|PART|CAM|TS|SE)$/;
   // IPX00988 → IPX-988, ABP-0123 → ABP-123 (zero-padded to 5 on some sites); real 4-digit codes (DV-1656) stay.
   const num = n => n.length > 3 ? n.replace(/^0+/, '').padStart(3, '0') : n;
+  // What may follow the digits: end, any non-alphanumeric (CJK titles, @ . - [ space …), or a tag glued on directly
+  // (SNIS-989UC, MIDA-829restored, ABP-123C). The tag must end there so "ABC-123DEF" is not read as ABC-123.
+  const MULTI = 'UNCENSORED|DECENSORED|RESTORED|RESTORE|MOSAIC|LEAKED|LEAK|SUBBED|SUB|ENG|CHS|CHT|CH|CN|JP|UC|UHD|FHD|HD|4K|8K|1080P|720P|60FPS|HEVC|H265|X265|REMUX|UNCUT';
+  const tail = `(?=$|[^A-Z0-9]|(?:(?:${MULTI})+|[CURABDE])(?![A-Z0-9]))`; // several tags may be glued: SNIS-989UCrestored
   const pats = [
-    [/(?:^|[^A-Z0-9])(FC2)[\s\-_]?(PPV)[\s\-_]?(\d{5,8})(?![A-Z0-9])/g, m => `${m[1]}-${m[2]}-${m[3]}`],
-    [/(?:^|[^A-Z0-9])([A-Z]{2,6})[\-_](\d{2,5})(?![A-Z0-9])/g, m => `${m[1]}-${num(m[2])}`],
-    [/(?:^|[^A-Z0-9])(\d{6})[\-_](\d{3})(?![A-Z0-9])/g, m => `${m[1]}-${m[2]}`],
-    [/(?:^|[^A-Z0-9])([A-Z]{2,6})(\d{2,5})(?![A-Z0-9])/g, m => STOP.test(m[1]) ? '' : `${m[1]}-${num(m[2])}`],
+    [new RegExp(`(?:^|[^A-Z0-9])(FC2)[\\s\\-_]?(PPV)[\\s\\-_]?(\\d{5,8})${tail}`, 'g'), m => `${m[1]}-${m[2]}-${m[3]}`],
+    [new RegExp(`(?:^|[^A-Z0-9])([A-Z]{2,6})[\\-_](\\d{2,5})${tail}`, 'g'), m => `${m[1]}-${num(m[2])}`],
+    [new RegExp(`(?:^|[^A-Z0-9])(\\d{6})[\\-_](\\d{3})${tail}`, 'g'), m => `${m[1]}-${m[2]}`],
+    [new RegExp(`(?:^|[^A-Z0-9])([A-Z]{2,6})(\\d{2,5})${tail}`, 'g'), m => STOP.test(m[1]) ? '' : `${m[1]}-${num(m[2])}`],
   ];
   for (const [re, fmt] of pats) for (const m of up.matchAll(re)) { const c = fmt(m); if (c) return c; }
   return '';
