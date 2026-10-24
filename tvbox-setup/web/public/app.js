@@ -354,7 +354,7 @@ const healthCell = (s, busy) => busy ? '<b class="hs">测速中…</b>' : s.grou
   : !siteHealth.get(s.api) ? '<b class="hs">…</b>' : siteHealth.get(s.api).ok ? `<b class="hs ok">${siteHealth.get(s.api).ms}ms</b>` : '<b class="hs bad">不通</b>';
 function renderMenu() {
   const h = s => siteHealth.get(s.api);
-  $('#siteMenu').innerHTML = `<div class="mhead">点播源 · ${state.sites.length}<span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + state.sites.map(s =>
+  $('#siteMenu').innerHTML = `<div class="mhead">点播源 · ${state.sites.filter(s => !s.inGroup).length}<span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + state.sites.filter(s => !s.inGroup).map(s =>
     `<button data-k="${esc(s.key)}" class="${s.key === state.site ? 'on' : ''}${h(s) && !h(s).ok ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, healthBusy.has(s.api))}${s.key === 'local' || s.local ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('');
   watchMenu();
 }
@@ -386,7 +386,7 @@ function drainHealth() {
     (async () => {
       let r;
       for (let k = 0; k < 2; k++) {
-        r = await api('check', { api: s.api }, null).catch(e => ({ ok: false, error: e.message }));
+        r = await api('check', { api: s.api }, AbortSignal.timeout(22e3)).catch(e => ({ ok: false, error: e.message }));
         if (r.ok) break;
       }
       siteHealth.set(s.api, { ok: !!r.ok, ms: r.ms, total: r.total, at: Date.now() });
@@ -405,9 +405,18 @@ function visibleMenuSites() {
 function pingMenu(force) {
   watchMenu();
   const vis = visibleMenuSites();
-  if (force && !vis.length) return toast('没有可测速的源');
-  vis.forEach(s => queueHealth(s, force));
-  if (force) toast(`重测 ${vis.length} 个可见的源`);
+  const todo = force && !vis.length ? testableSites() : vis;
+  if (force && !todo.length) return toast('没有可测速的源');
+  todo.forEach(s => queueHealth(s, force));
+  if (force) toast(`重测 ${todo.length} 个源`);
+}
+const testableSites = () => state.sites.filter(s => s.api && !s.local && !s.inGroup);
+// Without opening the menu: every source that has no good result yet gets pinged in the background (4 at a time);
+// passing results are reused from the cache, failures are looked at again after 10 min.
+let autoPingT = 0;
+function autoPing() {
+  clearTimeout(autoPingT);
+  autoPingT = setTimeout(() => testableSites().forEach(s => queueHealth(s)), 1500);
 }
 
 async function loadSites() {
@@ -415,7 +424,10 @@ async function loadSites() {
   state.sites = j.sites; state.lives = j.live; state.level = j.level;
   const sig = j.level + '|' + j.sites.map(s => s.key + '|' + (s.api || '')).join(',');
   if (sig !== memoSig) { memoSig = sig; apiMemo.clear(); }
-  if (!state.sites.some(s => s.key === state.site)) state.site = state.sites[0]?.key || '';
+  // A source that moved into a 聚合源 is no longer a choice of its own: switch to its group.
+  const mine = state.sites.find(s => s.key === state.site);
+  if (mine?.inGroup) state.site = localStorage.site = mine.inGroup;
+  if (!state.sites.some(s => s.key === state.site)) state.site = state.sites.find(s => !s.inGroup)?.key || '';
   const cur = state.sites.find(s => s.key === state.site);
   $('#siteName').textContent = cur ? cur.name : '无源';
   $('.picker').hidden = !state.sites.length;
@@ -426,6 +438,7 @@ async function loadSites() {
   $('#levelTag').textContent = j.level === 'kids' ? '儿童模式' : '无限制';
   $('#levelTag').className = 'level ' + j.level;
   renderMenu();
+  autoPing();
 }
 $('#siteBtn').onclick = e => { e.stopPropagation(); $('#siteMenu').hidden = !$('#siteMenu').hidden; $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) requestAnimationFrame(() => pingMenu()); };
 $('#siteMenu').onclick = async e => {
@@ -452,7 +465,7 @@ $('#siteMenu').onclick = async e => {
   loadSites(); if (location.hash && location.hash !== '#/') location.hash = '#/'; else route();
 };
 const closeMenu = () => { $('#siteMenu').hidden = true; $('#siteBtn').classList.remove('open'); };
-document.addEventListener('click', e => { if (!e.target.closest('.picker')) closeMenu(); });
+document.addEventListener('click', e => { if (!e.composedPath().some(n => n.classList?.contains('picker'))) closeMenu(); });
 $('#searchForm').onsubmit = e => { e.preventDefault(); const q = $('#q').value.trim(); if (q) location.hash = '#/search/' + encodeURIComponent(q); };
 addEventListener('scroll', () => $('#top').classList.toggle('solid', scrollY > 30));
 addEventListener('hashchange', () => route({ nav: true }));
@@ -579,7 +592,7 @@ async function route(opts = {}) {
       return await renderHome();
     }
     if (page === 'search') return await renderSearch(decodeURIComponent(a || ''));
-    if (page === 'cat') return await renderCategory(a, decodeURIComponent(b || ''), decodeURIComponent(c || ''));
+    if (page === 'cat') return await renderCategory(decodeURIComponent(a || ''), decodeURIComponent(b || ''), decodeURIComponent(c || ''));
     return await renderHome();
   } catch (e) {
     if (isAbort(e)) return;
@@ -716,7 +729,7 @@ async function renderHome() {
       ${row(kids ? '少儿精选' : '最新更新', latest.list, '#/cat//' + encodeURIComponent(kids ? '少儿精选' : '最新更新'))}
       <div id="dbRows"></div>
       <div id="more"></div>
-      ${state.cats.length ? `<section class="row"><h2>全部分类</h2><div class="chips">${state.cats.map(c => `<a class="chip" href="#/cat/${esc(c.id)}/${encodeURIComponent(c.name)}">${esc(c.name)}</a>`).join('')}</div></section>` : ''}
+      ${state.cats.length ? `<section class="row"><h2>全部分类</h2><div class="chips">${state.cats.map(c => `<a class="chip" href="#/cat/${encodeURIComponent(c.id)}/${encodeURIComponent(c.name)}">${esc(c.name)}</a>`).join('')}</div></section>` : ''}
     </div>`;
   hero(latest.list.slice(0, 6));
   observeRatings(view);
@@ -732,7 +745,7 @@ async function renderHome() {
   const wanted = isWhitelisted ? state.cats.slice(0, own ? 20 : 8) : ROWS.map(w => state.cats.find(c => w.split('|').includes(c.name))).filter(Boolean);
   const lists = await Promise.all(wanted.map(c => api('list', { site, t: c.id }).catch(() => ({ list: [] }))));
   if (sig.aborted || site !== state.site || !$('#more')) return;
-  $('#more').innerHTML = wanted.map((c, i) => lists[i].list.length ? row(c.name, lists[i].list, `#/cat/${c.id}/${encodeURIComponent(c.name)}`) : '').join('');
+  $('#more').innerHTML = wanted.map((c, i) => lists[i].list.length ? row(c.name, lists[i].list, `#/cat/${encodeURIComponent(c.id)}/${encodeURIComponent(c.name)}`) : '').join('');
   observeRatings($('#more'));
   observeJav($('#more'));
 }
@@ -777,7 +790,7 @@ function renderHistory() {
   const list = hist.list();
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
   view.innerHTML = `<div class="page"><div class="pagehead"><h1>观看历史</h1>
-      ${list.length ? '<button class="small" data-clear="hist">清空全部</button>' : ''}</div>
+      ${list.length ? '<button class="small feedgo" data-feed="hist">▶ 沉浸观看</button><button class="small" data-clear="hist">清空全部</button>' : ''}</div>
     <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有观看记录。</p>
     ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'hist', sub: `${names[it.site] || it.siteName} · ${it.epName || ''}` })).join('')}</div>` : ''}</div>`;
   observeRatings(view);
@@ -787,7 +800,7 @@ function renderFavorites() {
   if (kidsMode()) { view.innerHTML = '<div class="page"><h1>我的收藏</h1><p class="empty">儿童模式下收藏不可见。</p></div>'; return; }
   const list = favs.all();
   view.innerHTML = `<div class="page"><div class="pagehead"><h1>我的收藏</h1>
-      ${list.length ? '<button class="small" data-clear="fav">清空全部</button>' : ''}</div>
+      ${list.length ? '<button class="small feedgo" data-feed="fav">▶ 沉浸观看</button><button class="small" data-clear="fav">清空全部</button>' : ''}</div>
     <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有收藏。打开影片，点「＋ 收藏」。</p>
     ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'fav', sub: [it.siteName, it.type].filter(Boolean).join(' · ') })).join('')}</div>` : ''}</div>`;
   observeRatings(view);
@@ -818,7 +831,7 @@ async function renderPerson(role, name) {
 async function renderCategory(t, name, siteKey) {
   const site = state.sites.some(x => x.key === siteKey) ? siteKey : state.site;
   const other = site !== state.site ? state.sites.find(x => x.key === site)?.name : '';
-  const head = `<div class="page"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
+  const head = `<div class="page"><div class="pagehead"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><button class="small feedgo" data-feed="cat" data-t="${esc(t || '')}" data-name="${esc(name || '全部')}" data-site="${esc(site)}">▶ 沉浸观看</button></div><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
   let pg = 0, count = 1, busy = false;
   const seen = new Set();
   const sk = history.state?.sk;
@@ -887,7 +900,7 @@ async function renderSearch(q) {
   const res = j.results.sort((a, b) => rank(a) - rank(b) || order[a.site] - order[b.site]);
   const people = [...(j.actor || []).map(p => ({ ...p, role: 'actor', label: '演员' })), ...(j.director || []).map(p => ({ ...p, role: 'director', label: '导演' }))]
     .sort((a, b) => (b.name === q) - (a.name === q) || (b.count ?? b.list?.length ?? 0) - (a.count ?? a.list?.length ?? 0));
-  view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1>
+  view.innerHTML = `<div class="page"><div class="pagehead"><h1>“${esc(q)}”</h1>${res.length ? `<button class="small feedgo" data-feed="search" data-q="${esc(q)}">▶ 沉浸观看</button>` : ''}</div>
     <p class="lan">${state.sites.length} 个源，${res.length} 部影片${people.length ? `，${people.length} 位演职员` : ''}${j.failed.length ? `；${esc(j.failed.join(' / '))} 未响应` : ''}</p>
     ${res.length ? `<div class="grid">${res.map(it => card(it, { sub: names[it.site] || it.siteName })).join('')}</div>` : '<div class="empty">没有影片匹配，换个关键词（片名、演员或导演）</div>'}
     ${people.length ? `<h2 class="rtitle">演员 / 导演</h2><div class="ptags">${people.map(p =>
@@ -1605,26 +1618,40 @@ const thumbIO = new IntersectionObserver(es => es.forEach(e => {
   thumbPump();
 }), { rootMargin: '300px' });
 
-// ---- 直播源 picker: one fixed-size button + a popover (search, delete, bulk). Switching only reloads #liveBody. ----
-const liveHealth = new Map();           // url -> { ok, text }
-const lm = { cfg: [], bulk: false, sel: new Set(), q: '', busy: false };
+// ---- 直播源 picker: one fixed-size button + a popover (desktop) / bottom sheet (phone). Search, tick rows, bulk delete. ----
+const liveHealth = new Map();           // url -> { ok, text, at } | 'busy'
+const lm = { cfg: [], sel: new Set(), q: '', busy: false };
 const liveUrlOf = key => lm.cfg[Number(key)]?.url || '';
 async function lmRefresh() { lm.cfg = (await get('/api/config', null)).lives || []; }
+const lmVisible = () => { const q = lm.q.toLowerCase(); return state.lives.filter(l => !q || l.name.toLowerCase().includes(q)); };
+// Status text of a row: running → 测速中, waiting in the queue → 排队中, else the last result.
+function lmStatus(k) {
+  const h = liveHealth.get(liveUrlOf(k));
+  if (h === 'busy') return { cls: '', text: '测速中…' };
+  if (lmQ.includes(k)) return { cls: '', text: '排队中' };
+  return h ? { cls: h.ok ? 'ok' : 'bad', text: h.text } : null;
+}
 function lmRender() {
   const box = $('#llist'); if (!box) return;
-  const cur = localStorage.live, q = lm.q.toLowerCase();
-  const rows = state.lives.filter(l => !q || l.name.toLowerCase().includes(q));
+  const cur = localStorage.live;
+  const rows = lmVisible();
   box.innerHTML = rows.map(l => {
-    const h = liveHealth.get(liveUrlOf(l.key));
-    const st = h === 'busy' ? '<b class="hs">测速中…</b>' : h ? `<b class="hs ${h.ok ? 'ok' : 'bad'}">${esc(h.text)}</b>` : '';
-    return `<div class="lpr ${l.key === cur ? 'on' : ''} ${h && h !== 'busy' && !h.ok ? 'dead' : ''}" data-k="${esc(l.key)}">
-      ${lm.bulk ? `<input type="checkbox" class="lsel" ${lm.sel.has(l.key) ? 'checked' : ''}>` : ''}<span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${st}
+    const s = lmStatus(l.key), h = liveHealth.get(liveUrlOf(l.key));
+    return `<div class="lpr ${l.key === cur ? 'on' : ''} ${h && h !== 'busy' && !h.ok ? 'dead' : ''} ${lm.sel.has(l.key) ? 'sel' : ''}" data-k="${esc(l.key)}">
+      <label class="lck"><input type="checkbox" class="lsel" ${lm.sel.has(l.key) ? 'checked' : ''}></label><span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${s ? `<b class="hs ${s.cls}">${esc(s.text)}</b>` : ''}
       <em class="x" data-del="${esc(l.key)}" title="删除这个直播源">×</em></div>`;
   }).join('') || '<div class="lan" style="padding:10px">没有匹配的直播源</div>';
-  $('#lmCount').textContent = lm.bulk ? `已选 ${lm.sel.size} / ${state.lives.length}` : `${state.lives.length} 个`;
-  $('#lmBar').hidden = !lm.bulk;
-  $('#lmBulk').classList.toggle('on', lm.bulk);
+  lmSelUI();
   lmWatch();
+}
+// Ticking a row only touches the checkbox and the action bar (no re-render, the list never jumps).
+function lmSelUI() {
+  const n = lm.sel.size;
+  $('#lmCount').textContent = `${state.lives.length} 个直播源`;
+  $('#lmBar').hidden = !n;
+  $('#lmSelN').textContent = `已选 ${n}`;
+  const vis = lmVisible();
+  $('#lmBar [data-lm=all]').textContent = vis.length && vis.every(l => lm.sel.has(l.key)) ? '取消全选' : '全选';
 }
 async function lmSave(mutate) {
   const curUrl = liveUrlOf(localStorage.live);
@@ -1645,81 +1672,66 @@ async function lmPingOne(k) {
   let j;
   for (let t = 0; t < 3; t++) {            // network blips: retry twice before calling a source dead
     if (t) await new Promise(ok => setTimeout(ok, 600 * t));
-    j = await api('checklive', { url, name }, null).catch(e => ({ ok: false, error: e.message }));
+    j = await api('checklive', { url, name }, AbortSignal.timeout(25e3)).catch(e => ({ ok: false, error: e.message }));
     if (j.ok) break;
   }
   liveHealth.set(url, { ok: !!j.ok, text: j.channels ? `${j.channels}台 · ${j.alive}/${j.sampled}` : '不通', at: Date.now() });
 }
-// Only rows scrolled into view in the popover are pinged (3 at a time); results are kept 5 min.
-function lmQueue(k, force) {
+// Rows scrolled into view are pinged (3 at a time, newest first), results are kept 5 min. A row that scrolls away
+// before its turn leaves the queue, so what the user is looking at is always what gets tested next.
+function lmQueue(k) {
   const url = liveUrlOf(k), h = liveHealth.get(url);
-  if (!url || h === 'busy' || (!force && h && Date.now() - h.at < LIVE_TTL)) return;
-  liveHealth.set(url, 'busy'); lmQ.push(k); lmDrain();
+  if (!url || h === 'busy' || (h && Date.now() - h.at < LIVE_TTL)) return;
+  lmQ = [k, ...lmQ.filter(x => x !== k)];
+  lmMark(k); lmDrain();
 }
+function lmUnqueue(k) { if (lmQ.includes(k)) { lmQ = lmQ.filter(x => x !== k); lmMark(k); } }
 function lmDrain() {
   while (lmRun < 3 && lmQ.length) {
-    const k = lmQ.shift(); lmRun++; lmMark(k);
+    const k = lmQ.shift(), url = liveUrlOf(k); if (!url) continue;
+    lmRun++; liveHealth.set(url, 'busy'); lmMark(k);
     lmPingOne(k).finally(() => { lmRun--; lmMark(k); lmDrain(); });
   }
 }
 // Update one row in place (no re-render, so the list never jumps while results arrive).
 function lmMark(k) {
   const row = $(`#llist .lpr[data-k="${CSS.escape(k)}"]`); if (!row) return;
-  const h = liveHealth.get(liveUrlOf(k));
+  const s = lmStatus(k), h = liveHealth.get(liveUrlOf(k));
   let hs = $('.hs', row);
-  if (!h) { hs?.remove(); return; }
+  if (!s) { hs?.remove(); return; }
   if (!hs) { hs = document.createElement('b'); row.insertBefore(hs, $('em.x', row)); }
-  hs.className = 'hs ' + (h === 'busy' ? '' : h.ok ? 'ok' : 'bad');
-  hs.textContent = h === 'busy' ? '测速中…' : h.text;
-  row.classList.toggle('dead', h !== 'busy' && !h.ok);
+  hs.className = 'hs ' + s.cls;
+  hs.textContent = s.text;
+  row.classList.toggle('dead', !!h && h !== 'busy' && !h.ok);
 }
 function lmWatch() {
   lmIO?.disconnect();
   const m = $('#liveMenu'); if (!m || m.hidden) return;
-  lmIO = new IntersectionObserver(es => es.forEach(en => { if (en.isIntersecting) lmQueue(en.target.dataset.k); }), { root: $('#llist') });
+  lmIO = new IntersectionObserver(es => es.forEach(en => en.isIntersecting ? lmQueue(en.target.dataset.k) : lmUnqueue(en.target.dataset.k)), { root: $('#llist') });
   $$('#llist .lpr').forEach(r => lmIO.observe(r));
 }
-async function lmTest(keys) {
-  const q = keys.filter(k => liveUrlOf(k));
-  q.forEach(k => liveHealth.set(liveUrlOf(k), 'busy')); lmRender();
-  await Promise.all(Array.from({ length: Math.min(3, q.length) }, async () => {
-    while (q.length) { const k = q.shift(); await lmPingOne(k); lmMark(k); }
-  }));
-  lmRender();
-}
 async function lmOp(op) {
-  if (lm.busy) return;
-  const keys = state.lives.map(l => l.key), sel = keys.filter(k => lm.sel.has(k));
-  const dropKeys = ks => { const s = new Set(ks.map(Number)); return lives => lives.filter((_, i) => !s.has(i)); };
+  if (op === 'clear') { lm.sel.clear(); $$('#llist .lpr.sel').forEach(r => { r.classList.remove('sel'); $('.lsel', r).checked = false; }); return lmSelUI(); }
+  if (op === 'all') {
+    const vis = lmVisible(), all = vis.every(l => lm.sel.has(l.key));
+    vis.forEach(l => all ? lm.sel.delete(l.key) : lm.sel.add(l.key));
+    $$('#llist .lpr').forEach(r => { const on = lm.sel.has(r.dataset.k); r.classList.toggle('sel', on); $('.lsel', r).checked = on; });
+    return lmSelUI();
+  }
+  if (op !== 'delsel' || lm.busy || !lm.sel.size) return;
+  const drop = new Set([...lm.sel].map(Number)), n = drop.size;
+  if (!confirm(`删除选中的 ${n} 个直播源？`)) return;
   try {
     lm.busy = true;
-    if (op === 'all') { const all = sel.length === keys.length; lm.sel = new Set(all ? [] : keys); }
-    else if (op === 'invert') lm.sel = new Set(keys.filter(k => !lm.sel.has(k)));
-    else if (op === 'test') await lmTest(sel.length ? sel : keys);
-    else if (op === 'delsel') {
-      if (!sel.length) return toast('先勾选要删除的直播源');
-      if (confirm(`删除选中的 ${sel.length} 个直播源？`)) { await lmSave(dropKeys(sel)); toast(`已删除 ${sel.length} 个`); }
-    } else if (op === 'delbad') {
-      const todo = keys.filter(k => !liveHealth.get(liveUrlOf(k)));
-      if (todo.length) { toast(`还有 ${todo.length} 个没测过，先测速…`); await lmTest(todo); }
-      const bad = keys.filter(k => { const h = liveHealth.get(liveUrlOf(k)); return h && h !== 'busy' && !h.ok; });
-      if (!bad.length) return toast('没有不通的直播源');
-      if (confirm(`删除 ${bad.length} 个不通的直播源？（已自动重试 2 次）`)) { await lmSave(dropKeys(bad)); toast(`已删除 ${bad.length} 个`); }
-    } else if (op === 'merge') {
-      if (sel.length < 2) return toast('至少勾选 2 个直播源');
-      const name = prompt(`把选中的 ${sel.length} 个直播源合并成一个（同分组归并，相同地址去重）。\n新源名称：`, '合并直播源');
-      if (!name) return;
-      const out = await req('POST', '/api/live/merge', { sources: sel.map(k => ({ name: state.lives.find(l => l.key === k).name, url: liveUrlOf(k) })) });
-      const first = Math.min(...sel.map(Number)), drop = new Set(sel.map(Number));
-      await lmSave(lives => lives.flatMap((l, i) => i === first ? [{ name, url: out.url }] : drop.has(i) ? [] : [l]));
-      toast(`合并完成：${out.groups} 个分组、${out.channels} 个频道，去重 ${out.dup}`);
-    }
+    await lmSave(lives => lives.filter((_, i) => !drop.has(i)));
+    toast(`已删除 ${n} 个`);
   } catch (e) { toast(e.message); }
-  finally { lm.busy = false; lmRender(); }
+  finally { lm.busy = false; }
 }
 document.addEventListener('click', e => {
   const m = $('#liveMenu'); if (!m || m.hidden) return;
-  if (e.target.closest('.lpick') || e.target.closest('#liveMenu')) return;
+  // composedPath: a row that was re-rendered during the click is already detached, closest() would miss it
+  if (e.composedPath().some(n => n === m || n.classList?.contains('lpick'))) return;
   m.hidden = true; $('#liveBtn')?.classList.remove('open');
 });
 
@@ -1735,10 +1747,9 @@ async function renderLive() {
     view.innerHTML = `<div class="page"><div class="pagehead" id="liveHead"><h1>直播</h1>
       <div class="lpick"><button id="liveBtn" class="sitebtn lbtn" type="button"><span id="lmName"></span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <div id="liveMenu" class="menu lmenu" hidden>
-          <div class="lm-top"><input id="lmq" class="find" type="search" placeholder="搜直播源" autocomplete="off"><button class="small" id="lmBulk" type="button">批量</button></div>
-          <div class="lm-bar" id="lmBar" hidden>
-            <button class="small" data-lm="all">全选</button><button class="small" data-lm="invert">反选</button><button class="small" data-lm="test">测速</button>
-            <button class="small" data-lm="merge">合并</button><button class="small dng" data-lm="delsel">删除选中</button><button class="small dng" data-lm="delbad">删除不通的</button></div>
+          <div class="lm-top"><input id="lmq" class="find" type="search" placeholder="搜直播源" autocomplete="off"></div>
+          <div class="lm-bar" id="lmBar" hidden><span id="lmSelN"></span><i></i>
+            <button class="small" data-lm="all">全选</button><button class="small dng" data-lm="delsel">删除</button><button class="small" data-lm="clear">取消</button></div>
           <div class="lm-list" id="llist"></div>
           <div class="lm-foot"><span id="lmCount" class="lan"></span><a href="#/settings" class="lan"><u>在设置里管理</u></a></div>
         </div></div>
@@ -1749,8 +1760,7 @@ async function renderLive() {
       const m = $('#liveMenu'); m.hidden = !m.hidden; $('#liveBtn').classList.toggle('open', !m.hidden);
       if (!m.hidden) { lmRender(); await lmRefresh().catch(() => {}); lmRender(); $('.lpr.on', m)?.scrollIntoView({ block: 'nearest' }); }
     };
-    $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lmRender(); };
-    $('#lmBulk').onclick = () => { lm.bulk = !lm.bulk; lm.sel.clear(); lmRender(); };
+    $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lm.sel.clear(); lmRender(); };
     $('#lmBar').onclick = e => { const b = e.target.closest('[data-lm]'); if (b) lmOp(b.dataset.lm); };
     $('#liveMenu').onclick = e => {
       const del = e.target.closest('[data-del]');
@@ -1761,7 +1771,13 @@ async function renderLive() {
         return;
       }
       const row = e.target.closest('.lpr'); if (!row) return;
-      if (lm.bulk) { const k = row.dataset.k; lm.sel.has(k) ? lm.sel.delete(k) : lm.sel.add(k); return lmRender(); }
+      if (e.target.closest('.lck')) {                 // the tick box: select only, never switches source
+        const k = row.dataset.k, on = e.target.closest('.lck').querySelector('input');
+        if (e.target !== on) return;                  // the label forwards its click to the input: handle it once
+        on.checked ? lm.sel.add(k) : lm.sel.delete(k);
+        row.classList.toggle('sel', on.checked);
+        return lmSelUI();
+      }
       localStorage.live = row.dataset.k;
       $('#liveMenu').hidden = true; $('#liveBtn').classList.remove('open');
       $('#lmName').textContent = l2name(); newPage(); loadLiveBody();
@@ -1990,18 +2006,34 @@ async function renderSettings() {
   const flags = x => `<label class="flag"><input type="checkbox" class="kids" ${x.kids ? 'checked' : ''}>少儿</label><label class="flag"><input type="checkbox" class="adult" ${x.adult ? 'checked' : ''}>成人</label>`;
   const cacheOf = x => testCache.get(String(x.api || x.url || '').trim());
   const stOf = x => { const t = cacheOf(x); return t ? `<span class="${t.cls}" title="${esc(t.title)}">${esc(t.text)}</span>` : '<span class="status"></span>'; };
-  const rowHtml = (x, kind, i) => x.members ? `<div class="srow grp" data-i="${i}" data-key="${esc(x.key)}" data-members="${esc(JSON.stringify(x.members))}">
-      <label class="selcell"><input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
+  const dragH = '<span class="drag" title="按住拖动排序">⋮⋮</span>';
+  const rowHtml = (x, kind, i, parent) => x.members ? `<div class="srow grp" data-i="${i}" data-key="${esc(x.key)}" data-members="${esc(JSON.stringify(x.members))}">
+      <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
-      <input class="url" value="${esc('聚合 ' + x.members.length + ' 个源：' + x.members.map(k => (cfg.sites.find(s => s.key === k) || {}).name || k).join('、'))}" readonly>
-      <span class="ops"><span class="tagl">聚合源</span><button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`
-    : `<div class="srow" data-i="${i}" ${x.key && kind === 'site' ? `data-key="${esc(x.key)}"` : ''} ${x.from ? `data-from="${esc(x.from)}"` : ''} ${x.categories ? `data-cats="${esc(JSON.stringify(x.categories))}"` : ''} ${cacheOf(x) ? `data-ok="${cacheOf(x).cls === 'status ok' ? 1 : 0}"` : ''}>
-      <label class="selcell"><input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
+      <input class="url" value="" readonly>
+      <span class="ops"><span class="tagl">聚合源</span>${flags(x)}<button data-op="toggle"></button><button data-op="dissolve" title="解散：成员回到主列表，聚合源删除">解散</button><button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del" title="删除聚合源和它的所有成员">删除</button></span></div>`
+    : `<div class="srow${parent ? ' mem' : ''}" data-i="${i}" ${parent ? `data-parent="${esc(parent)}" hidden` : ''} ${x.key && kind === 'site' ? `data-key="${esc(x.key)}"` : ''} ${x.from ? `data-from="${esc(x.from)}"` : ''} ${x.categories ? `data-cats="${esc(JSON.stringify(x.categories))}"` : ''} ${cacheOf(x) ? `data-ok="${cacheOf(x).cls === 'status ok' ? 1 : 0}"${cacheOf(x).total !== undefined ? ` data-total="${cacheOf(x).total}"` : ''}` : ''}>
+      <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="${esc(kind === 'site' ? x.api : x.url)}" placeholder="${kind === 'site' ? 'https://example.com/api.php/provide/vod' : 'https://…/live.m3u / .m3u8 / .txt'}">
-      <span class="ops">${kind === 'site' ? `${flags(x)}${stOf(x)}<button data-op="test">测速</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
+      <span class="ops">${kind === 'site' ? `${flags(x)}${stOf(x)}<button data-op="test">测速</button>${parent ? '<button data-op="release" title="移出聚合源，回到主列表">释放</button>' : ''}` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
         <button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`;
   const rowsHtml = (list, kind) => list.map((x, i) => rowHtml(x, kind, i)).join('');
+  // 点播源 list: a 聚合源 row carries its members right under it (collapsed); they are not listed on their own any more.
+  const siteRowsHtml = () => {
+    const byKey = new Map(cfg.sites.filter(s => !s.members).map(s => [s.key, s]));
+    const claimed = new Map();
+    for (const g of cfg.sites) if (g.members) for (const k of g.members) if (byKey.has(k) && !claimed.has(k)) claimed.set(k, g.key);
+    const out = []; let i = 0;
+    for (const x of cfg.sites) {
+      if (x.members) {
+        const mem = x.members.filter(k => claimed.get(k) === x.key).map(k => byKey.get(k));
+        out.push(rowHtml({ ...x, members: mem.map(m => m.key) }, 'site', i++));
+        mem.forEach(m => out.push(rowHtml(m, 'site', i++, x.key)));
+      } else if (!claimed.has(x.key)) out.push(rowHtml(x, 'site', i++));
+    }
+    return out.join('');
+  };
   const foldOpen = window.__fold || (window.__fold = {});
   const FOLD_AT = 8; // more sources than this: the list starts collapsed
   const fold = (kind, n) => n > FOLD_AT ? `<div class="foldbar" data-foldbar="${kind}"><button class="small" data-foldbtn="${kind}">${foldOpen[kind] ? '收起' : `展开全部 ${n} 个`}</button><span class="lan" data-foldpeek="${kind}"></span></div>` : '';
@@ -2013,7 +2045,7 @@ async function renderSettings() {
   };
   const bulk = kind => `<div class="actions bulk" data-kind="${kind}"><label class="flag"><input type="checkbox" data-bulk="all">全选</label>
       <button class="small" data-bulk="invert">反选</button><button class="small" data-bulk="delsel">删除选中</button>
-      <button class="small" data-bulk="delbad">删除不通的</button><button class="small" data-bulk="retry">重测不通的</button><button class="small" data-bulk="export">导出选中</button>
+      <button class="small" data-bulk="delbad">删除不通的</button>${kind === 'site' ? '<button class="small" data-bulk="delempty" title="删除能连上、但一部片都没有的点播源">删除 0 部的</button>' : ''}<button class="small" data-bulk="retry">重测不通的</button><button class="small" data-bulk="export">导出选中</button>
       <button class="small" data-bulk="merge" title="${kind === 'live' ? '把选中的直播源合成一个频道列表（同分组归并、相同地址去重）' : '把选中的点播源聚合成一个入口：搜索/浏览/播放线路同时覆盖所有成员，同名影片合并'}">${kind === 'live' ? '合并选中' : '聚合选中'}</button><span class="lan" data-bulk="count"></span></div>`;
   view.innerHTML = `<div class="page set"><h1>设置</h1>
     <p class="lan">修改保存在服务端，局域网里所有浏览器共享。${info.urls.length ? '其他设备打开：' + info.urls.map(u => `<code>${esc(u)}</code>`).join(' ') : ''}</p>
@@ -2024,7 +2056,7 @@ async function renderSettings() {
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
     <section><h2>点播源</h2><p class="hint">苹果CMS 接口（<code>…/api.php/provide/vod</code>，返回 JSON）。需要 spider jar / 解析的 type 3 源浏览器跑不了，导入时会自动跳过。</p>
-      ${fold('site', cfg.sites.length)}<div class="foldbox" data-fold="site" ${cfg.sites.length > FOLD_AT && !foldOpen.site ? 'hidden' : ''}>${bulk('site')}<div id="sites">${rowsHtml(cfg.sites, 'site')}</div></div>
+      ${fold('site', cfg.sites.length)}<div class="foldbox" data-fold="site" ${cfg.sites.length > FOLD_AT && !foldOpen.site ? 'hidden' : ''}>${bulk('site')}<div id="sites">${siteRowsHtml()}</div></div>
       <div class="actions"><button class="small" id="addSite">+ 添加点播源</button><button class="small" id="testAll">全部测速</button><button class="small" id="stopTest">停止测速</button></div></section>
     <section id="localSec"><h2>本地媒体 <span class="tagl">内置源</span></h2><p class="lan">加载中…</p></section>
     <section><h2>直播源</h2><p class="hint">支持 m3u / m3u8 频道列表、TVBox txt（<code>频道名,地址</code> + <code>分组,#genre#</code>），或者单条 .m3u8 播放地址。内置文件直接写文件名。「编辑文本」可以直接改频道列表。</p>
@@ -2042,7 +2074,7 @@ async function renderSettings() {
 
   const collect = (box, kind) => $$('.srow', box).map(r => {
     const name = $('.nm', r).value.trim(), url = $('.url', r).value.trim();
-    if (r.dataset.members) return { key: r.dataset.key, name: name || r.dataset.key, type: 1, members: JSON.parse(r.dataset.members), api: 'group' };
+    if (r.dataset.members) return { key: r.dataset.key, name: name || r.dataset.key, type: 1, members: JSON.parse(r.dataset.members), api: 'group', ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}) };
     if (kind !== 'site') return { name: name || url, url, ...(r.dataset.from ? { from: r.dataset.from } : {}) };
     const s = { key: r.dataset.key || name || url, name: name || url, type: 1, api: url };
     if ($('.kids', r).checked) s.kids = 1;
@@ -2052,7 +2084,28 @@ async function renderSettings() {
   }).filter(x => (x.api || x.url));
   const current = () => ({ sites: collect($('#sites'), 'site'), lives: collect($('#lives'), 'live') });
   const dirty = () => { const d = $('#dirty'); if (d) d.textContent = '有未保存的修改'; };
-  const renumber = () => { $$('#sites, #lives').forEach(box => $$('.srow', box).forEach((r, i) => { r.dataset.i = i; $('.lan', r).textContent = i + 1; })); };
+  const isMem = r => r.classList.contains('mem');
+  const blockOf = head => {
+    const b = [head];
+    if (!head.dataset.members) return b;
+    for (let n = head.nextElementSibling; n && isMem(n) && n.dataset.parent === head.dataset.key; n = n.nextElementSibling) b.push(n);
+    return b;
+  };
+  const headOf = r => { while (r && isMem(r)) r = r.previousElementSibling; return r; };
+  const unMem = m => { m.classList.remove('mem'); delete m.dataset.parent; m.hidden = false; };
+  // Members, the summary text and the expand button of every 聚合源 row follow what is actually under it; an empty one goes away.
+  const syncGroups = () => $$('#sites .srow.grp').forEach(g => {
+    const mem = $$('#sites .srow.mem').filter(m => m.dataset.parent === g.dataset.key);
+    if (!mem.length) return g.remove();
+    g.dataset.members = JSON.stringify(mem.map(m => m.dataset.key));
+    $('.url', g).value = `聚合 ${mem.length} 个源：` + mem.map(m => $('.nm', m).value.trim() || m.dataset.key).join('、');
+    $('[data-op=toggle]', g).textContent = (g.dataset.open ? '收起 ' : '展开 ') + mem.length;
+    mem.forEach(m => { m.hidden = !g.dataset.open; });
+  });
+  const renumber = () => {
+    syncGroups();
+    $$('#sites, #lives').forEach(box => { let n = 0; $$('.srow', box).forEach(r => { const m = isMem(r); r.dataset.i = n; $('.lan', r).textContent = m ? '' : ++n; }); });
+  };
   const refreshCount = () => $$('.bulk').forEach(b => {
     const box = $(b.dataset.kind === 'site' ? '#sites' : '#lives'), n = $$('.sel:checked', box).length, all = $$('.srow', box).length;
     $('[data-bulk=count]', b).textContent = n ? `已选 ${n} / ${all}` : `共 ${all}`;
@@ -2065,7 +2118,18 @@ async function renderSettings() {
     box.insertBefore(row, before || null); renumber(); dirty(); refreshCount();
     return row;
   };
-  const dropRows = rows => { rows.forEach(r => r.remove()); renumber(); dirty(); refreshCount(); };
+  // Up / down: a member moves inside its group, anything else moves together with its members, past the neighbouring entry.
+  const moveRow = (r, dir) => {
+    if (isMem(r)) {
+      const s = dir < 0 ? r.previousElementSibling : r.nextElementSibling;
+      if (s && isMem(s) && s.dataset.parent === r.dataset.parent) dir < 0 ? s.before(r) : s.after(r);
+      return;
+    }
+    const blk = blockOf(r);
+    if (dir < 0) { const p = r.previousElementSibling; if (p) headOf(p).before(...blk); }
+    else { const n = blk[blk.length - 1].nextElementSibling; if (n) { const nb = blockOf(n); nb[nb.length - 1].after(...blk); } }
+  };
+  const dropRows = rows => { rows.forEach(r => (r.dataset.members ? blockOf(r) : [r]).forEach(x => x.remove())); renumber(); dirty(); refreshCount(); };
   // Saves without rebuilding the page (fold state, scroll position and speed-test results stay as they are).
   // Only the raw-JSON editor re-renders, since there the text itself may have been normalised.
   const persist = async (c, rerender) => {
@@ -2083,30 +2147,41 @@ async function renderSettings() {
   // results cached per url so they survive deleting / reordering / re-rendering.
   const RETRIES = 2;
   let testGen = 0;
+  const TEST_TIMEOUT = 22e3; // the server gives up on a source after 15 s; a request that hangs must never hold a slot of the pool
   const testOnce = async (url, name, live) => {
+    const signal = AbortSignal.timeout(TEST_TIMEOUT);
     if (live) {
-      const j = await api('checklive', { url, name }).catch(e => ({ ok: false, error: e.message }));
+      const j = await api('checklive', { url, name }, signal).catch(e => ({ ok: false, error: e.message }));
       return { ok: !!j.ok, text: j.channels ? `${j.ms}ms · ${j.channels}台 · 抽测${j.alive}/${j.sampled}` : '不通', title: j.error || '随机抽 8 个频道，能拿到数据的算可连' };
     }
-    const j = await api('check', { api: url }).catch(e => ({ ok: false, error: e.message }));
-    return { ok: !!j.ok, text: j.ok ? `${j.ms}ms · ${j.total}部` : '不通', title: j.error || '' };
+    const j = await api('check', { api: url }, signal).catch(e => ({ ok: false, error: e.message }));
+    return { ok: !!j.ok, total: j.ok ? j.total : undefined, text: j.ok ? `${j.ms}ms · ${j.total}部` : '不通', title: j.error || '' };
+  };
+  // A row that was queued / running when its run was cancelled goes back to its last known result (or blank).
+  const restoreRow = r => {
+    const st = $('.status', r); if (!st) return;
+    const c = testCache.get($('.url', r)?.value.trim());
+    st.className = c ? c.cls : 'status'; st.textContent = c ? c.text : ''; st.title = c ? c.title : '';
   };
   const test = async (r, gen = testGen) => {
     const st = $('.status', r), url = $('.url', r).value.trim(), live = r.parentElement.id === 'lives';
     if (!url || r.dataset.members) return;
+    const stale = () => gen !== testGen || !r.isConnected;
+    if (stale()) return restoreRow(r);
     st.className = 'status'; st.textContent = '测试中…';
     let res;
     for (let k = 0; k <= RETRIES; k++) {
-      if (gen !== testGen || !r.isConnected) return;
-      if (k) { st.textContent = `重试 ${k}/${RETRIES}…`; await new Promise(ok => setTimeout(ok, 600 * k)); if (gen !== testGen || !r.isConnected) return; }
+      if (stale()) return restoreRow(r);
+      if (k) { st.textContent = `重试 ${k}/${RETRIES}…`; await new Promise(ok => setTimeout(ok, 600 * k)); if (stale()) return restoreRow(r); }
       res = await testOnce(url, $('.nm', r).value.trim(), live);
       if (res.ok) break;
     }
-    if (gen !== testGen || !r.isConnected) return;
+    if (stale()) return restoreRow(r);
     const cls = 'status ' + (res.ok ? 'ok' : 'bad');
     st.className = cls; st.textContent = res.text; st.title = res.title;
     r.dataset.ok = res.ok ? '1' : '0';
-    testCache.set(url, { cls, text: res.text, title: res.title });
+    if (res.total !== undefined) r.dataset.total = res.total; else delete r.dataset.total;
+    testCache.set(url, { cls, text: res.text, title: res.title, total: res.total });
   };
   // One pool for sites and lives together: at most 4 requests in flight, so page loads and /api/local are never starved
   // (browsers allow only 6 connections per host). Entries from an older generation drain instantly (test() bails out).
@@ -2117,9 +2192,24 @@ async function renderSettings() {
       test(r, gen).catch(() => {}).finally(() => { testRun--; done(); pump(); });
     }
   };
-  const testMany = rows => Promise.all(rows.map(r => new Promise(done => { testQ.push({ r, gen: testGen, done }); pump(); })));
+  // Every row of the run says 排队中 right away; the pool turns them into 测试中… four at a time.
+  const testMany = rows => Promise.all(rows.map(r => new Promise(done => {
+    const st = $('.status', r);
+    if (st && $('.url', r).value.trim() && !r.dataset.members) { st.className = 'status'; st.textContent = '排队中'; st.title = ''; }
+    testQ.push({ r, gen: testGen, done }); pump();
+  })));
   const editText = async r => {
-    const url = $('.url', r).value.trim(), name = $('.nm', r).value.trim() || url;
+    let url = $('.url', r).value.trim();
+    const name = $('.nm', r).value.trim() || url;
+    // On this machine the list opens in VS Code (a real editor); other devices get the in-page text box below.
+    if ((await infoP()).loopback) {
+      try {
+        const j = await req('POST', '/api/live/edit', { url });
+        if (!url.startsWith('local:')) { r.dataset.from = url; $('.url', r).value = url = j.url; await persist(current()); }
+        if (j.ok) return toast('已在 VS Code 打开，保存文件即生效（频道列表每次都从这个文件读）');
+        toast(j.error + '，改用网页里的编辑框');
+      } catch (err) { toast(err.message); }
+    }
     const m = document.createElement('div');
     m.className = 'modal'; m.id = 'textModal';
     m.innerHTML = `<div class="sheet editor"><div class="body"><h3>编辑「${esc(name)}」<span class="lan" id="chCount"></span></h3>
@@ -2161,15 +2251,26 @@ async function renderSettings() {
     if (op === 'test') { testGen++; return test(r); }
     if (op === 'edit') return editText(r);
     if (op === 'del') return dropRows([r]);
-    if (op === 'up' && r.previousElementSibling) r.parentElement.insertBefore(r, r.previousElementSibling);
-    if (op === 'down' && r.nextElementSibling) r.parentElement.insertBefore(r.nextElementSibling, r);
+    if (op === 'toggle') { r.dataset.open = r.dataset.open ? '' : '1'; return syncGroups(); }
+    if (op === 'dissolve') {
+      if (!confirm(`解散聚合源「${$('.nm', r).value.trim()}」？成员回到主列表。`)) return;
+      blockOf(r).slice(1).forEach(unMem); r.remove(); renumber(); dirty(); return refreshCount();
+    }
+    if (op === 'release') {
+      const g = $$('#sites .srow.grp').find(x => x.dataset.key === r.dataset.parent);
+      if (g) { const rest = blockOf(g).filter(x => x !== r); rest[rest.length - 1].after(r); }
+      unMem(r); renumber(); dirty(); return refreshCount();
+    }
+    if (op === 'up' || op === 'down') moveRow(r, op === 'up' ? -1 : 1);
     renumber(); dirty();
   };
   // Export rows as a shareable JSON set. Local / edited live lists carry their channel text so the paste is self-contained.
   const exportSources = async (siteRows, liveRows) => {
     try {
-      const groups = siteRows.filter(r => r.dataset.members).map(r => ({ key: r.dataset.key, name: $('.nm', r).value.trim(), members: JSON.parse(r.dataset.members) }));
-      siteRows = siteRows.filter(r => !r.dataset.members);
+      const gRows = siteRows.filter(r => r.dataset.members);
+      const groups = gRows.map(r => ({ key: r.dataset.key, name: $('.nm', r).value.trim(), members: JSON.parse(r.dataset.members), ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}) }));
+      const gKeys = new Set(gRows.map(r => r.dataset.key));
+      siteRows = [...new Set([...siteRows.filter(r => !r.dataset.members), ...$$('#sites .srow.mem').filter(m => gKeys.has(m.dataset.parent))])];
       const sites = siteRows.map(r => {
         const s = { key: r.dataset.key || undefined, name: $('.nm', r).value.trim(), api: $('.url', r).value.trim() };
         if ($('.kids', r).checked) s.kids = 1;
@@ -2221,15 +2322,40 @@ async function renderSettings() {
       if (confirm(`删除 ${bad.length} 个不通的源？（已自动重试 ${RETRIES} 次；点「保存」后生效）`)) dropRows(bad);
       return;
     }
+    if (op === 'delempty') {
+      const todo = rows.filter(r => r.dataset.ok === undefined && !r.dataset.members && !r.dataset.cats && $('.url', r).value.trim());
+      if (todo.length) { toast(`还有 ${todo.length} 个没测过，先测速…`); testGen++; await testMany(todo); }
+      const empty = $$('.srow', box).filter(r => r.dataset.ok === '1' && r.dataset.total === '0');
+      if (!empty.length) return toast('没有 0 部内容的点播源');
+      if (confirm(`删除 ${empty.length} 个 0 部内容的点播源？（点「保存」后生效）`)) dropRows(empty);
+      return;
+    }
     if (op === 'merge' && kind === 'site') {
-      const mem = sel.filter(r => !r.dataset.members);
-      if (mem.length < 2) return toast('至少勾选 2 个点播源（聚合源不能再嵌套）');
-      const name = prompt(`把选中的 ${mem.length} 个点播源聚合成一个入口（同名影片合并，播放线路汇总，成员不通会自动跳过）。\n聚合源名称：`, '聚合源');
-      if (!name) return;
-      const keys = mem.map(r => r.dataset.key || $('.nm', r).value.trim() || $('.url', r).value.trim());
-      const row = addRow('site', { key: 'group-' + Date.now().toString(36), name, members: keys }, box.firstElementChild);
-      toast(`已生成聚合源「${name}」，成员保留；点「保存」生效`);
-      row.scrollIntoView({ block: 'nearest' });
+      // Pick several 点播源 → one new 聚合源 (at the place of the first picked one). Pick a 聚合源 as well → the others
+      // join it instead (and it moves to the first picked place). Picked 聚合源 are merged into the first one.
+      const top = sel.filter(r => !isMem(r));
+      const groups = top.filter(r => r.dataset.members), atoms = top.filter(r => !r.dataset.members && $('.url', r).value.trim());
+      if (!groups.length && atoms.length < 2) return toast('至少勾选 2 个点播源；已有聚合源时，勾选它再勾要加入的点播源');
+      if (groups.length === 1 && !atoms.length) return toast('再勾选要加入这个聚合源的点播源');
+      const first = top[0];
+      let target = groups[0], nameFor = '';
+      if (!target) {
+        nameFor = prompt(`把选中的 ${atoms.length} 个点播源聚合成一个入口（同名影片合并，播放线路汇总，成员不通会自动跳过）。\n成员会收进这个聚合源里，不再单独显示，需要时可「释放」。\n聚合源名称：`, '聚合源');
+        if (!nameFor) return;
+        target = addRow('site', { key: 'group-' + Date.now().toString(36), name: nameFor, members: [] }, first);
+      } else if (first !== target) first.before(...blockOf(target));
+      const add = top.flatMap(r => r === target ? [] : r.dataset.members ? blockOf(r).slice(1) : [r]);
+      const others = groups.filter(g => g !== target);
+      let tail = blockOf(target).pop();
+      add.forEach(m => {
+        if (!m.dataset.key) m.dataset.key = $('.nm', m).value.trim() || $('.url', m).value.trim();
+        m.classList.add('mem'); m.dataset.parent = target.dataset.key; tail.after(m); tail = m;
+      });
+      others.forEach(g => g.remove());
+      target.dataset.open = '1';
+      renumber(); dirty(); refreshCount();
+      toast(nameFor ? `已生成聚合源「${nameFor}」，成员收在它下面；点「保存」生效` : `已并入「${$('.nm', target).value.trim()}」${add.length} 个源；点「保存」生效`);
+      target.scrollIntoView({ block: 'nearest' });
       return;
     }
     if (op === 'merge') {
@@ -2261,8 +2387,49 @@ async function renderSettings() {
   $('#addLive').onclick = () => $('.nm', addRow('live', { name: '', url: '' })).focus();
   $('#testAll').onclick = () => { testGen++; testMany($$('#sites .srow')); };
   $('#testLives').onclick = () => { testGen++; testMany($$('#lives .srow')); };
-  $('#stopTest').onclick = () => { testGen++; $$('.srow .status').forEach(st => { if (/测试中|重试/.test(st.textContent)) { st.className = 'status'; st.textContent = ''; } }); };
-  refreshCount();
+  $('#stopTest').onclick = () => { testGen++; $$('.srow').forEach(r => { if (/测试中|重试|排队/.test($('.status', r)?.textContent || '')) restoreRow(r); }); };
+  // Drag to reorder (mouse and touch): hold the ⋮⋮ handle. A top-level row travels with its members; a member only moves inside
+  // its own group. The page scrolls by itself near the top / bottom edge.
+  const bindDrag = box => {
+    box.addEventListener('click', e => { if (e.target.closest('.drag')) e.preventDefault(); });
+    box.addEventListener('pointerdown', e => {
+      const h = e.target.closest('.drag'); if (!h || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      e.preventDefault();
+      const row = h.closest('.srow'), mem = isMem(row), unit = mem ? [row] : blockOf(row);
+      const cands = () => (mem ? $$('.srow.mem', box).filter(r => r.dataset.parent === row.dataset.parent) : $$('.srow', box).filter(r => !isMem(r))).filter(r => r !== row)
+        .map(r => { const b = mem ? [r] : blockOf(r).filter(x => !x.hidden); return { r, b, top: b[0].getBoundingClientRect().top, bot: b[b.length - 1].getBoundingClientRect().bottom }; });
+      let y = e.clientY, drop = null, timer = 0;
+      const mark = () => {
+        $$('.drop-top, .drop-bottom', box).forEach(x => x.classList.remove('drop-top', 'drop-bottom'));
+        const cs = cands(); drop = null;
+        if (!cs.length) return;
+        for (const c of cs) if (y < (c.top + c.bot) / 2) { drop = { before: true, c }; break; }
+        if (!drop) drop = { before: false, c: cs[cs.length - 1] };
+        (drop.before ? drop.c.b[0] : drop.c.b[drop.c.b.length - 1]).classList.add(drop.before ? 'drop-top' : 'drop-bottom');
+      };
+      const tick = () => {
+        const edge = 90, top = (parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--hh')) || 64) + 56;
+        if (y < top + edge * .4) scrollBy(0, -14); else if (y > innerHeight - edge) scrollBy(0, 14);
+        mark();
+      };
+      unit.forEach(x => x.classList.add('dragging')); document.body.classList.add('sorting');
+      h.setPointerCapture(e.pointerId); mark(); timer = setInterval(tick, 40);
+      const move = ev => { y = ev.clientY; };
+      const end = ev => {
+        h.removeEventListener('pointermove', move); h.removeEventListener('pointerup', end); h.removeEventListener('pointercancel', end);
+        clearInterval(timer); mark();
+        unit.forEach(x => x.classList.remove('dragging')); document.body.classList.remove('sorting');
+        $$('.drop-top, .drop-bottom', box).forEach(x => x.classList.remove('drop-top', 'drop-bottom'));
+        if (ev.type === 'pointercancel' || !drop) return;
+        const { before, c } = drop;
+        if (before) c.b[0].before(...unit); else c.b[c.b.length - 1].after(...unit);
+        renumber(); dirty();
+      };
+      h.addEventListener('pointermove', move); h.addEventListener('pointerup', end); h.addEventListener('pointercancel', end);
+    });
+  };
+  bindDrag($('#sites')); bindDrag($('#lives'));
+  renumber(); refreshCount();
   $('#save').onclick = () => persist(current()).catch(err => toast(err.message));
   $('#saveRaw').onclick = () => { let c; try { c = JSON.parse($('#raw').value); } catch { return toast('JSON 格式不对'); } persist(c, true).catch(err => toast(err.message)); };
   $('#reset').onclick = async () => {
@@ -2280,7 +2447,7 @@ async function renderSettings() {
     $('#imp').disabled = true; $('#imp').textContent = '导入中…';
     try {
       const j = await req('POST', '/api/config/import', { url, replace: $('#impReplace').checked });
-      await loadSites(); toast(`导入 ${j.imported.sites} 个点播源、${j.imported.lives} 个直播源`); renderSettings();
+      await loadSites(); toast(`导入 ${j.imported.sites} 个点播源、${j.imported.lives} 个直播源${j.imported.skippedEmpty ? `（跳过 ${j.imported.skippedEmpty} 个 0 部内容的）` : ''}`); renderSettings();
     } catch (err) { toast('导入失败：' + err.message); $('#imp').disabled = false; $('#imp').textContent = '导入'; }
   };
   localSettings(localP).catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
@@ -2424,7 +2591,7 @@ async function recognizeFlow(text, quiet) {
     try {
       const j = await req('POST', '/api/config/add', { sites: pick.filter(x => x.kind === 'site'), lives: pick.filter(x => x.kind === 'live') });
       close(); await loadSites();
-      toast(`已添加 ${j.added.sites} 个点播源、${j.added.lives} 个直播源`);
+      toast(`已添加 ${j.added.sites} 个点播源、${j.added.lives} 个直播源${j.added.skippedEmpty ? `（跳过 ${j.added.skippedEmpty} 个 0 部内容的）` : ''}`);
       if (location.hash.startsWith('#/settings')) renderSettings();
     } catch (e) { toast(e.message); }
   };

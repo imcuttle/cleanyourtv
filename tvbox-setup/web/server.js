@@ -190,7 +190,7 @@ function normalize(cfg) {
     let key = written, n = 2;
     while (keys.has(key)) key = `${written}${n++}`;
     keys.add(key);
-    sites.push({ key, name, type: 1, members });
+    sites.push({ key, name, type: 1, members, ...(Number(g.kids) ? { kids: 1 } : {}), ...(Number(g.adult) ? { adult: 1 } : {}) });
   }
   const liveSeen = new Set();
   const lives = (cfg.lives || []).filter(l => l && typeof l.url === 'string' && l.url.trim())
@@ -212,11 +212,14 @@ const KIDS_CATS = /动漫|动画|儿童|少儿|卡通|亲子|早教|绘本/;
 
 function visibleSites() {
   const ok = s => safety.level === 'kids' ? s.kids : safety.level === 'standard' ? !s.adult : true;
-  const byKey = new Map(config.sites.filter(s => !s.members && ok(s)).map(s => [s.key, s]));
+  const all = new Map(config.sites.filter(s => !s.members).map(s => [s.key, s]));
   const sites = [];
   for (const s of config.sites) {
-    if (!s.members) { if (byKey.has(s.key)) sites.push(s); continue; }
-    const memberSites = s.members.map(k => byKey.get(k)).filter(Boolean);
+    if (!s.members) { if (ok(s)) sites.push(s); continue; }
+    // 聚合源 has its own 少儿 / 成人 flags. 成人 hides the whole group in 标准; 少儿 lets all its members through in 儿童
+    // (without the flag, only members that are 少儿 themselves do).
+    if (safety.level === 'standard' && s.adult) continue;
+    const memberSites = s.members.map(k => all.get(k)).filter(m => m && (s.kids && safety.level === 'kids' ? true : ok(m)));
     if (memberSites.length) sites.push({ ...s, memberSites });
   }
   const loc = localSite();
@@ -479,7 +482,7 @@ async function groupList(g, t, pg) {
     if (e) { e.parts.push([m.key, it.id]); if (!e.pic) e.pic = it.pic; }
     else merged.set(k, { ...it, parts: [[m.key, it.id]] });
   }
-  return { list: [...merged.values()].map(({ parts, ...it }) => ({ ...it, site: g.key, siteName: g.name, id: packParts(parts), sources: parts.length })),
+  return { list: [...merged.values()].map(({ parts, ...it }) => ({ ...it, typeId: catKey(it.type), site: g.key, siteName: g.name, id: packParts(parts), sources: parts.length })),
     page: Number(pg) || 1, pagecount: Math.max(1, ...res.map(r => r.v.pagecount)) };
 }
 async function groupDetail(g, id) {
@@ -538,6 +541,24 @@ async function importFrom(url, depth = 0) {
   return configFrom(obj, url, depth);
 }
 
+// 0 部内容的点播源（能连上，但一部片都没有）没有导入价值。连不上的不动：可能只是暂时的。
+// Returns the sites without the empty ones, and how many were dropped. Category-whitelist and 聚合 entries are kept.
+async function dropEmptySites(sites) {
+  const todo = sites.filter(s => s.api && !s.members && !s.categories);
+  const empty = new Set();
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(8, todo.length) }, async () => {
+    while (next < todo.length) {
+      const s = todo[next++];
+      try {
+        const b = await cmsGet({ name: '', api: s.api }, { ac: 'list' }, true, 10000);
+        if (!(Number(b.total) > 0) && !(b.list || []).length) empty.add(s);
+      } catch {}
+    }
+  }));
+  return { sites: sites.filter(s => !empty.has(s)), dropped: empty.size };
+}
+
 // ======================= clipboard recognition =======================
 // Pasted text → 点播 sites / 直播 sources. Each link is fetched and classified by what it actually
 // returns (苹果CMS JSON, TVBox config, m3u/txt list, single stream); names come from the text on the
@@ -579,7 +600,7 @@ function classifyText(text) {
     try {
       const o = parseJsonLoose(t);
       if (o && (o.sites || o.urls || o.lives)) return { kind: 'config', obj: o };
-      if (o && (Array.isArray(o.class) || Array.isArray(o.list))) return { kind: 'vod', total: Number(o.total) || 0 };
+      if (o && (Array.isArray(o.class) || Array.isArray(o.list))) return { kind: 'vod', total: Number(o.total) || 0, count: (o.list || []).length };
     } catch {}
   }
   if (/#EXT-X-(TARGETDURATION|STREAM-INF|MEDIA-SEQUENCE)/.test(t)) return { kind: 'stream' };
@@ -624,7 +645,7 @@ async function recognize(input) {
         try { p = await peek(e.url); c = p.stream ? { kind: 'stream' } : classifyText(p.text); } catch (err) { p = { error: err.message }; }
       } else c = { kind: 'stream' };
       const why = p?.error ? '不通：' + p.error : '';
-      if (c?.kind === 'vod') return { sites: [{ name: e.name || host, api: normApi(e.url), ok: true, info: `${c.total}部` }] };
+      if (c?.kind === 'vod') return c.total > 0 || c.count > 0 ? { sites: [{ name: e.name || host, api: normApi(e.url), ok: true, info: `${c.total || c.count}部` }] } : { sites: [{ name: e.name || host, api: normApi(e.url), ok: false, info: '0 部内容，不导入' }] };
       if (c?.kind === 'config') {
         const f = await configFrom(c.obj, p.final || e.url);
         const info = `来自配置 ${e.name || host}`;
@@ -1998,6 +2019,22 @@ async function api(route, q, res, req) {
     if (!pinOk(req)) return needPin(res);
     return leader('config', { op: 'liveRaw', body: await readBody(req) });
   }
+  // 编辑文本 in VS Code (this machine only): the list becomes a local file under data/lives and that file is opened in the
+  // editor; saved edits are read from disk on every load, so nothing else has to be done afterwards.
+  if (route === 'live/edit' && write) {
+    if (!isLoopback(req)) return send(res, 403, { error: '只有在这台电脑本机（localhost）上才能调用 VS Code' });
+    if (!pinOk(req)) return needPin(res);
+    const url = str((await readBody(req)).url);
+    let file;
+    if (url.startsWith('local:')) file = path.basename(url.slice(6));
+    else {
+      file = crypto.randomBytes(5).toString('hex') + '.m3u';
+      await fsp.writeFile(path.join(LIVES, file), await liveText(url, true));
+    }
+    const full = path.join(LIVES, file);
+    try { await openInVSCode(full); } catch (e) { return send(res, 200, { ok: false, url: 'local:' + file, error: e.message }); }
+    return send(res, 200, { ok: true, url: 'local:' + file, path: full });
+  }
   if (route === 'live/merge' && write) {
     if (!pinOk(req)) return needPin(res);
     return leader('config', { op: 'liveMerge', body: await readBody(req) });
@@ -2044,7 +2081,11 @@ async function api(route, q, res, req) {
   }
 
   // ---- 直播 ----
-  if (route === 'sites') return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, memberSites }) => ({ key, name, kids: !!kids, adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: safety.level === 'kids' ? [] : config.lives.map((l, i) => ({ key: String(i), name: l.name })) });
+  if (route === 'sites') {
+    const inGroup = new Map();
+    for (const g of SITES) for (const m of g.memberSites || []) if (!inGroup.has(m.key)) inGroup.set(m.key, g.key);
+    return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: safety.level === 'kids' ? [] : config.lives.map((l, i) => ({ key: String(i), name: l.name })) });
+  }
   if (route === 'live') {
     if (safety.level === 'kids') return send(res, 200, { groups: [] });
     const src = config.lives[Number(q.get('src')) || 0];
@@ -2094,7 +2135,7 @@ async function api(route, q, res, req) {
     if (!itemOk(first.m, it)) return send(res, 403, { error: '当前安全级别下不可看' });
     const ls = all.flatMap(({ m, d }) => lines(d).map(l => ({ ...l, name: `${m.name} · ${l.name}` })));
     const d = first.d;
-    return send(res, 200, { ...it, site: site.key, siteName: site.name, id: q.get('id'), quality: it.quality || bestQuality(ls.map(l => l.quality)), blurb: clean(d.vod_content),
+    return send(res, 200, { ...it, typeId: catKey(it.type), site: site.key, siteName: site.name, id: q.get('id'), quality: it.quality || bestQuality(ls.map(l => l.quality)), blurb: clean(d.vod_content),
       actor: str(d.vod_actor), director: str(d.vod_director), actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: ls });
   }
   if (route === 'list') {
@@ -2146,11 +2187,14 @@ rpcHandlers.config = async ({ op, body: b }) => {
       try { s.parsed = parseLive(await liveText(str(s.url), true), { url: str(s.url), name: str(s.name) }).groups; }
       catch (e) { failed.push(str(s.name) || str(s.url)); }
     }));
+    // Streams pasted from the clipboard carry the placeholder group 「剪贴板」 (a plain list: 「其他」): in a merge they go
+    // under the name their source had before, not under a group of their own.
     for (const s of srcs) for (const g of s.parsed || []) for (const c of g.channels) {
       if (seen.has(c.url)) { dup++; continue; }
       seen.add(c.url);
-      if (!groups.has(g.name)) groups.set(g.name, []);
-      groups.get(g.name).push(c);
+      const gn = g.name === '剪贴板' || g.name === '其他' ? (str(s.name).trim() || g.name) : g.name;
+      if (!groups.has(gn)) groups.set(gn, []);
+      groups.get(gn).push(c);
     }
     if (!seen.size) return { code: 422, body: { error: '选中的直播源里没解析出频道' + (failed.length ? '（打不开：' + failed.join('、') + '）' : '') } };
     const clean = t => str(t).replace(/["\r\n]/g, ' ').trim();
@@ -2164,9 +2208,11 @@ rpcHandlers.config = async ({ op, body: b }) => {
   } else if (op === 'import') {
     if (!/^https?:\/\//.test(b.url || '')) return { code: 400, body: { error: '要 http(s) 地址' } };
     const found = await importFrom(b.url);
-    if (!found.sites.length && !found.lives.length) return { code: 422, body: { error: '没找到可直连的苹果CMS点播源或直播源' } };
+    const kept = await dropEmptySites(found.sites);
+    found.sites = kept.sites;
+    if (!found.sites.length && !found.lives.length) return { code: 422, body: { error: kept.dropped ? `找到的 ${kept.dropped} 个点播源都是 0 部内容，没有导入` : '没找到可直连的苹果CMS点播源或直播源' } };
     config = b.replace ? found : normalize({ sites: [...config.sites, ...found.sites], lives: [...config.lives, ...found.lives] });
-    extra = { imported: { sites: found.sites.length, lives: found.lives.length } };
+    extra = { imported: { sites: found.sites.length, lives: found.lives.length, skippedEmpty: kept.dropped } };
   } else if (op === 'add') {
     // From clipboard recognition: append only what isn't there; pasted lists become local files.
     const lives = [];
@@ -2186,7 +2232,8 @@ rpcHandlers.config = async ({ op, body: b }) => {
     const haveApi = new Set(config.sites.filter(s => !s.categories).map(s => normApi(s.api)));
     const incoming = Array.isArray(b.sites) ? b.sites : [];
     const apiOf = new Map(incoming.filter(s => !s.members).map(s => [str(s.key), s.api]));
-    const sites = incoming.filter(s => s.members || s.categories || !haveApi.has(normApi(s.api)));
+    const fresh = incoming.filter(s => s.members || s.categories || !haveApi.has(normApi(s.api)));
+    const { sites, dropped: skippedEmpty } = await dropEmptySites(fresh);
     // A pasted group refers to its members by key; re-point them at whatever source has the same link here.
     for (const g of sites.filter(s => s.members)) {
       g.members = g.members.map(k => {
@@ -2196,7 +2243,7 @@ rpcHandlers.config = async ({ op, body: b }) => {
     }
     const before = { s: config.sites.length, l: config.lives.length };
     config = normalize({ sites: [...config.sites, ...sites], lives: [...config.lives, ...lives] });
-    extra = { added: { sites: config.sites.length - before.s, lives: config.lives.length - before.l } };
+    extra = { added: { sites: config.sites.length - before.s, lives: config.lives.length - before.l, skippedEmpty } };
   }
   saveConfig();
   broadcastReload();
@@ -2284,6 +2331,25 @@ function openPath(file, reveal) {
     p.unref();
     setTimeout(ok, 200);
   });
+}
+// VS Code: the `code` command when it is on PATH, else the app itself (macOS / Windows default install locations).
+function openInVSCode(file) {
+  const win = process.platform === 'win32';
+  const tries = [[win ? 'code.cmd' : 'code', [file]]];
+  if (process.platform === 'darwin') tries.push(['open', ['-a', 'Visual Studio Code', file]]);
+  if (win && process.env.LOCALAPPDATA) tries.push([path.win32.join(process.env.LOCALAPPDATA, 'Programs', 'Microsoft VS Code', 'Code.exe'), [file]]);
+  const run = ([cmd, args]) => new Promise((ok, bad) => {
+    const p = spawn(cmd, args, { stdio: 'ignore', detached: !win, shell: win && /\.cmd$/i.test(cmd) });
+    let done = false;
+    p.on('error', e => { if (!done) { done = true; bad(e); } });
+    p.on('exit', c => { if (!done && c) { done = true; bad(new Error('exit ' + c)); } });
+    p.unref();
+    setTimeout(() => { if (!done) { done = true; ok(); } }, 1200);
+  });
+  return (async () => {
+    for (const t of tries) { try { return await run(t); } catch {} }
+    throw new Error('没找到 VS Code（命令行 code 不可用）');
+  })();
 }
 function lanIps() {
   return Object.values(os.networkInterfaces()).flat()

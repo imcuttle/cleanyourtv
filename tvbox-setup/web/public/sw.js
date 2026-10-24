@@ -1,7 +1,7 @@
 // Minimal service worker: makes the page installable and shows the app shell offline.
 // Only same-origin static shell files are cached; /api, /hls, /img, /dl, /media always go to the network.
-const CACHE = 'tvbox-shell-v1';
-const SHELL = ['./', 'style.css', 'app.js', 'vendor/hls.min.js', 'icon.svg', 'icons/icon-192.png'];
+const CACHE = 'tvbox-shell-v2';
+const SHELL = ['./', 'style.css', 'app.js', 'feed.js', 'vendor/hls.min.js', 'icon.svg', 'icons/icon-192.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {})); self.skipWaiting(); });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
