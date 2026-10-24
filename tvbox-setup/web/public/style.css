@@ -61,7 +61,7 @@ nav a:hover { color: #b3b3b3; }
 .seg a:hover { color: #fff; }
 .seg a.on { background: #fff; color: #000; font-weight: 700; }
 .pagehead { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; }
-.pagehead h1 { margin: 0; }
+.page .pagehead h1 { margin: 0; line-height: 36px; }
 .find { width: 200px; }
 
 /* hero */
@@ -578,3 +578,4 @@ html { scrollbar-gutter: stable; }
 
 .foldbar { display: flex; align-items: center; gap: 12px; margin: 6px 0 4px; }
 .foldbox[hidden] { display: none; }
+.lmenu .lm-top .find { height: 32px; }

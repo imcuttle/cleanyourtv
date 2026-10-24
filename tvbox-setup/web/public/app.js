@@ -340,17 +340,22 @@ const javIO = new IntersectionObserver(es => es.forEach(e => {
 function observeJav(root = document) { $$('.card[data-jav]', root).forEach(el => { if (!el.dataset.jobs) { el.dataset.jobs = 1; javIO.observe(el); } }); }
 
 // ---------- boot / source picker ----------
-// Source menu: only rows inside the menu's viewport are pinged (IntersectionObserver, 6 at a time, one retry).
-// Results are kept 5 min, so scrolling back / switching is instant.
-const siteHealth = new Map(); // api -> { ok, ms, total, at }
+// Source menu: opening it pings the rows in view (4 at a time, one retry); scrolling pings the rest.
+// Results are cached in localStorage and stay valid until 「重测」 — only a failed result is looked at again after 10 min.
+const siteHealth = new Map(Object.entries((() => { try { return JSON.parse(localStorage.siteHealth || '{}'); } catch { return {}; } })())); // api -> { ok, ms, total, at }
 const healthBusy = new Set();
-const HEALTH_TTL = 5 * 60e3;
-let menuIO = null, healthQ = [], healthRun = 0;
+const FAIL_TTL = 10 * 60e3;
+let menuIO = null, healthQ = [], healthRun = 0, healthSave = 0;
+const saveHealth = () => { clearTimeout(healthSave); healthSave = setTimeout(() => {
+  const live = new Set(state.sites.map(x => x.api)); // forget sources that no longer exist
+  localStorage.siteHealth = JSON.stringify(Object.fromEntries([...siteHealth].filter(([k]) => live.has(k)))); }, 400); };
+const healthFresh = t => t && (t.ok || Date.now() - t.at < FAIL_TTL);
+const healthCell = (s, busy) => busy ? '<b class="hs">测速中…</b>' : s.group ? `<b class="hs">聚合 ${s.group}</b>` : !s.api || s.local ? ''
+  : !siteHealth.get(s.api) ? '<b class="hs">…</b>' : siteHealth.get(s.api).ok ? `<b class="hs ok">${siteHealth.get(s.api).ms}ms</b>` : '<b class="hs bad">不通</b>';
 function renderMenu() {
   const h = s => siteHealth.get(s.api);
-  const tag = s => { const t = h(s); return s.group ? `<b class="hs">聚合 ${s.group}</b>` : !s.api || s.local ? '' : !t ? '<b class="hs">…</b>' : t.ok ? `<b class="hs ok">${t.ms}ms</b>` : '<b class="hs bad">不通</b>'; };
-  $('#siteMenu').innerHTML = `<div class="mhead">点播源 · ${state.sites.length}<span class="mre" data-re="1" title="重新测速可见的源">重测</span></div>` + state.sites.map(s =>
-    `<button data-k="${esc(s.key)}" class="${s.key === state.site ? 'on' : ''}${h(s) && !h(s).ok ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${tag(s)}${s.key === 'local' || s.local ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('');
+  $('#siteMenu').innerHTML = `<div class="mhead">点播源 · ${state.sites.length}<span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + state.sites.map(s =>
+    `<button data-k="${esc(s.key)}" class="${s.key === state.site ? 'on' : ''}${h(s) && !h(s).ok ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, healthBusy.has(s.api))}${s.key === 'local' || s.local ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('');
   watchMenu();
 }
 function watchMenu() {
@@ -363,12 +368,19 @@ function watchMenu() {
   }), { root: $('#siteMenu') });
   $$('#siteMenu button[data-k]').forEach(b => menuIO.observe(b));
 }
-function queueHealth(s, force) {
-  const t = siteHealth.get(s.api);
-  if (healthBusy.has(s.api) || (!force && t && Date.now() - t.at < HEALTH_TTL)) return;
-  healthBusy.add(s.api); healthQ.push(s); drainHealth();
+function markHealth(s) {
+  const b = $(`#siteMenu button[data-k="${CSS.escape(s.key)}"]`); if (!b) return;
+  const had = $('.hs', b), tmp = document.createElement('div');
+  tmp.innerHTML = healthCell(s, healthBusy.has(s.api));
+  const hs = tmp.firstElementChild;
+  if (had) had.replaceWith(hs); else if (hs) b.insertBefore(hs, $('em.x', b));
+  b.classList.toggle('dead', !!siteHealth.get(s.api) && !siteHealth.get(s.api).ok && !healthBusy.has(s.api));
 }
-async function drainHealth() {
+function queueHealth(s, force) {
+  if (healthBusy.has(s.api) || (!force && healthFresh(siteHealth.get(s.api)))) return;
+  healthBusy.add(s.api); healthQ.push(s); markHealth(s); drainHealth();
+}
+function drainHealth() {
   while (healthRun < 4 && healthQ.length) {
     const s = healthQ.shift(); healthRun++;
     (async () => {
@@ -378,25 +390,24 @@ async function drainHealth() {
         if (r.ok) break;
       }
       siteHealth.set(s.api, { ok: !!r.ok, ms: r.ms, total: r.total, at: Date.now() });
-      healthBusy.delete(s.api); healthRun--;
-      const b = $(`#siteMenu button[data-k="${CSS.escape(s.key)}"]`);
-      if (b && !$('#siteMenu').hidden) {
-        const t = siteHealth.get(s.api);
-        let hs = $('.hs', b);
-        if (!hs) { hs = document.createElement('b'); b.insertBefore(hs, $('em.x', b)); }
-        hs.className = 'hs ' + (t.ok ? 'ok' : 'bad'); hs.textContent = t.ok ? t.ms + 'ms' : '不通';
-        b.classList.toggle('dead', !t.ok);
-      }
+      healthBusy.delete(s.api); healthRun--; saveHealth();
+      markHealth(s);
       drainHealth();
     })();
   }
 }
+// Rows currently visible in the menu, by geometry (does not depend on the observer having fired yet).
+function visibleMenuSites() {
+  const m = $('#siteMenu').getBoundingClientRect();
+  return $$('#siteMenu button[data-k]').filter(b => { const r = b.getBoundingClientRect(); return r.height && r.bottom > m.top && r.top < m.bottom; })
+    .map(b => state.sites.find(x => x.key === b.dataset.k)).filter(s => s && s.api && !s.local);
+}
 function pingMenu(force) {
-  if (force) $$('#siteMenu button[data-k]').forEach(b => {
-    const s = state.sites.find(x => x.key === b.dataset.k), r = b.getBoundingClientRect(), m = $('#siteMenu').getBoundingClientRect();
-    if (s && s.api && !s.local && r.bottom > m.top && r.top < m.bottom) queueHealth(s, true);
-  });
-  else watchMenu();
+  watchMenu();
+  const vis = visibleMenuSites();
+  if (force && !vis.length) return toast('没有可测速的源');
+  vis.forEach(s => queueHealth(s, force));
+  if (force) toast(`重测 ${vis.length} 个可见的源`);
 }
 
 async function loadSites() {
@@ -416,7 +427,7 @@ async function loadSites() {
   $('#levelTag').className = 'level ' + j.level;
   renderMenu();
 }
-$('#siteBtn').onclick = e => { e.stopPropagation(); $('#siteMenu').hidden = !$('#siteMenu').hidden; $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) pingMenu(); };
+$('#siteBtn').onclick = e => { e.stopPropagation(); $('#siteMenu').hidden = !$('#siteMenu').hidden; $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) requestAnimationFrame(() => pingMenu()); };
 $('#siteMenu').onclick = async e => {
   if (e.target.closest('[data-re]')) { e.stopPropagation(); return pingMenu(true); }
   const del = e.target.closest('[data-del]');
@@ -1613,6 +1624,7 @@ function lmRender() {
   $('#lmCount').textContent = lm.bulk ? `已选 ${lm.sel.size} / ${state.lives.length}` : `${state.lives.length} 个`;
   $('#lmBar').hidden = !lm.bulk;
   $('#lmBulk').classList.toggle('on', lm.bulk);
+  lmWatch();
 }
 async function lmSave(mutate) {
   const curUrl = liveUrlOf(localStorage.live);
@@ -1626,22 +1638,54 @@ async function lmSave(mutate) {
   lmRender();
   if (i < 0 && location.hash.startsWith('#/live')) loadLiveBody();
 }
+const LIVE_TTL = 5 * 60e3;
+let lmIO = null, lmQ = [], lmRun = 0;
+async function lmPingOne(k) {
+  const url = liveUrlOf(k), name = state.lives.find(l => l.key === k)?.name || '';
+  let j;
+  for (let t = 0; t < 3; t++) {            // network blips: retry twice before calling a source dead
+    if (t) await new Promise(ok => setTimeout(ok, 600 * t));
+    j = await api('checklive', { url, name }, null).catch(e => ({ ok: false, error: e.message }));
+    if (j.ok) break;
+  }
+  liveHealth.set(url, { ok: !!j.ok, text: j.channels ? `${j.channels}台 · ${j.alive}/${j.sampled}` : '不通', at: Date.now() });
+}
+// Only rows scrolled into view in the popover are pinged (3 at a time); results are kept 5 min.
+function lmQueue(k, force) {
+  const url = liveUrlOf(k), h = liveHealth.get(url);
+  if (!url || h === 'busy' || (!force && h && Date.now() - h.at < LIVE_TTL)) return;
+  liveHealth.set(url, 'busy'); lmQ.push(k); lmDrain();
+}
+function lmDrain() {
+  while (lmRun < 3 && lmQ.length) {
+    const k = lmQ.shift(); lmRun++; lmMark(k);
+    lmPingOne(k).finally(() => { lmRun--; lmMark(k); lmDrain(); });
+  }
+}
+// Update one row in place (no re-render, so the list never jumps while results arrive).
+function lmMark(k) {
+  const row = $(`#llist .lpr[data-k="${CSS.escape(k)}"]`); if (!row) return;
+  const h = liveHealth.get(liveUrlOf(k));
+  let hs = $('.hs', row);
+  if (!h) { hs?.remove(); return; }
+  if (!hs) { hs = document.createElement('b'); row.insertBefore(hs, $('em.x', row)); }
+  hs.className = 'hs ' + (h === 'busy' ? '' : h.ok ? 'ok' : 'bad');
+  hs.textContent = h === 'busy' ? '测速中…' : h.text;
+  row.classList.toggle('dead', h !== 'busy' && !h.ok);
+}
+function lmWatch() {
+  lmIO?.disconnect();
+  const m = $('#liveMenu'); if (!m || m.hidden) return;
+  lmIO = new IntersectionObserver(es => es.forEach(en => { if (en.isIntersecting) lmQueue(en.target.dataset.k); }), { root: $('#llist') });
+  $$('#llist .lpr').forEach(r => lmIO.observe(r));
+}
 async function lmTest(keys) {
   const q = keys.filter(k => liveUrlOf(k));
-  keys.forEach(k => liveHealth.set(liveUrlOf(k), 'busy')); lmRender();
+  q.forEach(k => liveHealth.set(liveUrlOf(k), 'busy')); lmRender();
   await Promise.all(Array.from({ length: Math.min(3, q.length) }, async () => {
-    while (q.length) {
-      const k = q.shift(), url = liveUrlOf(k), name = state.lives.find(l => l.key === k)?.name || '';
-      let j;
-      for (let t = 0; t < 3; t++) {            // network blips: retry twice before calling a source dead
-        if (t) await new Promise(ok => setTimeout(ok, 600 * t));
-        j = await api('checklive', { url, name }, null).catch(e => ({ ok: false, error: e.message }));
-        if (j.ok) break;
-      }
-      liveHealth.set(url, { ok: !!j.ok, text: j.channels ? `${j.channels}台 · ${j.alive}/${j.sampled}` : '不通' });
-      lmRender();
-    }
+    while (q.length) { const k = q.shift(); await lmPingOne(k); lmMark(k); }
   }));
+  lmRender();
 }
 async function lmOp(op) {
   if (lm.busy) return;
@@ -1958,9 +2002,11 @@ async function renderSettings() {
       <span class="ops">${kind === 'site' ? `${flags(x)}${stOf(x)}<button data-op="test">测速</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
         <button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`;
   const rowsHtml = (list, kind) => list.map((x, i) => rowHtml(x, kind, i)).join('');
+  const foldOpen = window.__fold || (window.__fold = {});
   const FOLD_AT = 8; // more sources than this: the list starts collapsed
-  const fold = (kind, n) => n > FOLD_AT ? `<div class="foldbar" data-foldbar="${kind}"><button class="small" data-foldbtn="${kind}">展开全部 ${n} 个</button><span class="lan" data-foldpeek="${kind}"></span></div>` : '';
+  const fold = (kind, n) => n > FOLD_AT ? `<div class="foldbar" data-foldbar="${kind}"><button class="small" data-foldbtn="${kind}">${foldOpen[kind] ? '收起' : `展开全部 ${n} 个`}</button><span class="lan" data-foldpeek="${kind}"></span></div>` : '';
   const setFold = (kind, open) => {
+    foldOpen[kind] = open;
     const box = $(`[data-fold=${kind}]`), btn = $(`[data-foldbtn=${kind}]`); if (!box || !btn) return;
     box.hidden = !open;
     btn.textContent = open ? '收起' : `展开全部 ${$$('.srow', box).length} 个`;
@@ -1978,11 +2024,11 @@ async function renderSettings() {
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
     <section><h2>点播源</h2><p class="hint">苹果CMS 接口（<code>…/api.php/provide/vod</code>，返回 JSON）。需要 spider jar / 解析的 type 3 源浏览器跑不了，导入时会自动跳过。</p>
-      ${fold('site', cfg.sites.length)}<div class="foldbox" data-fold="site" ${cfg.sites.length > FOLD_AT ? 'hidden' : ''}>${bulk('site')}<div id="sites">${rowsHtml(cfg.sites, 'site')}</div></div>
+      ${fold('site', cfg.sites.length)}<div class="foldbox" data-fold="site" ${cfg.sites.length > FOLD_AT && !foldOpen.site ? 'hidden' : ''}>${bulk('site')}<div id="sites">${rowsHtml(cfg.sites, 'site')}</div></div>
       <div class="actions"><button class="small" id="addSite">+ 添加点播源</button><button class="small" id="testAll">全部测速</button><button class="small" id="stopTest">停止测速</button></div></section>
     <section id="localSec"><h2>本地媒体 <span class="tagl">内置源</span></h2><p class="lan">加载中…</p></section>
     <section><h2>直播源</h2><p class="hint">支持 m3u / m3u8 频道列表、TVBox txt（<code>频道名,地址</code> + <code>分组,#genre#</code>），或者单条 .m3u8 播放地址。内置文件直接写文件名。「编辑文本」可以直接改频道列表。</p>
-      ${fold('live', cfg.lives.length)}<div class="foldbox" data-fold="live" ${cfg.lives.length > FOLD_AT ? 'hidden' : ''}>${bulk('live')}<div id="lives">${rowsHtml(cfg.lives, 'live')}</div></div>
+      ${fold('live', cfg.lives.length)}<div class="foldbox" data-fold="live" ${cfg.lives.length > FOLD_AT && !foldOpen.live ? 'hidden' : ''}>${bulk('live')}<div id="lives">${rowsHtml(cfg.lives, 'live')}</div></div>
       <div class="actions"><button class="small" id="addLive">+ 添加直播源</button><button class="small" id="testLives">全部测速</button></div></section>
     <div class="actions savebar"><button class="btn red" id="save">保存</button><span class="lan" id="dirty"></span></div>
     <section><h2>从剪贴板识别</h2><p class="hint">复制一段含源地址的文字（接口地址、m3u/txt 链接、直播流、TVBox 配置 JSON 或整段频道列表都行），在任意页面按 <code>Ctrl/⌘ + V</code>，或者粘到下面。识别后列出新源，确认后去重添加。</p>
@@ -2020,9 +2066,18 @@ async function renderSettings() {
     return row;
   };
   const dropRows = rows => { rows.forEach(r => r.remove()); renumber(); dirty(); refreshCount(); };
-  const persist = async c => {
-    await req('PUT', '/api/config', c);
-    state.cats = []; apiMemo.clear(); await loadSites(); toast('已保存'); renderSettings();
+  // Saves without rebuilding the page (fold state, scroll position and speed-test results stay as they are).
+  // Only the raw-JSON editor re-renders, since there the text itself may have been normalised.
+  const persist = async (c, rerender) => {
+    const j = await req('PUT', '/api/config', c);
+    state.cats = []; apiMemo.clear(); await loadSites(); toast('已保存');
+    if (rerender) return renderSettings();
+    // The server de-duplicates by link and may rename keys: drop rows it removed, keep every other row untouched.
+    const keep = new Set((j.sites || []).map(x => x.key));
+    $$('#sites .srow[data-key]').forEach(r => { if (!keep.has(r.dataset.key)) r.remove(); });
+    renumber(); refreshCount();
+    const d = $('#dirty'); if (d) d.textContent = '';
+    const raw = $('#raw'); if (raw) raw.value = JSON.stringify(j, null, 2);
   };
   // Speed test: bounded concurrency (so hundreds of sources don't flood the network), auto retry on failure,
   // results cached per url so they survive deleting / reordering / re-rendering.
@@ -2209,7 +2264,7 @@ async function renderSettings() {
   $('#stopTest').onclick = () => { testGen++; $$('.srow .status').forEach(st => { if (/测试中|重试/.test(st.textContent)) { st.className = 'status'; st.textContent = ''; } }); };
   refreshCount();
   $('#save').onclick = () => persist(current()).catch(err => toast(err.message));
-  $('#saveRaw').onclick = () => { let c; try { c = JSON.parse($('#raw').value); } catch { return toast('JSON 格式不对'); } persist(c).catch(err => toast(err.message)); };
+  $('#saveRaw').onclick = () => { let c; try { c = JSON.parse($('#raw').value); } catch { return toast('JSON 格式不对'); } persist(c, true).catch(err => toast(err.message)); };
   $('#reset').onclick = async () => {
     if (!confirm('恢复成内置的默认源？')) return;
     try { await req('POST', '/api/config/reset', {}); await loadSites(); toast('已恢复默认'); renderSettings(); } catch (err) { toast(err.message); }

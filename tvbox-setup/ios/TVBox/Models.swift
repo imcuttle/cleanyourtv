@@ -266,13 +266,27 @@ final class Config: ObservableObject {
 }
 
 /// Reachability of each 点播源. Only rows that are actually on screen in the source picker ask for a ping
-/// (6 at a time, one retry); results are kept for 5 minutes so scrolling back / switching is instant.
+/// (6 at a time, one retry); results are cached (see below) so scrolling back / switching is instant.
 @MainActor
 final class SiteHealth: ObservableObject {
     static let shared = SiteHealth()
-    struct Entry { var ok: Bool; var text: String; var at: Date }
-    @Published private(set) var entries: [String: Entry] = [:]
-    private var busy = Set<String>()
+    struct Entry: Codable { var ok: Bool; var text: String; var at: Date }
+    @Published private(set) var entries: [String: Entry] = [:] { didSet { persist() } }
+    @Published private(set) var busy = Set<String>()
+    private var saveTask: Task<Void, Never>?
+
+    /// Results are cached on disk and stay valid until 重测; only a failure is looked at again after 10 minutes.
+    init() {
+        if let d = UserDefaults.standard.data(forKey: "site.health"), let e = try? JSONDecoder().decode([String: Entry].self, from: d) { entries = e }
+    }
+    private func persist() {
+        saveTask?.cancel()
+        saveTask = Task { [entries] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if !Task.isCancelled { UserDefaults.standard.set(try? JSONEncoder().encode(entries), forKey: "site.health") }
+        }
+    }
+    func isBusy(_ s: Site) -> Bool { busy.contains(s.api) }
     private var queue: [String] = []
     private var running = 0
 
@@ -282,10 +296,13 @@ final class SiteHealth: ObservableObject {
     }
     func isDead(_ s: Site) -> Bool { entries[s.api].map { !$0.ok } ?? false }
 
+    /// Re-test these (the rows currently on screen), ignoring the cache.
+    func retest(_ sites: [Site]) { for s in sites { request(s, force: true) } }
+
     /// Called from a row's onAppear.
     func request(_ s: Site, force: Bool = false) {
         guard !s.api.isEmpty, !busy.contains(s.api) else { return }
-        if !force, let e = entries[s.api], Date().timeIntervalSince(e.at) < 300 { return }
+        if !force, let e = entries[s.api], e.ok || Date().timeIntervalSince(e.at) < 600 { return }
         busy.insert(s.api)
         queue.append(s.api)
         drain()

@@ -793,8 +793,23 @@ struct SitePicker: View {
     let current: String?
     let pick: (String) -> Void
     @ObservedObject private var health = SiteHealth.shared
+    @State private var onScreen = Set<String>()
 
     var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("点播源 · \(sites.count)").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("重测") { health.retest(sites.filter { onScreen.contains($0.key) }) }.font(.caption.weight(.semibold))
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            Divider()
+            list
+        }
+        .frame(minWidth: 260, idealWidth: 300, maxHeight: 420)
+    }
+
+    private var list: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(sites) { s in
@@ -807,7 +822,7 @@ struct SitePicker: View {
                             if let m = s.members {
                                 Text("聚合 \(m.count)").font(.caption).foregroundStyle(Color.secondary)
                             } else if !s.api.isEmpty {
-                                Text(health.label(s) ?? "…").font(.caption.monospacedDigit())
+                                Text(health.isBusy(s) ? "测速中…" : health.label(s) ?? "…").font(.caption.monospacedDigit())
                                     .foregroundStyle(health.isDead(s) ? Color.orange : health.label(s) == nil ? Color.secondary : Color.green)
                             }
                         }
@@ -816,11 +831,11 @@ struct SitePicker: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .onAppear { health.request(s) }
+                    .onAppear { onScreen.insert(s.key); health.request(s) }
+                    .onDisappear { onScreen.remove(s.key) }
                     Divider()
                 }
             }
         }
-        .frame(minWidth: 260, idealWidth: 300, maxHeight: 420)
     }
 }
