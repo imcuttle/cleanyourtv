@@ -1255,6 +1255,20 @@ function stopPreview() {
 }
 
 // ---------- settings ----------
+let installEvt = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; });
+addEventListener('appinstalled', () => { installEvt = null; });
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+function installSection() {
+  if (isStandalone()) return '';
+  const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const how = ios ? '用 Safari 打开本页，点底部的分享按钮，选「添加到主屏幕」。'
+    : /Android/.test(navigator.userAgent) ? '点浏览器右上角菜单，选「添加到主屏幕」或「安装应用」。'
+    : '点地址栏右侧的安装图标，或浏览器菜单里的「安装 TVBOX」。';
+  return `<section><h2>添加到桌面</h2><div class="installbox"><img src="icons/icon-192.png" alt=""><p class="hint" style="flex:1;margin:0;min-width:200px">把 TVBOX 放到${ios || /Android/.test(navigator.userAgent) ? '手机' : ''}桌面，像 App 一样全屏打开。${how}</p>
+    <button class="small" id="installBtn" ${installEvt ? '' : 'hidden'}>安装</button></div></section>`;
+}
+
 async function renderSettings() {
   const [cfg, info, safety] = await Promise.all([get('/api/config'), get('/api/info').catch(() => ({ urls: [] })), get('/api/safety')]);
   const flags = x => `<label class="flag"><input type="checkbox" class="kids" ${x.kids ? 'checked' : ''}>少儿</label><label class="flag"><input type="checkbox" class="adult" ${x.adult ? 'checked' : ''}>成人</label>`;
@@ -1266,6 +1280,7 @@ async function renderSettings() {
         <button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`).join('');
   view.innerHTML = `<div class="page set"><h1>设置</h1>
     <p class="lan">修改保存在服务端，局域网里所有浏览器共享。${info.urls.length ? '其他设备打开：' + info.urls.map(u => `<code>${esc(u)}</code>`).join(' ') : ''}</p>
+    ${installSection()}
     <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。${safety.hasPin ? '已设家长 PIN。' : '可设家长 PIN，防止孩子自己改回来。'}</p>
       <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}">${v}</button>`).join('')}</div>
       <div class="actions"><button class="small" id="setPin">${safety.hasPin ? '修改 / 清除 PIN' : '设置 PIN'}</button></div></section>
@@ -1371,6 +1386,7 @@ async function renderSettings() {
     try { await req('POST', '/api/safety', { pin: sessionStorage.pin || '', newPin }); sessionStorage.pin = newPin; toast(newPin ? 'PIN 已设置' : 'PIN 已清除'); renderSettings(); }
     catch (err) { toast(err.message); }
   };
+  if ($('#installBtn')) $('#installBtn').onclick = async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; $('#installBtn').hidden = true; };
   $('#addSite').onclick = () => { const c = current(); c.sites.push({ name: '', api: ' ' }); redraw(c); $('#sites .srow:last-child .nm').focus(); };
   $('#addLive').onclick = () => { const c = current(); c.lives.push({ name: '', url: ' ' }); redraw(c); $('#lives .srow:last-child .nm').focus(); };
   $('#testAll').onclick = () => $$('#sites .srow').forEach(test);

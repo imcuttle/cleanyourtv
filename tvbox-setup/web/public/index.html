@@ -3,25 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="TVBOX">
+<meta name="format-detection" content="telephone=no">
 <meta name="theme-color" content="#141414">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="referrer" content="no-referrer">
 <title>TVBOX</title>
 <link rel="icon" href="icon.svg">
-<link rel="apple-touch-icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header id="top">
   <a class="logo" href="#/">TVBOX</a>
   <nav>
-    <a href="#/" data-nav="home">首页</a>
-    <a href="#/charts" data-nav="charts">榜单</a>
-    <a href="#/live" data-nav="live">直播</a>
-    <a href="#/favorites" data-nav="favorites">收藏</a>
-    <a href="#/downloads" data-nav="downloads">下载</a>
-    <a href="#/settings" data-nav="settings">设置</a>
+    <a href="#/" data-nav="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span>首页</span></a>
+    <a href="#/charts" data-nav="charts"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V10h4v11zM10 21V3h4v18zM15 21v-7h4v7z"/></svg><span>榜单</span></a>
+    <a href="#/live" data-nav="live"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v12H3z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 21h6M10 10l5 2.5-5 2.5z"/></svg><span>直播</span></a>
+    <a href="#/favorites" data-nav="favorites"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21l-1.5-1.3C5.4 15.1 2 12 2 8.5A4.5 4.5 0 0 1 6.5 4c1.7 0 3.4.8 4.5 2.1C12.1 4.8 13.8 4 15.5 4A4.5 4.5 0 0 1 20 8.5c0 3.5-3.4 6.6-8.5 11.2z"/></svg><span>收藏</span></a>
+    <a href="#/downloads" data-nav="downloads"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h2v9l3.5-3.5 1.4 1.4L12 16 6.1 9.9l1.4-1.4L11 12zM4 18h16v3H4z"/></svg><span>下载</span></a>
+    <a href="#/settings" data-nav="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.7 1.7 1L11 21h4l.4-2.9c.6-.3 1.2-.6 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg><span>设置</span></a>
   </nav>
   <div class="right">
     <form id="searchForm" class="search"><input id="q" type="search" placeholder="片名 / 演员 / 导演，所有源一起搜" autocomplete="off"></form>
@@ -65,6 +69,7 @@
   <aside class="plist" hidden></aside>
 </div>
 
+<script>if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));</script>
 <script src="vendor/hls.min.js"></script>
 <script src="app.js"></script>
 </body>
