@@ -738,12 +738,19 @@ const javCode = s => {
   for (const [re, fmt] of pats) for (const m of up.matchAll(re)) { const c = fmt(m); if (c) return c; }
   return '';
 };
+// "4.47分, 由2123人評價" lives inside <div class="score"> (search cards) / <span class="value"> (video page).
+const javScore = html => {
+  const i = str(html).search(/class="[^"]*\b(?:score|value)\b[^"]*"/i);
+  const t = stripHtml(i < 0 ? '' : str(html).slice(i, i + 400)); // nested spans (stars icon): look at a window, not a tag pair
+  const m = /(\d+(?:\.\d+)?)\s*分/.exec(t);
+  return m ? { score: m[1], votes: (/由\s*(\d+)\s*人/.exec(t) || [])[1] || '' } : { score: '', votes: '' };
+};
 const stripHtml = s => str(s).replace(/<[^>]*>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
 async function javMeta(code) {
   code = javCode(code);
   if (!code) return { found: false };
   const c = javdbCache[code];
-  if (c && c.at && Date.now() - c.at < (c.found === false ? 7 : 30) * 86400e3)
+  if (c && c.at && (c.v === 2 || c.found === false) && Date.now() - c.at < (c.found === false ? 7 : 30) * 86400e3)
     return c.found === false ? { found: false } : { found: true, code, ...c };
   try {
     const html = await javText(`${JAVDB_URL}/search?q=${encodeURIComponent(code)}&f=all`);
@@ -758,7 +765,7 @@ async function javMeta(code) {
       best = { id: m[1], title: stripHtml(title), uid: stripHtml(uid) || code,
         cover: (/(?:src|data-src)="([^"]*(?:jdbstatic|covers)[^"]*)"/i.exec(inner) || [])[1] || '',
         date: (/\b(19|20)\d{2}[-/]\d{1,2}[-/]\d{1,2}\b/.exec(inner) || [''])[0] || '',
-        score: (/class="[^"]*value[^"]*"[^>]*>([^<]+)</i.exec(inner) || [])[1]?.trim() || '' };
+        ...javScore(inner) };
       break; // first exact-code hit
     }
     if (!best) { javdbCache[code] = { found: false, at: Date.now() }; javDirty = true; return { found: false }; }
@@ -767,8 +774,9 @@ async function javMeta(code) {
       const vh = await javText(`${JAVDB_URL}/v/${best.id}`);
       actors = [...vh.matchAll(/href="\/(?:actors|star)\/[^"]*"[^>]*>([^<]{1,40})<\/a>/gi)].map(m => stripHtml(m[1])).filter(Boolean);
       actors = [...new Set(actors)].slice(0, 20);
+      if (!best.score) Object.assign(best, javScore(vh));
     } catch {}
-    const out = { found: true, title: best.title, cover: best.cover, date: best.date, score: best.score, actors, id: best.id, url: JAVDB_URL + '/v/' + best.id, at: Date.now() };
+    const out = { found: true, title: best.title, cover: best.cover, date: best.date, score: best.score, votes: best.votes, v: 2, actors, id: best.id, url: JAVDB_URL + '/v/' + best.id, at: Date.now() };
     javdbCache[code] = out; javDirty = true;
     return { found: true, code, ...out };
   } catch (e) { return { found: false, error: e.message }; }

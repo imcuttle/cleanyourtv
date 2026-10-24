@@ -287,7 +287,7 @@ const javCode = s => {
 const javCache = JSON.parse(localStorage.javdb || '{}');
 function javMeta(code) {
   const c = javCache[code];
-  if (c && c.found && Date.now() - c.at < 30 * 86400e3) return Promise.resolve(c);
+  if (c && c.found && c.v === 2 && Date.now() - c.at < 30 * 86400e3) return Promise.resolve(c);
   return api('javdb', { code }, null).catch(() => ({ found: false })).then(r => {
     const v = { ...r, at: Date.now() };
     if (r.found) { javCache[code] = v; localStorage.javdb = JSON.stringify(javCache); }
@@ -1071,7 +1071,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         const mr = $('.metaRow', m);
         let t = $('#javtag', m);
         if (mr && !t) { t = document.createElement('a'); t.id = 'javtag'; t.className = 'tag'; t.target = '_blank'; t.rel = 'noreferrer'; mr.append(t); }
-        if (t && r.url) { t.textContent = r.score ? `JAVDB ${r.score}` : 'JAVDB'; t.href = r.url; t.hidden = false; }
+        if (t && r.url) { t.textContent = r.score ? `JAVDB ${r.score}${r.votes ? ` · ${r.votes}人` : ''}` : 'JAVDB'; t.title = r.score ? `JAVDB 评分 ${r.score}${r.votes ? `，${r.votes} 人评价` : ''}` : ''; t.href = r.url; t.hidden = false; }
       });
       else dbRate(d.name, d.year).then(doubanDetail);
     } else dbRate(d.name, d.year).then(doubanDetail);
