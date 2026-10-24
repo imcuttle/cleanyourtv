@@ -651,9 +651,30 @@ document.addEventListener('click', e => {
   }
   if (!plainClick(e)) return;
   e.preventDefault();
-  if (c.dataset.db !== undefined) return openByName(c.dataset.db);
-  openDetail(c.dataset.site, c.dataset.id);
+  // Single click → detail (after 240 ms, so a second click can turn it into 直接播放); double click → play / resume at once.
+  clearTimeout(cardClickT);
+  if (cardClickEl === c && e.detail >= 2) { cardClickEl = null; return playDirect(c); }
+  cardClickEl = c;
+  cardClickT = setTimeout(() => { cardClickEl = null; if (c.dataset.db !== undefined) openByName(c.dataset.db); else openDetail(c.dataset.site, c.dataset.id); }, 240);
 });
+let cardClickT = 0, cardClickEl = null;
+// Double-click on a card: no detail sheet. Resumes where this title was left (or starts at the first episode).
+async function playDirect(c) {
+  const t = toast('正在打开播放…', true);
+  try {
+    let site = c.dataset.site, id = c.dataset.id;
+    if (c.dataset.db !== undefined) {                       // 豆瓣 card: find the title in our sources first
+      const hit = await findTitle(c.dataset.db, new AbortController().signal);
+      if (!hit) { t.remove(); return toast(`没找到「${c.dataset.db}」`); }
+      ({ site, id } = hit);
+    }
+    const d = await api('detail', { site, id }, null);
+    t.remove();
+    if (!d.lines?.length) return openDetail(site, id);      // nothing playable here: show the sheet with the other sources
+    const h = hist.get(site, id), line = h && d.lines[h.line] ? h.line : 0;
+    play(d, line, h && h.line === line && d.lines[line].episodes[h.ep] ? h.ep : 0);
+  } catch (err) { t.remove(); if (!isAbort(err)) toast(err.message); }
+}
 // 豆瓣 card → the same title in our sources. Hits are kept in an LRU (30 min), and identical lookups already
 // in flight share one request. The "finding…" toast stays until it is found, failed, timed out (20 s),
 // or the page was left.
@@ -1366,6 +1387,7 @@ function openPlayer(startAt) {
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
   $('[data-act=star]').hidden = !live;
+  paintVodActs();
   $('[data-act=ext]').hidden = !(cur.kind === 'vod' && cur.d.local && serverInfo?.loopback);
   if (live) $('[data-act=star]').textContent = liveFavs.has(e.url) ? '★ 已收藏' : '☆ 收藏';
   renderPlist();
@@ -1374,6 +1396,17 @@ function openPlayer(startAt) {
   $('.local').hidden = !useLocal;
   load(local?.status === 'done' ? local.play : e.url, startAt, false, useLocal || e.url.startsWith('/media/'));
   poke();
+}
+// 收藏 / 下载 inside the player (点播 only, not 本地媒体): same actions as the detail sheet, so a title opened by double-click
+// can still be saved or downloaded without leaving the player.
+function paintVodActs() {
+  const v = cur?.kind === 'vod' && !cur.d.local;
+  const fav = $('[data-act=vfav]'), dl = $('[data-act=dl]');
+  fav.hidden = !v || kidsMode(); dl.hidden = !v;
+  if (!v) return;
+  fav.textContent = favs.has(cur.d.site, cur.d.id) ? '✓ 已收藏' : '＋ 收藏'; fav.classList.toggle('on', favs.has(cur.d.site, cur.d.id));
+  const j = dlFor(cur.d.site, cur.d.id, cur.eps[cur.ep].url);
+  dl.textContent = !j ? '⬇ 下载' : j.status === 'done' ? '✓ 已下载' : ACTIVE.includes(j.status) ? `⏳ ${j.pct || 0}%` : j.status === 'paused' ? '▶ 继续下载' : '⟳ 重试下载';
 }
 function msg(t) { $('.pmsg').textContent = t || ''; }
 function load(url, startAt, viaProxy, isLocal) {
@@ -1449,6 +1482,13 @@ player.addEventListener('click', e => {
   if (act === 'prev') step(-1);
   if (act === 'list') return togglePlist();
   if (act === 'ext') { video.pause(); return openLocal(cur.eps[cur.ep].url, 'play'); }
+  if (act === 'vfav') { toast(favs.toggle(cur.d) ? '已收藏' : '已取消收藏'); return paintVodActs(); }
+  if (act === 'dl') {
+    const e = cur.eps[cur.ep], j = dlFor(cur.d.site, cur.d.id, e.url);
+    if (j?.status === 'done') return toast('已下载，播放时会自动用本地文件');
+    if (j) return req('PATCH', `/api/downloads?id=${j.id}&action=${ACTIVE.includes(j.status) ? 'pause' : 'resume'}`).then(() => refreshDownloads()).then(paintVodActs, err => toast(err.message));
+    return enqueue(cur.d, cur.line, [cur.ep]).then(paintVodActs, err => toast(err.message));
+  }
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); $('[data-act=star]').textContent = liveFavs.has(c.url) ? '★ 已收藏' : '☆ 收藏'; return; }
   if (!$('.plist').hidden && !e.target.closest('.plist, .pbar')) togglePlist(false);
 });
@@ -2614,3 +2654,5 @@ loadSites().then(() => route({ nav: true }), e => { view.innerHTML = `<div class
 
 $('#cardBtn').onclick = () => setCardMode(cardMode() === 'wide' ? 'poster' : 'wide');
 applyCardMode();
+
+setInterval(() => { if (cur?.kind === 'vod' && !player.hidden && state.downloads.some(j => ACTIVE.includes(j.status))) refreshDownloads().then(paintVodActs); }, 2000);

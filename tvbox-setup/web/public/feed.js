@@ -87,12 +87,13 @@ const scoreOf = it => tagsOf(it).reduce((s, [k, m]) => s + sat(profile()[k] || 0
 
 const seen = new Set(loadJson('feedSeen', []));
 const keyOf = it => it.site + '|' + it.id;
+const nameOf = it => normName(it.name) + '|' + (it.year || '');   // the same title on another source is still the same title
 const markSeen = it => { seen.add(keyOf(it)); if (seen.size > 900) [...seen].slice(0, 100).forEach(k => seen.delete(k)); localStorage.feedSeen = JSON.stringify([...seen]); };
 const likes = new Set(loadJson('feedLikes', []));
 const saveLikes = () => { localStorage.feedLikes = JSON.stringify([...likes].slice(-500)); };
 
 // ---------- state ----------
-const F = { gen: 0, mode: 'rec', extra: null, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
+const F = { recN: 0, names: new Set(), gen: 0, mode: 'rec', extra: null, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
   pool: [], pcount: {}, cats: null, catsSite: '', catPg: 0, catCount: 1, once: false, dir: 1,
   muted: localStorage.feedMuted === '1', userPaused: false };
 const AHEAD = 6;                                    // titles kept validated (detail fetched) beyond the current one
@@ -303,7 +304,27 @@ const wpick = (list, n, w) => {
   }
   return out;
 };
-// 推荐: random categories (weighted toward liked types) × random pages of the chosen 点播源, ranked by taste + noise.
+// 推荐 = random play with taste mixed in. Every batch of 6 is: 3 plain random titles (random categories, random pages, nothing
+// weighs on them), 2 picked by taste (types / regions / eras you liked, saved or watched long) and 1 "more like what you
+// saved" — a title with an actor you liked or saved. The order is interleaved so a liked kind never comes twice in a row.
+const takeAt = (list, k) => list.splice(k, 1)[0];
+const takeRandom = list => list.length ? takeAt(list, Math.floor(Math.random() * list.length)) : null;
+const takeBest = list => {
+  if (!list.length) return null;
+  let k = 0, best = -1e9;
+  list.forEach((it, i) => { const sc = scoreOf(it) + Math.random() * .8; if (sc > best) { best = sc; k = i; } });
+  return takeAt(list, k);
+};
+// Actors (from 收藏 / 喜欢 / long watches) are searched by name across the sources: their other titles join the pool as 'fav'.
+async function actorCands(gen) {
+  const tops = Object.entries(profile()).filter(([k, v]) => k.startsWith('p:') && v >= 1.5).sort((x, y) => y[1] - x[1]).slice(0, 8);
+  if (!tops.length) return [];
+  const name = wpick(tops, 1, ([, v]) => v)[0][0].slice(2);
+  const j = await api('person', { role: 'actor', name }, null).catch(() => null);
+  if (!j || gen !== F.gen) return [];
+  // 演员作品: the server keeps only titles whose credits really list the actor
+  return (j.list || []).slice(0, 30).map(it => ({ ...it, _fav: 1 }));
+}
 async function recMore(gen) {
   const site = state.site;
   if (!F.cats || F.catsSite !== site) {
@@ -311,23 +332,27 @@ async function recMore(gen) {
     F.cats = (r.categories || []).filter(c => !JUNK.test(c.name)); F.catsSite = site;
     if (!F.cats.length) F.cats = [{ id: '', name: '最新' }];
   }
-  const picks = wpick(F.cats, 3, c => Math.exp(.3 * sat(profile()['t:' + c.name] || 0)));
-  const res = await Promise.all(picks.map(c => {
+  // 3 uniformly random categories + 1 taken from the liked types (weighted by how much they are liked; random when nothing is
+  // liked yet); page numbers are uniform too.
+  const liked = F.cats.filter(c => (profile()['t:' + c.name] || 0) >= 1);
+  const picks = [...wpick(F.cats, 3, () => 1), ...(liked.length ? wpick(liked, 1, c => profile()['t:' + c.name]) : wpick(F.cats, 1, () => 1))];
+  const res = await Promise.all([...picks.map(c => {
     const pk = site + '|' + c.id, n = F.pcount[pk];
-    const pg = n ? 1 + Math.floor(Math.random() ** 2 * Math.min(n, 12)) : 1;
+    const pg = n ? 1 + Math.floor(Math.random() * Math.min(n, 40)) : 1;
     return api('list', { site, t: c.id, pg }, null).then(j => { F.pcount[pk] = j.pagecount; return j.list; }).catch(() => []);
-  }));
+  }), F.recN++ % 3 === 0 ? actorCands(gen) : []]);
   if (gen !== F.gen) return [];
-  const inPool = new Set(F.pool.map(keyOf));
-  for (const it of res.flat()) if (!seen.has(keyOf(it)) && !F.keys.has(keyOf(it)) && !inPool.has(keyOf(it))) { F.pool.push(it); inPool.add(keyOf(it)); }
-  if (F.pool.length > 150) F.pool.splice(0, F.pool.length - 150);
-  const out = [];
-  while (out.length < 6 && F.pool.length) {
-    let k = 0;
-    if (Math.random() < .2) k = Math.floor(Math.random() * F.pool.length);        // exploration
-    else { let best = -1e9; F.pool.forEach((it, i) => { const sc = scoreOf(it) + Math.random() * 1.5; if (sc > best) { best = sc; k = i; } }); }
-    out.push(F.pool.splice(k, 1)[0]);
-  }
+  const inPool = new Set(F.pool.map(keyOf)), poolNames = new Set(F.pool.map(nameOf));
+  for (const it of res.flat()) if (!seen.has(keyOf(it)) && !F.keys.has(keyOf(it)) && !inPool.has(keyOf(it)) && !F.names.has(nameOf(it)) && !poolNames.has(nameOf(it))) { F.pool.push(it); inPool.add(keyOf(it)); poolNames.add(nameOf(it)); }
+  if (F.pool.length > 160) F.pool.splice(0, F.pool.length - 160);
+  const plain = F.pool.filter(it => !it._fav), fav = F.pool.filter(it => it._fav), out = [];
+  const take = it => { if (!it) return; F.pool.splice(F.pool.indexOf(it), 1); out.push(it); };
+  const rest = () => F.pool.filter(it => !out.includes(it) && !it._fav);
+  // R T R T R F  (any slot that cannot be filled falls back to a random one)
+  take(takeRandom(plain)); take(takeBest(rest()));
+  take(takeRandom(plain.filter(it => !out.includes(it)))); take(takeBest(rest()));
+  take(takeRandom(plain.filter(it => !out.includes(it)))); take(fav.length ? takeRandom(fav) : takeRandom(rest()));
+  fav.forEach(it => { if (!out.includes(it) && Math.random() < .5) F.pool.splice(F.pool.indexOf(it), 1); });   // unused actor titles do not pile up
   if (!out.length && seen.size) { seen.clear(); localStorage.feedSeen = '[]'; }   // everything seen: start over
   return out;
 }
@@ -366,7 +391,7 @@ async function pump() {
         if (gen !== F.gen) return;
         if (!more.length) { if (++F.empties >= 2) { F.done = true; break; } continue; }
         F.empties = 0;
-        more.forEach(it => F.keys.add(keyOf(it)));
+        more.forEach(it => { F.keys.add(keyOf(it)); F.names.add(nameOf(it)); });
         F.cand.push(...more);
       }
       const batch = F.cand.splice(0, 3), ps = batch.map(validate);
@@ -425,6 +450,8 @@ function modeLabel() {
   return { fav: '我的收藏', hist: '继续观看' }[F.mode];
 }
 function startMode(mode, extra) {
+  F.names = new Set(); F.recN = 0;
+  F.names = new Set();
   ring.forEach(s => { teardown(s); Object.assign(s, { i: -1, it: null, d: null }); s.el.classList.add('empty'); });
   Object.assign(F, { gen: F.gen + 1, mode, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
     pool: [], once: false, catPg: 0, catCount: 1, userPaused: false });
