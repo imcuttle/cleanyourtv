@@ -76,6 +76,30 @@ phoning home, no apps you never asked for.
 | ![The aurora theme: a wallpaper and tinted pills, pushed without a rebuild](docs/theme-aurora.jpg) | ![Six columns and a six-app dock from a theme's config.json](docs/theme-six-columns.jpg) |
 | *Aurora theme, pushed with `tools/theme.sh`* | *Six columns and a six-app dock, same launcher* |
 
+## And something to watch
+
+A clean home screen is lovely and then you notice the TV still has nothing on it. [`tvbox-setup/`](tvbox-setup/)
+lays a player on top: **TVBox**, installed over the same ADB bridge, with a 点播 config and a
+直播 channel list copied onto the TV so they survive the source URLs dying.
+
+| | |
+|---|---|
+| ![TVBox home: 点播, 直播, 搜索, 收藏, 连接, 设置](tvbox-setup/shots/home.jpg) | ![A live channel list with real groups](tvbox-setup/shots/live-channels.jpg) |
+| *Home, wallpaper and all* | *直播 with groups instead of one flat list* |
+
+It is written as a skill, so an assistant can follow it end to end: install, push, **prove the
+streams play**, and write down what worked. Three things it will save you from: testing
+reachability from a laptop that is on a VPN, treating a black screenshot as a failed stream
+(hardware decoding is invisible to `screencap`), and typing `http://` into the address dialog,
+which expands the first character and gives you `http://ttp://…`.
+
+```bash
+cd tvbox-setup && ./scripts/discover-tv.sh
+```
+
+Nothing here is installed by the main flow and nothing here is required — skip it if the TV
+already has a player you like.
+
 ## Supported TVs
 
 Anything running **Android TV** or **Google TV**. Samsung (Tizen) and LG (webOS) run different
