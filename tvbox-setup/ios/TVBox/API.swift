@@ -167,23 +167,41 @@ enum API {
     /// TVBox config URL (single or multi-warehouse `{"urls":[…]}`) → usable sites + lives.
     static func importConfig(_ urlString: String) async throws -> ([Site], [LiveSource]) {
         guard let u = url(urlString) else { throw URLError(.badURL) }
-        let (s, l, subs) = try await parseConfig(u)
-        var sites = s, lives = l
-        for sub in subs.prefix(12) {
-            if let (s2, l2, _) = try? await parseConfig(sub) { sites += s2; lives += l2 }
+        guard let obj = parseJSON(String(decoding: try await fetch(u), as: UTF8.self)) as? [String: Any] else {
+            throw URLError(.cannotParseResponse)
+        }
+        return await configFrom(obj, base: u)
+    }
+
+    static func parseJSON(_ text: String) -> Any? {
+        let t = text.components(separatedBy: .newlines)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+        return try? JSONSerialization.jsonObject(with: Data(t.utf8))
+    }
+
+    static func configFrom(_ obj: [String: Any], base: URL?, depth: Int = 0) async -> ([Site], [LiveSource]) {
+        var sites = Config.parseSites(obj["sites"])
+        var lives = Config.parseLives((obj["lives"] as? [[String: Any]] ?? []).map { l in
+            var l = l; l["url"] = unwrapLive(str(l["url"])); return l
+        })
+        if depth == 0, let urls = obj["urls"] as? [[String: Any]] {
+            for sub in urls.prefix(12) {
+                guard let u = URL(string: str(sub["url"]), relativeTo: base)?.absoluteURL,
+                      let d = try? await fetch(u), let o = parseJSON(String(decoding: d, as: UTF8.self)) as? [String: Any] else { continue }
+                let (s2, l2) = await configFrom(o, base: u, depth: 1)
+                sites += s2; lives += l2
+            }
         }
         return (sites, lives)
     }
 
-    private static func parseConfig(_ u: URL) async throws -> ([Site], [LiveSource], [URL]) {
-        let data = try await fetch(u)
-        let text = String(decoding: data, as: UTF8.self).components(separatedBy: .newlines)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
-        guard let obj = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
-            throw URLError(.cannotParseResponse)
-        }
-        let subs = (obj["urls"] as? [[String: Any]] ?? []).compactMap { URL(string: str($0["url"]), relativeTo: u)?.absoluteURL }
-        return (Config.parseSites(obj["sites"]), Config.parseLives(obj["lives"]), subs)
+    /// Live entries are sometimes wrapped as proxy://do=live&…&ext=<base64 url>.
+    static func unwrapLive(_ u: String) -> String {
+        guard u.hasPrefix("proxy://"), let r = u.range(of: "ext=") else { return u }
+        let b64 = String(u[r.upperBound...].prefix { $0 != "&" }).removingPercentEncoding ?? ""
+        guard let d = Data(base64Encoded: b64 + String(repeating: "=", count: (4 - b64.count % 4) % 4)),
+              let s = String(data: d, encoding: .utf8), s.hasPrefix("http") else { return u }
+        return s
     }
 
     // MARK: - 豆瓣

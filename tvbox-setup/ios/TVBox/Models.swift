@@ -205,13 +205,13 @@ final class Config: ObservableObject {
 
     func merge(sites newSites: [Site], lives newLives: [LiveSource], replace: Bool) {
         var s = replace ? [] : sites
-        for n in newSites where !s.contains(where: { $0.api == n.api && $0.categories == n.categories }) {
+        for n in newSites where !s.contains(where: { Recognizer.normApi($0.api) == Recognizer.normApi(n.api) && $0.categories == n.categories }) {
             var n = n
             while s.contains(where: { $0.key == n.key }) { n.key += "'" }
             s.append(n)
         }
         var l = replace ? [] : lives
-        for n in newLives where !l.contains(where: { $0.url == n.url }) { l.append(n) }
+        for n in newLives where !l.contains(where: { n.text == nil ? $0.url == n.url : $0.text?.trimmingCharacters(in: .whitespacesAndNewlines) == n.text?.trimmingCharacters(in: .whitespacesAndNewlines) }) { l.append(n) }
         sites = s
         lives = l
     }

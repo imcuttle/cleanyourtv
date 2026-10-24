@@ -44,6 +44,7 @@ every source editable in the app rather than baked in.
 | 直播 | m3u / m3u8 lists, TVBox txt, single .m3u8; cover per channel, hover = 3 s live gif | same; long-press = muted live preview |
 | 下载 | on the server (AES-128 decrypted), playable by every device on the LAN, export as one file | on the device (AVAssetDownloadTask), offline playback |
 | 源 | edit / reorder / 测速 (点播 + 直播, one click) / import a TVBox config URL / edit a live list as text | same |
+| 剪贴板 | ⌘/Ctrl+V anywhere → recognise sources in the text, confirm, add only new ones | banner when the clipboard has a link (system PasteButton, no prompt) |
 | 安全级别 | 儿童 · 标准 · 全部, optional parent PIN | same |
 
 ### Web
@@ -62,7 +63,8 @@ edited as text), `downloads/`, `thumbs/`. Delete the folder to start over; the d
 from `config/vod-apps.json`.
 
 Live covers and hover gifs are cut by **ffmpeg** when the server has it (PATH, `$FFMPEG`, or
-`web/.tools/ffmpeg[.exe]`), cached 15 minutes. Without ffmpeg the browser plays a muted
+`web/.tools/ffmpeg[.exe]`), cached 15 minutes and kept preview-sized: 320px JPEG covers (~8 KB),
+240px / 6 fps / 2.5 s / 48-colour gifs (~130 KB). Without ffmpeg the browser plays a muted
 mini-stream on hover and saves a frame as the cover, so it still fills in — just slower.
 
 ### iOS
@@ -75,6 +77,15 @@ Generates the project with XcodeGen, builds, signs and installs with `devicectl`
 Apple ID in Xcode → Settings → Accounts it signs normally; without one it re-signs with any
 development profile on this Mac that already covers the device. Free-account signatures
 expire after 7 days — run it again.
+
+### Clipboard → sources
+
+Copy any text that has sources in it — 苹果CMS API URLs, m3u / txt links, raw stream URLs, a TVBox
+config (URL or JSON), or a whole channel list — then press ⌘/Ctrl+V on the web page or tap the
+banner on iOS. Each link is opened to see what it really is; names come from the text on the same
+line. The confirm list marks what already exists, unchecks what doesn't answer, and adds the rest.
+Loose stream URLs become one channel list. Browsers won't read the clipboard directly over plain
+http on the LAN, so the web side relies on the paste event (or the box in 设置).
 
 ### Safety levels
 

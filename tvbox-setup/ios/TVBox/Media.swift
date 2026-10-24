@@ -128,7 +128,7 @@ final class LiveThumbs {
             defer { release() }
             guard !Task.isCancelled, let img = await grab(url) else { return nil }
             mem.setObject(img, forKey: url as NSString)
-            try? img.jpegData(compressionQuality: 0.7)?.write(to: dir.appendingPathComponent(md5(url) + ".jpg"))
+            try? img.jpegData(compressionQuality: 0.5)?.write(to: dir.appendingPathComponent(md5(url) + ".jpg"))
             return img
         }
         inflight[url] = t
@@ -163,7 +163,7 @@ final class LiveThumbs {
             if t.seconds > 0.2, out.hasNewPixelBuffer(forItemTime: t),
                let pb = out.copyPixelBuffer(forItemTime: t, itemTimeForDisplay: nil) {
                 var ci = CIImage(cvPixelBuffer: pb)
-                let scale = 480 / max(ci.extent.width, 1)
+                let scale = 320 / max(ci.extent.width, 1)  // preview-sized, ~8 KB as JPEG
                 ci = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
                 guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return nil }
                 return UIImage(cgImage: cg)

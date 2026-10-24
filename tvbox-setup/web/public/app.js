@@ -529,10 +529,10 @@ function startPreview(cover, hasFfmpeg) {
         setTimeout(() => {
           if (pv !== me || !v.videoWidth) return;
           const c = document.createElement('canvas');
-          c.width = 480; c.height = Math.round(480 * v.videoHeight / v.videoWidth);
+          c.width = 320; c.height = Math.round(320 * v.videoHeight / v.videoWidth);
           try {
             c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
-            const data = c.toDataURL('image/jpeg', 0.7);
+            const data = c.toDataURL('image/jpeg', 0.55);
             cover.style.backgroundImage = `url('${data}')`; cover.classList.add('has');
             req('POST', '/api/live/thumb?u=' + encodeURIComponent(u), { data }).catch(() => {});
           } catch {}
@@ -575,6 +575,9 @@ async function renderSettings() {
       <div id="lives">${rowsHtml(cfg.lives, 'live')}</div>
       <div class="actions"><button class="small" id="addLive">+ 添加直播源</button><button class="small" id="testLives">全部测速</button></div></section>
     <div class="actions savebar"><button class="btn red" id="save">保存</button><span class="lan" id="dirty"></span></div>
+    <section><h2>从剪贴板识别</h2><p class="hint">复制一段含源地址的文字（接口地址、m3u/txt 链接、直播流、TVBox 配置 JSON 或整段频道列表都行），在任意页面按 <code>Ctrl/⌘ + V</code>，或者粘到下面。识别后列出新源，确认后去重添加。</p>
+      <div class="field"><textarea id="clipText" placeholder="粘贴到这里" style="min-height:110px"></textarea></div>
+      <div class="actions"><button class="small" id="clipRead">读取剪贴板</button><button class="small" id="clipGo">识别</button></div></section>
     <section><h2>导入 TVBox 配置</h2><p class="hint">粘贴 TVBox 配置地址（单仓或多仓 <code>{"urls":[…]}</code>），把其中能直连的点播源和直播源合并进来。</p>
       <div class="field"><input id="impUrl" placeholder="https://…/config.json"><label class="lan"><input type="checkbox" id="impReplace"> 替换现有</label><button class="small" id="imp">导入</button></div></section>
     <section><h2>高级：直接编辑 JSON</h2><p class="hint">格式 <code>{"sites":[{"key","name","api","kids","adult","categories"}],"lives":[{"name","url"}]}</code>，可整份复制到别的设备。</p>
@@ -673,6 +676,11 @@ async function renderSettings() {
     if (!confirm('恢复成内置的默认源？')) return;
     try { await req('POST', '/api/config/reset', {}); await loadSites(); toast('已恢复默认'); renderSettings(); } catch (err) { toast(err.message); }
   };
+  $('#clipGo').onclick = () => { const t = $('#clipText').value.trim(); if (t) recognizeFlow(t); };
+  $('#clipRead').onclick = async () => {
+    try { const t = await navigator.clipboard.readText(); $('#clipText').value = t; if (t.trim()) recognizeFlow(t); }
+    catch { toast('浏览器不让直接读剪贴板（局域网 http 页面的限制），请在框里粘贴'); $('#clipText').focus(); }
+  };
   $('#imp').onclick = async () => {
     const url = $('#impUrl').value.trim(); if (!url) return;
     $('#imp').disabled = true; $('#imp').textContent = '导入中…';
@@ -682,6 +690,72 @@ async function renderSettings() {
     } catch (err) { toast('导入失败：' + err.message); $('#imp').disabled = false; $('#imp').textContent = '导入'; }
   };
   if (cfg.sites.length) $('#testAll').click();
+}
+
+// ---------- clipboard → sources ----------
+// Ctrl/⌘+V anywhere (outside inputs) recognises 点播/直播 sources in the pasted text. Over plain http on the
+// LAN browsers refuse navigator.clipboard.readText, so the paste event is the dependable path; when
+// clipboard-read is already granted (localhost), new clipboard text is also checked on window focus.
+const clipKey = t => { let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return String(h); };
+const looksLikeSource = t => /(https?|rtmp|rtsp):\/\/|#EXTINF|#genre#|"sites"\s*:/.test(t);
+
+document.addEventListener('paste', e => {
+  if (e.target instanceof Element && e.target.closest('input, textarea, [contenteditable]')) return;
+  const t = e.clipboardData?.getData('text') || '';
+  if (looksLikeSource(t)) { e.preventDefault(); recognizeFlow(t, true); }
+});
+addEventListener('focus', async () => {
+  try {
+    const p = await navigator.permissions.query({ name: 'clipboard-read' });
+    if (p.state !== 'granted') return;
+    const t = await navigator.clipboard.readText();
+    if (!looksLikeSource(t) || localStorage.clipSeen === clipKey(t)) return;
+    localStorage.clipSeen = clipKey(t);
+    recognizeFlow(t, true);
+  } catch {}
+});
+
+async function recognizeFlow(text, quiet) {
+  if ($('#clipModal')) return;
+  localStorage.clipSeen = clipKey(text);
+  const m = document.createElement('div');
+  m.className = 'modal'; m.id = 'clipModal';
+  m.innerHTML = `<div class="sheet editor"><div class="body"><h3>识别剪贴板</h3><div class="spinner"></div><p class="lan" style="text-align:center">逐个打开链接确认类型…</p></div></div>`;
+  document.body.append(m); document.body.style.overflow = 'hidden';
+  const close = () => { m.remove(); if (!$('#modal')) document.body.style.overflow = ''; };
+  m.onclick = e => { if (e.target === m) close(); };
+  let r;
+  try { r = await req('POST', '/api/recognize', { text }); } catch (e) { close(); return toast('识别失败：' + e.message); }
+  const all = [...r.sites.map(x => ({ ...x, kind: 'site' })), ...r.lives.map(x => ({ ...x, kind: 'live' }))];
+  const fresh = all.filter(x => !x.exists);
+  if (!all.length) { close(); return toast(r.unknown.length ? `剪贴板里 ${r.unknown.length} 个链接都不是点播/直播源` : '剪贴板里没识别到点播/直播源'); }
+  if (!fresh.length) { close(); return toast(`识别到 ${all.length} 个源，都已存在`); }
+  const rowHtml = (x, i) => `<label class="crow ${x.exists ? 'dim' : ''}">
+      <input type="checkbox" data-i="${i}" ${x.exists ? 'disabled' : x.ok === false ? '' : 'checked'}>
+      <input class="cname" data-i="${i}" value="${esc(x.name)}" ${x.exists ? 'disabled' : ''}>
+      <span class="curl">${esc(x.kind === 'site' ? x.api : x.url || '粘贴的频道列表（存成本地文本）')}</span>
+      <span class="cstat ${x.exists ? '' : x.ok === true ? 'ok' : x.ok === false ? 'bad' : ''}">${x.exists ? '已存在' : esc(x.info || (x.ok === false ? '不通' : '未验证'))}</span></label>`;
+  const section = (title, kind) => {
+    const items = all.map((x, i) => [x, i]).filter(([x]) => x.kind === kind);
+    return items.length ? `<h4>${title} · 新 ${items.filter(([x]) => !x.exists).length} / 共 ${items.length}</h4>${items.map(([x, i]) => rowHtml(x, i)).join('')}` : '';
+  };
+  m.firstChild.innerHTML = `<div class="body"><h3>剪贴板里识别到 ${all.length} 个源</h3>
+    <p class="hint">已存在的自动去重，不会再加。不通的默认不勾。名称可以直接改。</p>
+    ${section('点播源', 'site')}${section('直播源', 'live')}
+    ${r.unknown.length ? `<details class="lan"><summary>${r.unknown.length} 个链接没认出来</summary>${r.unknown.map(u => `<div class="curl">${esc(u)}</div>`).join('')}</details>` : ''}
+    <div class="actions"><button class="btn red" id="clipAdd"></button><button class="small" id="clipCancel">取消</button></div></div>`;
+  const count = () => { const n = $$('input[type=checkbox]:checked', m).length; $('#clipAdd').textContent = n ? `添加选中的 ${n} 个` : '没有选中'; $('#clipAdd').disabled = !n; };
+  m.onchange = count; count();
+  $('#clipCancel').onclick = close;
+  $('#clipAdd').onclick = async () => {
+    const pick = $$('input[type=checkbox]:checked', m).map(c => { const x = all[+c.dataset.i]; return { ...x, name: $(`.cname[data-i="${c.dataset.i}"]`, m).value.trim() || x.name }; });
+    try {
+      const j = await req('POST', '/api/config/add', { sites: pick.filter(x => x.kind === 'site'), lives: pick.filter(x => x.kind === 'live') });
+      close(); await loadSites();
+      toast(`已添加 ${j.added.sites} 个点播源、${j.added.lives} 个直播源`);
+      if (location.hash.startsWith('#/settings')) renderSettings();
+    } catch (e) { toast(e.message); }
+  };
 }
 
 loadSites().then(route, e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });

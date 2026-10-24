@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @Binding var clip: ClipPayload?
+    @State private var manualText = ""
     @ObservedObject private var cfg = Config.shared
     @AppStorage("safety.level") private var level = "standard"
     @AppStorage("safety.pin") private var pin = ""
@@ -84,6 +86,26 @@ struct SettingsView: View {
                 }
             } footer: {
                 Text("m3u / m3u8 频道列表、TVBox txt，或单条 .m3u8 播放地址。")
+            }
+            .disabled(locked)
+
+            Section {
+                PasteButton(payloadType: String.self) { strings in
+                    let t = strings.joined(separator: "\n")
+                    DispatchQueue.main.async {
+                        if Recognizer.looksLikeSource(t) { clip = ClipPayload(text: t) } else { message = "剪贴板里没识别到源" }
+                    }
+                }
+                .labelStyle(.titleAndIcon)
+                .tint(.brand)
+                TextField("或者把文字粘到这里", text: $manualText, axis: .vertical)
+                    .lineLimit(3...8).font(.footnote)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                if !manualText.isEmpty {
+                    Button("识别") { clip = ClipPayload(text: manualText); manualText = "" }
+                }
+            } header: { Text("从剪贴板识别") } footer: {
+                Text("接口地址、m3u/txt 链接、直播流、TVBox 配置 JSON 或整段频道列表都行。逐个打开链接确认类型，列出新源，已存在的自动去重，确认后添加。回到 App 时剪贴板里有链接也会提示。")
             }
             .disabled(locked)
 

@@ -161,8 +161,9 @@ async function liveMedia(kind, url) {
     const tmp = file.replace(/(\.\w+)$/, '.tmp$1');
     const input = ['-hide_banner', '-loglevel', 'error', '-y', '-user_agent', UA, '-rw_timeout', '8000000', '-live_start_index', '-1'];
     const args = kind === 'thumb'
-      ? [...input, '-skip_frame', 'nokey', '-i', url, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '5', tmp]
-      : [...input, '-t', '3', '-i', url, '-an', '-vf', 'fps=8,scale=320:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=96[p];[b][p]paletteuse=dither=bayer', '-loop', '0', tmp];
+      // Preview-sized on purpose: ~8 KB covers, ~130 KB gifs (240px, 6 fps, 2.5 s, 48 colours).
+      ? [...input, '-skip_frame', 'nokey', '-i', url, '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '9', tmp]
+      : [...input, '-t', '2.5', '-i', url, '-an', '-vf', 'fps=6,scale=240:-2:flags=bilinear,split[a][b];[a]palettegen=max_colors=48:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', tmp];
     mediaJobs.set(key, limited(() => ffmpeg(args, kind === 'thumb' ? 25000 : 40000))
       .then(() => fsp.rename(tmp, file)).then(() => file, () => { fsp.rm(tmp, { force: true }).catch(() => {}); return st ? file : null; })
       .finally(() => mediaJobs.delete(key)));
@@ -227,22 +228,158 @@ async function categories(site) {
   return all.filter(c => !parents.has(c.id) && catAllowed(site, c.name));
 }
 
-// Import a TVBox config (single or multi-warehouse `{urls:[…]}`) and keep what is usable.
-async function importFrom(url, depth = 0) {
-  const text = await fetchText(url);
-  let obj;
-  try { obj = JSON.parse(text.replace(/^\uFEFF/, '').replace(/^\s*\/\/.*$/gm, '')); }
-  catch { throw new Error('不是 JSON（可能是加密/图片伪装的配置，浏览器端用不了）'); }
-  let found = normalize({ sites: obj.sites, lives: (obj.lives || []).filter(l => /^https?:\/\//.test(str(l.url))) });
+// TVBox configs: single or multi-warehouse `{urls:[…]}`. Keep what a browser can use.
+const parseJsonLoose = text => JSON.parse(str(text).replace(/^\uFEFF/, '').replace(/^\s*\/\/.*$/gm, ''));
+// Live entries are sometimes wrapped as proxy://do=live&…&ext=<base64 url>.
+function unwrapLive(u) {
+  u = str(u).trim();
+  const ext = /^proxy:\/\/.*[?&]ext=([^&]+)/.exec(u);
+  if (ext) { try { const d = Buffer.from(decodeURIComponent(ext[1]), 'base64').toString('utf8'); if (/^https?:\/\//.test(d)) return d; } catch {} }
+  return u;
+}
+async function configFrom(obj, base, depth = 0) {
+  const lives = (obj.lives || []).map(l => ({ ...l, url: unwrapLive(l.url) })).filter(l => /^https?:\/\//.test(l.url));
+  let found = normalize({ sites: obj.sites, lives });
   if (Array.isArray(obj.urls) && depth === 0) {
     for (const sub of obj.urls.slice(0, 12)) {
       try {
-        const f = await importFrom(new URL(sub.url, url).toString(), 1);
+        const f = await importFrom(base ? new URL(sub.url, base).toString() : new URL(sub.url).toString(), 1);
         found = normalize({ sites: [...found.sites, ...f.sites], lives: [...found.lives, ...f.lives] });
       } catch {}
     }
   }
   return found;
+}
+async function importFrom(url, depth = 0) {
+  const text = await fetchText(url);
+  let obj;
+  try { obj = parseJsonLoose(text); } catch { throw new Error('不是 JSON（可能是加密/图片伪装的配置，浏览器端用不了）'); }
+  return configFrom(obj, url, depth);
+}
+
+// ======================= clipboard recognition =======================
+// Pasted text → 点播 sites / 直播 sources. Each link is fetched and classified by what it actually
+// returns (苹果CMS JSON, TVBox config, m3u/txt list, single stream); names come from the text on the
+// same line. Results are marked `exists` against the current config so the client can add only new ones.
+const VOD_HINT = /provide\/vod|\/api\.php|\/inc\/api|\/at\/(json|xml)/i;
+const LIVE_HINT = /\.(m3u8?|txt)(\?|$)/i;
+const STREAMISH = /\.(m3u8|flv|ts|mp4|mpd)(\?|$)|^(rtmp|rtsp):/i;
+
+function normApi(u) {
+  try {
+    const x = new URL(str(u).trim());
+    for (const k of ['ac', 'pg', 't', 'wd', 'ids', 'h']) x.searchParams.delete(k);
+    x.hash = '';
+    return x.toString().replace(/\/+(?=\?|$)/, '');
+  } catch { return str(u).trim(); }
+}
+function normUrl(u) { try { const x = new URL(str(u).trim()); x.hash = ''; return x.toString(); } catch { return str(u).trim(); } }
+const hostOf = u => { try { return new URL(u).hostname.replace(/^(www|api|cj|caiji|collect|m3u8)\./, ''); } catch { return str(u).slice(0, 30); } };
+const cleanName = t => str(t).replace(/^[\s\d.、)）\-*•#>\[【(（]+/, '').replace(/[\s:：,，\-—|=>【】\[\]()（）]+$/, '').trim().slice(0, 24);
+const textKey = t => crypto.createHash('md5').update(str(t).replace(/\r/g, '').trim()).digest('hex');
+
+async function peek(url, max = 2e6) {
+  const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(8000) });
+  if (!r.ok) { r.body?.cancel().catch(() => {}); throw new Error(`HTTP ${r.status}`); }
+  const type = r.headers.get('content-type') || '';
+  if (/^(video|audio)\//i.test(type) || (/octet-stream/i.test(type) && STREAMISH.test(url))) { r.body?.cancel().catch(() => {}); return { stream: true, final: r.url }; }
+  if (/^image\//i.test(type)) { r.body?.cancel().catch(() => {}); return { text: '', final: r.url }; }
+  const chunks = []; let n = 0;
+  const reader = r.body.getReader();
+  while (n < max) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); n += value.length; }
+  reader.cancel().catch(() => {});
+  return { text: Buffer.concat(chunks).toString('utf8'), final: r.url };
+}
+
+function classifyText(text) {
+  const t = str(text).trim();
+  if (!t) return null;
+  if (/#EXT-X-(TARGETDURATION|STREAM-INF|MEDIA-SEQUENCE)/.test(t)) return { kind: 'stream' };
+  if (/#EXTINF|#genre#/.test(t)) return { kind: 'list', channels: parseLive(t).groups.reduce((n, g) => n + g.channels.length, 0) };
+  if (/^[{[]/.test(t)) {
+    try {
+      const o = parseJsonLoose(t);
+      if (o && (o.sites || o.urls || o.lives)) return { kind: 'config', obj: o };
+      if (o && (Array.isArray(o.class) || Array.isArray(o.list))) return { kind: 'vod', total: Number(o.total) || 0 };
+    } catch {}
+  }
+  const rows = t.split(/\r?\n/).filter(l => /^[^,#\s][^,]{0,40},\s*(https?|rtmp|rtsp):\/\//.test(l.trim()));
+  if (rows.length >= 2) return { kind: 'list', channels: parseLive(t).groups.reduce((n, g) => n + g.channels.length, 0) || rows.length };
+  return null;
+}
+
+async function recognize(input) {
+  const text = str(input).slice(0, 2e6);
+  let sites = [], lives = [];
+  const unknown = [];
+  const direct = classifyText(text);
+  if (direct?.kind === 'config') {
+    const f = await configFrom(direct.obj, null);
+    sites = f.sites.map(s => ({ ...s, info: '来自粘贴的配置' }));
+    lives = f.lives.map(l => ({ ...l, info: '来自粘贴的配置' }));
+  } else if (direct?.kind === 'list') {
+    lives.push({ name: `剪贴板频道 ${direct.channels}台`, text: text.trim() + '\n', ok: true, info: `${direct.channels} 个频道` });
+  } else {
+    const found = new Map();
+    for (const line of text.split(/\r?\n/)) {
+      const re = /(?:https?|rtmp|rtsp):\/\/[^\s"'<>，。；、）)】\]]+/g;
+      let m, last = 0;
+      while ((m = re.exec(line))) {
+        const url = m[0].replace(/[.,;:!?'"]+$/, '');
+        const name = cleanName(line.slice(last, m.index));
+        last = m.index + m[0].length;
+        if (!found.has(normUrl(url))) found.set(normUrl(url), { url, name });
+      }
+    }
+    const entries = [...found.values()].slice(0, 30);
+    const results = await Promise.all(entries.map(async e => {
+      const host = hostOf(e.url);
+      let p = null, c = null;
+      if (/^https?:/i.test(e.url)) {
+        try { p = await peek(e.url); c = p.stream ? { kind: 'stream' } : classifyText(p.text); } catch (err) { p = { error: err.message }; }
+      } else c = { kind: 'stream' };
+      const why = p?.error ? '不通：' + p.error : '';
+      if (c?.kind === 'vod') return { sites: [{ name: e.name || host, api: normApi(e.url), ok: true, info: `${c.total}部` }] };
+      if (c?.kind === 'config') {
+        const f = await configFrom(c.obj, p.final || e.url);
+        const info = `来自配置 ${e.name || host}`;
+        return { sites: f.sites.map(s => ({ ...s, info })), lives: f.lives.map(l => ({ ...l, info })) };
+      }
+      if (c?.kind === 'list') return { lives: [{ name: e.name || host, url: e.url, ok: true, info: `${c.channels} 个频道` }] };
+      if (c?.kind === 'stream') return { single: { ...e, ok: true } };
+      if (VOD_HINT.test(e.url)) return { sites: [{ name: e.name || host, api: normApi(e.url), ok: false, info: why || '返回的不是苹果CMS JSON' }] };
+      if (STREAMISH.test(e.url) && !/\.txt|\.m3u(\?|$)/i.test(e.url)) return { single: { ...e, ok: false, info: why } };
+      if (LIVE_HINT.test(e.url)) return { lives: [{ name: e.name || host, url: e.url, ok: false, info: why || '没解析出频道' }] };
+      return { unknown: e.url };
+    }));
+    const singles = [];
+    for (const r of results) {
+      if (r.sites) sites.push(...r.sites);
+      if (r.lives) lives.push(...r.lives);
+      if (r.single) singles.push(r.single);
+      if (r.unknown) unknown.push(r.unknown);
+    }
+    if (singles.length) {
+      const body = singles.map(s => `#EXTINF:-1 group-title="剪贴板",${s.name || hostOf(s.url)}\n${s.url}`).join('\n');
+      const alive = singles.filter(s => s.ok).length;
+      lives.push({ name: singles.length === 1 ? (singles[0].name || '剪贴板直播') : `剪贴板频道 ${singles.length}台`,
+        text: '#EXTM3U\n' + body + '\n', ok: alive > 0, info: `${singles.length} 条直播流，${alive} 条能连上` });
+    }
+  }
+
+  // De-duplicate inside the paste, then against what is configured.
+  const haveApi = new Set(config.sites.filter(s => !s.categories).map(s => normApi(s.api)));
+  const haveUrl = new Set(config.lives.flatMap(l => [normUrl(l.url), l.from ? normUrl(l.from) : '']).filter(Boolean));
+  const haveText = new Set();
+  for (const f of await fsp.readdir(LIVES).catch(() => [])) {
+    if (config.lives.some(l => l.url === 'local:' + f)) haveText.add(textKey(await fsp.readFile(path.join(LIVES, f), 'utf8').catch(() => '')));
+  }
+  const seenS = new Set(), seenL = new Set();
+  sites = sites.filter(s => { const k = normApi(s.api) + '|' + (s.categories || []).join(','); return !seenS.has(k) && seenS.add(k); })
+    .map(s => ({ ...s, api: normApi(s.api), exists: !s.categories && haveApi.has(normApi(s.api)) }));
+  lives = lives.filter(l => { const k = l.text ? textKey(l.text) : normUrl(l.url); return !seenL.has(k) && seenL.add(k); })
+    .map(l => ({ ...l, exists: l.text ? haveText.has(textKey(l.text)) : haveUrl.has(normUrl(l.url)) }));
+  return { sites, lives, unknown };
 }
 
 // ======================= 豆瓣 =======================
@@ -499,6 +636,30 @@ async function api(route, q, res, req) {
     if (write && !pinOk(req)) return needPin(res);
     if (route === 'config' && req.method === 'PUT') { config = normalize(await readBody(req)); saveConfig(); cache.clear(); }
     if (route === 'config/reset' && write) { config = defaults(); saveConfig(); cache.clear(); }
+    if (route === 'config/add' && write) {
+      // From clipboard recognition: append only what isn't there; pasted lists become local files.
+      const b = await readBody(req);
+      const lives = [];
+      const haveText = new Set();
+      for (const f of await fsp.readdir(LIVES).catch(() => [])) {
+        if (config.lives.some(l => l.url === 'local:' + f)) haveText.add(textKey(await fsp.readFile(path.join(LIVES, f), 'utf8').catch(() => '')));
+      }
+      for (const l of Array.isArray(b.lives) ? b.lives : []) {
+        if (l.text && haveText.has(textKey(l.text))) continue;
+        if (l.text) {
+          haveText.add(textKey(l.text));
+          const file = crypto.randomBytes(5).toString('hex') + '.m3u';
+          await fsp.writeFile(path.join(LIVES, file), str(l.text));
+          lives.push({ name: str(l.name) || '剪贴板频道', url: 'local:' + file });
+        } else if (/^https?:\/\//.test(str(l.url))) lives.push({ name: str(l.name) || hostOf(l.url), url: str(l.url) });
+      }
+      const haveApi = new Set(config.sites.filter(s => !s.categories).map(s => normApi(s.api)));
+      const sites = (Array.isArray(b.sites) ? b.sites : []).filter(s => s.categories || !haveApi.has(normApi(s.api)));
+      const before = { s: config.sites.length, l: config.lives.length };
+      config = normalize({ sites: [...config.sites, ...sites], lives: [...config.lives, ...lives] });
+      saveConfig(); cache.clear();
+      return send(res, 200, { ...config, added: { sites: config.sites.length - before.s, lives: config.lives.length - before.l } });
+    }
     if (route === 'config/import' && write) {
       const { url, replace } = await readBody(req);
       if (!/^https?:\/\//.test(url || '')) return send(res, 400, { error: '要 http(s) 地址' });
@@ -517,6 +678,7 @@ async function api(route, q, res, req) {
       return send(res, 200, { ok: true, ms: Date.now() - t, total: Number(b.total) || 0 });
     } catch (e) { return send(res, 200, { ok: false, error: e.message }); }
   }
+  if (route === 'recognize' && write) return send(res, 200, await recognize((await readBody(req)).text));
   if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ffmpeg: !!FFMPEG });
 
   // ---- live: speed test, raw text editing, covers ----
