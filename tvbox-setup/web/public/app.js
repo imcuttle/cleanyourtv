@@ -3,8 +3,8 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $('#view');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-// 豆瓣's image CDN refuses requests without its Referer → go through the server's /img relay.
-const img = u => /^https?:\/\/[^/]*doubanio\.com\//.test(u || '') ? '/img?u=' + encodeURIComponent(u) : (u || '');
+// 豆瓣/javdb image CDNs refuse requests without their Referer → go through the server's /img relay.
+const img = u => /^https?:\/\/[^/]*(doubanio|jdbstatic|javdb)\.com\//.test(u || '') ? '/img?u=' + encodeURIComponent(u) : (u || '');
 const cssUrl = u => `url('${esc(img(u)).replace(/'/g, '%27')}')`;
 const bg = url => url ? `background-image:${cssUrl(url)}` : '';
 // 豆瓣 serves every poster at s (270px) / m (540px) / l (1080px) wide, whatever size its API handed us.
@@ -167,7 +167,65 @@ const dbIO = new IntersectionObserver(es => es.forEach(e => {
   const el = e.target; dbIO.unobserve(el);
   dbRate(el.dataset.n, el.dataset.y).then(r => { if (r.rate) { el.textContent = r.rate; el.hidden = false; } });
 }), { rootMargin: '200px' });
-function observeRatings(root = document) { $$('.db[data-n]', root).forEach(el => { if (!el.dataset.obs) { el.dataset.obs = 1; dbIO.observe(el); } }); }
+function observeRatings(root = document) { $$('.db[data-n]:not([data-javfb])', root).forEach(el => { if (!el.dataset.obs) { el.dataset.obs = 1; dbIO.observe(el); } }); }
+
+// ---------- javdb (成人元数据, lazy, cached) ----------
+const javCode = s => {
+  const up = String(s ?? '').toUpperCase();
+  for (const re of [
+    /(?:^|[^A-Z0-9])FC2[\s\-_]?PPV[\s\-_]?\d{5,8}(?![A-Z0-9])/,
+    /(?:^|[^A-Z0-9])[A-Z]{2,6}[\-_]\d{2,5}(?![A-Z0-9])/,
+    /(?:^|[^A-Z0-9])\d{6}[\-_]\d{3}(?![A-Z0-9])/,
+    /(?:^|[^A-Z0-9])[A-Z]{2,6}\d{2,5}(?![A-Z0-9])/,
+  ]) {
+    const m = up.match(re);
+    if (!m) continue;
+    let c = m[0].replace(/^[^A-Z0-9]+/, '').replace(/[\s_]+/g, '-');
+    if (!c.includes('-')) c = c.replace(/^(FC2)(PPV)(\d{5,8})$/, '$1-$2-$3').replace(/^([A-Z]{2,6})(\d{2,5})$/, '$1-$2');
+    return c;
+  }
+  return '';
+};
+const javCache = JSON.parse(localStorage.javdb || '{}');
+const javQueue = []; let javActive = 0;
+function javMeta(code) {
+  const c = javCache[code];
+  if (c && c.found && Date.now() - c.at < 30 * 86400e3) return Promise.resolve(c);
+  return new Promise(ok => { javQueue.push({ code, ok }); javPump(); });
+}
+function javPump() {
+  while (javActive < 2 && javQueue.length) {
+    const { code, ok } = javQueue.shift();
+    javActive++;
+    api('javdb', { code }).catch(() => ({ found: false })).then(r => {
+      const v = { ...r, at: Date.now() };
+      if (r.found) { javCache[code] = v; localStorage.javdb = JSON.stringify(javCache); }
+      ok(v);
+    }).finally(() => { javActive--; javPump(); });
+  }
+}
+// Cards: javdb 优先补封面+评分；没番号 / 匹配不到 / 抓取失败 → 豆瓣兜底（成人条目不预先走豆瓣）。
+const javIO = new IntersectionObserver(es => es.forEach(e => {
+  if (!e.isIntersecting) return;
+  const el = e.target; javIO.unobserve(el);
+  const db = el.querySelector('.db[data-javfb]');
+  const douban = () => { if (db) dbRate(db.dataset.n, db.dataset.y).then(x => { if (x.rate) { db.textContent = x.rate; db.hidden = false; } }); };
+  const code = el.dataset.jav;
+  if (!code) { douban(); return; }
+  javMeta(code).then(r => {
+    if (!el.isConnected) return;
+    if (!r.found) { douban(); return; }
+    if (r.cover) {
+      const im = el.querySelector('.img img'); const ph = el.querySelector('.img');
+      if (im) im.src = img(r.cover); else if (ph) ph.style.cssText = bg(r.cover);
+    }
+    if (r.score) {
+      let t = el.querySelector('.jav'); if (!t) { t = document.createElement('span'); t.className = 'jav'; el.querySelector('.img')?.append(t); }
+      if (t) t.textContent = r.score;
+    }
+  });
+}), { rootMargin: '300px' });
+function observeJav(root = document) { $$('.card[data-jav]', root).forEach(el => { if (!el.dataset.jobs) { el.dataset.jobs = 1; javIO.observe(el); } }); }
 
 // ---------- boot / source picker ----------
 async function loadSites() {
@@ -274,8 +332,9 @@ function card(it, opts = {}) {
   const h = it.site && hist.get(it.site, it.id);
   const pct = h && h.dur ? Math.min(100, (h.t / h.dur) * 100) : 0;
   const href = it.douban ? `#/find/${encodeURIComponent(it.name)}` : vodHref(it.site, it.id);
-  const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"`;
+  const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"${it.adult ? ` data-jav="${esc(javCode(it.name))}"` : ''}`;
   const rate = it.douban ? (it.rate ? `<span class="db">${esc(it.rate)}</span>` : '')
+    : it.adult ? `<span class="db" hidden data-javfb data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`
     : it.site === 'local' ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
   return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
     <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${qChip(vodQ(it))}${rate}
@@ -398,6 +457,7 @@ async function renderHome() {
   if (sig.aborted || site !== state.site || !$('#more')) return;
   $('#more').innerHTML = wanted.map((c, i) => lists[i].list.length ? row(c.name, lists[i].list, `#/cat/${c.id}/${encodeURIComponent(c.name)}`) : '').join('');
   observeRatings($('#more'));
+  observeJav($('#more'));
 }
 
 function hero(items) {
@@ -414,7 +474,18 @@ function hero(items) {
     el.querySelector('.play').onclick = () => openDetail(it.site, it.id, true);
     el.querySelector('.more').onclick = () => openDetail(it.site, it.id);
     $$('.dots i', el).forEach(d => d.onclick = () => { i = +d.dataset.k; show(); });
-    if (it.site !== 'local') dbRate(it.name, it.year).then(r => {
+    const dbTag = r => { if (items[i] !== it) return; const t = el.querySelector('.dbtag'); if (t && r.rate) { t.textContent = '豆瓣 ' + r.rate; t.hidden = false; } };
+    if (it.adult) {
+      const code = javCode(it.name);
+      if (code) javMeta(code).then(r => {
+        if (items[i] !== it) return;
+        if (r.found) {
+          const p = el.querySelector('.poster'); if (p && r.cover) p.style.cssText = bgLayers(it.pic, r.cover, 'l');
+          const t = el.querySelector('.dbtag'); if (t) { t.textContent = r.score ? 'JAVDB ' + r.score : ''; t.hidden = !r.score; }
+        } else dbRate(it.name, it.year).then(dbTag);
+      });
+      else dbRate(it.name, it.year).then(dbTag);
+    } else dbRate(it.name, it.year).then(r => {
       if (items[i] !== it) return; // the slide has moved on
       const t = el.querySelector('.dbtag'); if (t && r.rate) { t.textContent = '豆瓣 ' + r.rate; t.hidden = false; }
       const p = el.querySelector('.poster'); if (p && r.pic) p.style.cssText = bgLayers(it.pic, r.pic, 'l');
@@ -433,6 +504,7 @@ function renderHistory() {
     <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有观看记录。</p>
     ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'hist', sub: `${names[it.site] || it.siteName} · ${it.epName || ''}` })).join('')}</div>` : ''}</div>`;
   observeRatings(view);
+  observeJav(view);
 }
 function renderFavorites() {
   if (kidsMode()) { view.innerHTML = '<div class="page"><h1>我的收藏</h1><p class="empty">儿童模式下收藏不可见。</p></div>'; return; }
@@ -479,7 +551,7 @@ async function renderCategory(t, name, siteKey) {
     pg = j.page; count = j.pagecount;
     const fresh = j.list.filter(it => !seen.has(it.id) && seen.add(it.id));
     $('#grid')?.insertAdjacentHTML('beforeend', fresh.map(it => card(it)).join(''));
-    if ($('#grid')) observeRatings($('#grid'));
+    if ($('#grid')) { observeRatings($('#grid')); observeJav($('#grid')); }
     if (pg >= count && $('#tail')) $('#tail').innerHTML = seen.size ? '' : '<div class="empty">这个分类是空的</div>';
     busy = false;
   };
@@ -510,6 +582,7 @@ async function renderSearch(q) {
     ${people.length ? `<h2 class="rtitle">演员 / 导演</h2><div class="ptags">${people.map(p =>
       `<a class="ptag" href="#/person/${p.role}/${encodeURIComponent(p.name)}"><b>${esc(p.name)}</b><span>${p.label} · ${p.count ?? p.list?.length ?? 0} 部</span></a>`).join('')}</div>` : ''}</div>`;
   observeRatings(view);
+  observeJav(view);
 }
 
 // ---------- 榜单 (豆瓣) ----------
@@ -767,11 +840,33 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
-    if (!d.local) dbRate(d.name, d.year).then(r => {
+    const doubanDetail = r => {
+      if (!m.isConnected) return;
       if (r.pic && !dbPic) { dbPic = r.pic; const p = $('.top .poster', m); if (p) p.style.cssText = bgLayers(d.pic, dbPic, 'l'); }
       const t = $('#dbtag', m); if (!t || !r.id) return;
       t.textContent = r.rate ? '豆瓣 ' + r.rate : '豆瓣 暂无评分'; t.href = `https://movie.douban.com/subject/${r.id}/`; t.hidden = false;
-    });
+    };
+    // 成人条目: javdb 优先补全标题/封面/演员/评分，匹配不到或失败再走豆瓣兜底。
+    if (d.adult) {
+      const code = javCode(d.name);
+      if (code) javMeta(code).then(r => {
+        if (!m.isConnected) return;
+        if (!r.found) { dbRate(d.name, d.year).then(doubanDetail); return; }
+        const h1 = $('.info h1', m);
+        if (h1 && r.title && r.title !== d.name) h1.textContent = r.title;
+        const p = $('.top .poster', m);
+        if (p && r.cover) p.style.cssText = bgLayers(d.pic, r.cover, 'l');
+        if (r.actors?.length) {
+          const ap = $$('.people', m).find(x => x.querySelector('.plabel')?.textContent === '演员');
+          if (ap) ap.outerHTML = people('演员', 'actor', r.actors, 16);
+        }
+        const mr = $('.metaRow', m);
+        let t = $('#javtag', m);
+        if (mr && !t) { t = document.createElement('a'); t.id = 'javtag'; t.className = 'tag'; t.target = '_blank'; t.rel = 'noreferrer'; mr.append(t); }
+        if (t && r.url) { t.textContent = r.score ? `JAVDB ${r.score}` : 'JAVDB'; t.href = r.url; t.hidden = false; }
+      });
+      else dbRate(d.name, d.year).then(doubanDetail);
+    } else dbRate(d.name, d.year).then(doubanDetail);
     paintAlts();
     probeLine();
   };

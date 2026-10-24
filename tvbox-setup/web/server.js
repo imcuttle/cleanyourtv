@@ -385,10 +385,18 @@ async function probeStream(u) {
   return run;
 }
 
+// 成人判定：本地源看文件夹标记；整站标成人的源全算；混合源按分类名（伦理/写真/无码…）识别。
+function adultOf(site, d) {
+  if (site.local) return localIndex().catById.get(str(d.type_id))?.adult ? 1 : 0;
+  if (site.adult) return 1;
+  return ADULT.test(str(d.type_name)) ? 1 : 0;
+}
 function item(site, d) {
+  const adult = adultOf(site, d);
   return { site: site.key, siteName: site.name, id: str(d.vod_id), name: str(d.vod_name), pic: str(d.vod_pic),
     remarks: str(d.vod_remarks), type: str(d.type_name), typeId: str(d.type_id), year: str(d.vod_year), area: str(d.vod_area),
-    quality: qualityOf(d.vod_remarks, d.vod_version, d.vod_name), blurb: clean(d.vod_content).slice(0, 300) };
+    quality: qualityOf(d.vod_remarks, d.vod_version, d.vod_name), blurb: clean(d.vod_content).slice(0, 300),
+    ...(adult ? { adult } : {}) };
 }
 const itemOk = (site, it) => !it.type || catAllowed(site, it.type);
 
@@ -602,13 +610,15 @@ fs.mkdirSync(IMGS, { recursive: true });
 async function imageProxy(target, res) {
   let u;
   try { u = new URL(target); } catch { return send(res, 400, 'bad url', 'text/plain'); }
-  if (!/(^|\.)doubanio\.com$/.test(u.hostname)) return send(res, 403, 'host not allowed', 'text/plain');
+  const isDouban = /(^|\.)doubanio\.com$/.test(u.hostname);
+  const isJav = /(^|\.)(jdbstatic|javdb)\.com$/.test(u.hostname);
+  if (!isDouban && !isJav) return send(res, 403, 'host not allowed', 'text/plain');
   const file = path.join(IMGS, crypto.createHash('md5').update(u.toString()).digest('hex'));
   const st = await fsp.stat(file).catch(() => null);
   const head = { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=604800, immutable' };
   if (st && Date.now() - st.mtimeMs < 7 * 86400e3) { res.writeHead(200, { ...head, 'Content-Length': st.size }); return fs.createReadStream(file).pipe(res); }
   const buf = await once('img|' + file, async () => {
-    const r = await fetch(u, { headers: { 'User-Agent': DB_UA_IMG, Referer: 'https://movie.douban.com/' }, signal: AbortSignal.timeout(15000) });
+    const r = await fetch(u, { headers: { 'User-Agent': DB_UA_IMG, Referer: isDouban ? 'https://movie.douban.com/' : JAVDB_URL + '/' }, signal: AbortSignal.timeout(15000) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const b = Buffer.from(await r.arrayBuffer());
     await fsp.writeFile(file + '.' + process.pid, b);
@@ -682,6 +692,89 @@ async function doubanHot(type) {
     return { list: (j.subjects || []).map(x => ({ id: x.id, name: x.title, pic: x.cover, rate: x.rate, remarks: x.episodes_info || '' })) };
   } catch (e) { return { list: [], error: e.message }; }
 }
+
+// ======================= javdb（成人元数据） =======================
+// javdb.com is the de-facto database for Japanese adult video. It has no public JSON API, so the search page
+// is scraped for the title/cover/date/score and, best-effort, the video page for the cast. Requests are
+// serialized with a polite gap (Cloudflare rate-limits) and cached in data/javdb.json + a memory LRU.
+// When the official host is unreachable, set JAVDB_URL to a mirror/proxy of the same site.
+const JAVDB_URL = (process.env.JAVDB_URL || 'https://javdb.com').replace(/\/+$/, '');
+const JAVDB_FILE = path.join(DATA, 'javdb.json');
+const javdbCache = readJson(JAVDB_FILE, {}); // 番号 -> {found, title, cover, date, score, actors, id, at}
+let javDirty = false;
+if (IS_LEADER) setInterval(() => { if (javDirty) { javDirty = false; writeJson(JAVDB_FILE, javdbCache); } }, 10000).unref();
+const javMem = new Map();
+let javChain = Promise.resolve();
+function javText(url) {
+  const hit = javMem.get(url);
+  if (hit && Date.now() - hit.at < 24 * 3600e3) return Promise.resolve(hit.body);
+  const run = javChain.then(async () => {
+    const r = await fetch(url, { headers: { 'User-Agent': DB_UA, Referer: JAVDB_URL + '/', Accept: 'text/html' }, signal: AbortSignal.timeout(15000) });
+    if (!r.ok) throw new Error(`javdb HTTP ${r.status}`);
+    const body = await r.text();
+    javMem.set(url, { at: Date.now(), body });
+    if (javMem.size > 500) javMem.delete(javMem.keys().next().value);
+    await new Promise(ok => setTimeout(ok, 400));
+    return body;
+  });
+  javChain = run.catch(() => {});
+  return run;
+}
+// 番号 shapes: ABC-123, ABCDEF-123, FC2-PPV-1234567, 123456_123 (Caribbean)… — normalized to UPPER with dashes.
+// Dash-required LETTERS-DIGITS comes before the no-dash fallback, so messy source names like
+// "第一会所…@SIS001@SONE-123" or "169bbs.com@SONE-645 [4k]" resolve to the real 番号, not the site id.
+const javCode = s => {
+  const up = str(s).toUpperCase();
+  for (const re of [
+    /(?:^|[^A-Z0-9])FC2[\s\-_]?PPV[\s\-_]?\d{5,8}(?![A-Z0-9])/,
+    /(?:^|[^A-Z0-9])[A-Z]{2,6}[\-_]\d{2,5}(?![A-Z0-9])/,
+    /(?:^|[^A-Z0-9])\d{6}[\-_]\d{3}(?![A-Z0-9])/,
+    /(?:^|[^A-Z0-9])[A-Z]{2,6}\d{2,5}(?![A-Z0-9])/,
+  ]) {
+    const m = up.match(re);
+    if (!m) continue;
+    let c = m[0].replace(/^[^A-Z0-9]+/, '').replace(/[\s_]+/g, '-');
+    if (!c.includes('-')) c = c.replace(/^(FC2)(PPV)(\d{5,8})$/, '$1-$2-$3').replace(/^([A-Z]{2,6})(\d{2,5})$/, '$1-$2');
+    return c;
+  }
+  return '';
+};
+const stripHtml = s => str(s).replace(/<[^>]*>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
+async function javMeta(code) {
+  code = javCode(code);
+  if (!code) return { found: false };
+  const c = javdbCache[code];
+  if (c && c.at && Date.now() - c.at < (c.found === false ? 7 : 30) * 86400e3)
+    return c.found === false ? { found: false } : { found: true, code, ...c };
+  try {
+    const html = await javText(`${JAVDB_URL}/search?q=${encodeURIComponent(code)}&f=all`);
+    let best = null;
+    for (const m of html.matchAll(/<a\b[^>]*href="\/v\/([A-Za-z0-9]+)"[^>]*>(.*?)<\/a>/gs)) {
+      const inner = m[2];
+      const uid = (/class="uid"[^>]*>([^<]+)</i.exec(inner) || [])[1] || '';
+      if (uid && javCode(uid) !== code) continue;
+      const title = (/<strong>([\s\S]*?)<\/strong>/i.exec(inner) || [])[1]
+        || (/title="([^"]{2,})"/.exec(inner) || [])[1] || '';
+      if (!title) continue;
+      best = { id: m[1], title: stripHtml(title), uid: stripHtml(uid) || code,
+        cover: (/(?:src|data-src)="([^"]*(?:jdbstatic|covers)[^"]*)"/i.exec(inner) || [])[1] || '',
+        date: (/\b(19|20)\d{2}[-/]\d{1,2}[-/]\d{1,2}\b/.exec(inner) || [''])[0] || '',
+        score: (/class="[^"]*value[^"]*"[^>]*>([^<]+)</i.exec(inner) || [])[1]?.trim() || '' };
+      break; // first exact-code hit
+    }
+    if (!best) { javdbCache[code] = { found: false, at: Date.now() }; javDirty = true; return { found: false }; }
+    let actors = [];
+    try {
+      const vh = await javText(`${JAVDB_URL}/v/${best.id}`);
+      actors = [...vh.matchAll(/href="\/(?:actors|star)\/[^"]*"[^>]*>([^<]{1,40})<\/a>/gi)].map(m => stripHtml(m[1])).filter(Boolean);
+      actors = [...new Set(actors)].slice(0, 20);
+    } catch {}
+    const out = { found: true, title: best.title, cover: best.cover, date: best.date, score: best.score, actors, id: best.id, url: JAVDB_URL + '/v/' + best.id, at: Date.now() };
+    javdbCache[code] = out; javDirty = true;
+    return { found: true, code, ...out };
+  } catch (e) { return { found: false, error: e.message }; }
+}
+rpcHandlers.javdb = ({ code }) => javMeta(code);
 
 // ======================= 豆瓣榜单 =======================
 // Three kinds, modelled on 豆瓣's own pages:
@@ -1664,6 +1757,12 @@ async function api(route, q, res, req) {
     return fs.createReadStream(file).pipe(res);
   }
 
+  // ---- javdb (成人元数据，仅在非儿童级别开放) ----
+  if (route === 'javdb') {
+    if (safety.level === 'kids') return send(res, 200, { found: false });
+    return send(res, 200, await rpc('javdb', { code: q.get('code') || '' }));
+  }
+
   // ---- 豆瓣 ----
   if (route === 'douban/rating') return send(res, 200, await rpc('dbRating', { name: q.get('name') || '', year: q.get('year') || '' }));
   if (route === 'douban/hot') return send(res, 200, safety.level === 'kids' ? { list: [] } : await rpc('dbHot', { type: ['movie', 'show', 'anime'].includes(q.get('type')) ? q.get('type') : 'tv' }));
@@ -1742,7 +1841,7 @@ async function api(route, q, res, req) {
     if (!itemOk(site, it)) return send(res, 403, { error: '当前安全级别下不可看' });
     const ls = lines(d);
     return send(res, 200, { ...it, quality: it.quality || bestQuality(ls.map(l => l.quality)), blurb: clean(d.vod_content), actor: str(d.vod_actor), director: str(d.vod_director),
-      actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: ls, ...(site.local ? { local: true, adult: localIndex().catById.get(str(d.type_id))?.adult ? 1 : 0 } : {}) });
+      actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: ls, ...(site.local ? { local: true } : {}) });
   }
   send(res, 404, { error: 'unknown api' });
 }
