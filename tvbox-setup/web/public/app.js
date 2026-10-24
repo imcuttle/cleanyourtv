@@ -39,7 +39,10 @@ function toast(msg) {
   document.body.append(t); setTimeout(() => t.remove(), 2600);
 }
 const spinner = '<div class="spinner"></div>';
-const fmtSize = b => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(0) + ' MB';
+const fmtSize = b => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : b > 1e7 ? (b / 1e6).toFixed(0) + ' MB' : (b / 1e6).toFixed(1) + ' MB';
+const fmtSpeed = b => !b ? '' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' MB/s' : Math.max(1, Math.round(b / 1e3)) + ' KB/s';
+const fmtEta = s => !s ? '' : s < 60 ? `剩 ${s} 秒` : s < 3600 ? `剩 ${Math.ceil(s / 60)} 分` : `剩 ${(s / 3600).toFixed(1)} 小时`;
+const ACTIVE = ['queued', 'downloading'];
 
 // ---------- history (继续观看) ----------
 const hist = {
@@ -395,6 +398,7 @@ async function enqueue(d, line, eps) {
   await req('POST', '/api/downloads', { items: eps.map(i => ({ site: d.site, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, line, ep: i, epName: d.lines[line].episodes[i].name, url: d.lines[line].episodes[i].url })) });
   await refreshDownloads();
   toast(eps.length > 1 ? `已加入下载：${eps.length} 集` : '已加入下载');
+  $('#modal')?.pollDl?.();
 }
 
 async function renderDownloads() {
@@ -407,11 +411,11 @@ async function renderDownloads() {
     view.innerHTML = `<div class="page"><h1>下载</h1>
       <p class="lan">保存在服务端 <code>${esc(j.dir)}</code>，局域网里任何设备都能播放。已用 ${fmtSize(total)}${j.free ? `，磁盘剩余 ${fmtSize(j.free)}` : ''}。</p>
       ${j.jobs.length ? `<div class="dls">${j.jobs.map(x => {
-        const pct = x.total ? Math.floor((x.done / x.total) * 100) : 0;
+        const pct = x.pct || 0;
         return `<div class="dl ${x.status}" data-id="${esc(x.id)}">
           <div class="thumb" style="${bg(x.pic)}"></div>
           <div class="dinfo"><div><b>${esc(x.name)}</b> <span>${esc(x.epName)}</span></div>
-            <div class="lan">${esc(x.siteName)} · ${status[x.status] || x.status}${['downloading', 'paused'].includes(x.status) ? ` ${pct}%` : ''} · ${fmtSize(x.bytes || 0)}${x.error ? ' · ' + esc(x.error) : ''}</div>
+            <div class="lan">${esc(x.siteName)} · ${status[x.status] || x.status}${['downloading', 'paused'].includes(x.status) ? ` ${pct}%` : ''} · ${fmtSize(x.bytes || 0)}${x.status === 'downloading' && x.speed ? ` · <b class="spd">${fmtSpeed(x.speed)}</b> · ${fmtEta(x.eta)}` : ''}${x.error ? ' · ' + esc(x.error) : ''}</div>
             <div class="bar"><i style="width:${x.status === 'done' ? 100 : pct}%"></i></div></div>
           <div class="dops">
             ${x.status === 'done' ? `<button class="btn play sm" data-op="play">▶ 播放</button><a class="small" href="/dl/${esc(x.id)}/save" download>保存到本机</a>` : ''}
@@ -431,7 +435,7 @@ async function renderDownloads() {
     else await req('PATCH', `/api/downloads?id=${id}&action=${op}`);
     draw();
   };
-  pageTimer = setInterval(() => { if (state.downloads.some(x => ['queued', 'downloading'].includes(x.status))) draw(); }, 2000);
+  pageTimer = setInterval(() => { if (state.downloads.some(x => ACTIVE.includes(x.status))) draw().catch(() => {}); }, 1000);
 }
 
 // ---------- detail modal ----------
@@ -459,7 +463,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         <button class="close">✕</button>
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
           ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
-            <button class="btn more" id="dlToggle">${dlMode ? '✓ 完成' : '⬇ 下载'}</button>` : ''}
+            <button class="btn more dlbtn" id="dlToggle"></button>` : ''}
           ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
         </div></div></div>
       <div class="body">
@@ -473,8 +477,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         ${d.lines.length ? `<h3>剧集 <span class="lines">${d.lines.map((l, i) => `<button data-line="${i}" class="${i === line ? 'on' : ''}">${esc(l.name)} (${l.episodes.length})</button>`).join('')}</span>
             ${dlMode ? `<span class="dlhint">点选要下载的集 <button class="small" id="dlAll">全部下载</button></span>` : ''}</h3>
           <div class="eps ${dlMode ? 'dlmode' : ''}">${eps.map((e, i) => {
-            const dj = dlFor(site, id, e.url);
-            const inner = `${dj ? `<em class="${dj.status}">${dj.status === 'done' ? '✓' : '⬇'}</em>` : ''}${esc(e.name)}`;
+            const inner = esc(e.name);
             const cls = h && h.line === line && i <= h.ep ? 'seen' : '';
             return dlMode ? `<button data-dl="${i}" class="${cls}" title="${esc(e.name)}">${inner}</button>`
               : `<a data-ep="${i}" class="${cls}" title="${esc(e.name)}" href="${esc(playHref(site, id, line, i))}">${inner}</a>`;
@@ -485,8 +488,16 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     m.querySelector('.close').onclick = () => history.back();
     $$('[data-line]', m).forEach(b => b.onclick = () => { line = +b.dataset.line; render(); });
     $$('[data-ep]', m).forEach(b => b.onclick = e => { if (!plainClick(e)) return; e.preventDefault(); play(d, line, +b.dataset.ep); });
-    $$('[data-dl]', m).forEach(b => b.onclick = () => enqueue(d, line, [+b.dataset.dl]).then(render, e => toast(e.message)));
-    if ($('#dlToggle', m)) $('#dlToggle', m).onclick = () => { dlMode = !dlMode; render(); };
+    $$('[data-dl]', m).forEach(b => b.onclick = () => enqueue(d, line, [+b.dataset.dl]).then(paintDl, e => toast(e.message)));
+    if ($('#dlToggle', m)) $('#dlToggle', m).onclick = () => {
+      if (eps.length > 1) { dlMode = !dlMode; return render(); }
+      // Single episode (a film): the button itself downloads, then shows its progress.
+      const j = dlFor(site, id, eps[0].url);
+      if (!j || ['error', 'paused'].includes(j.status)) return enqueue(d, line, [0]).then(paintDl, e => toast(e.message));
+      if (j.status === 'done') return toast('已下载，播放时会自动用本地文件');
+      location.hash = '#/downloads';
+    };
+    paintDl();
     if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
@@ -501,7 +512,53 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     box.innerHTML = alts.length ? alts.map(a => `<a href="${esc(vodHref(a.site, a.id))}" data-s="${esc(a.site)}" data-i="${esc(a.id)}">${esc(a.siteName)}<small>${esc(a.remarks)}</small></a>`).join('') : '<span class="lan">其他源没有同名的</span>';
     $$('a', box).forEach(b => b.onclick = e => { if (!plainClick(e)) return; e.preventDefault(); openDetail(b.dataset.s, b.dataset.i, false, true); });
   };
+  // Download state, updated in place every second while this title has active jobs.
+  const paintDl = () => {
+    if (!m.isConnected) return;
+    const eps = d.lines[line]?.episodes || [];
+    $$('.eps [data-ep], .eps [data-dl]', m).forEach(el => {
+      const j = dlFor(site, id, eps[+(el.dataset.ep ?? el.dataset.dl)]?.url);
+      el.querySelector('em')?.remove();
+      if (j) el.insertAdjacentHTML('afterbegin', `<em class="${j.status}">${j.status === 'done' ? '✓' : j.status === 'downloading' ? `${j.pct}%` : j.status === 'error' ? '!' : j.status === 'paused' ? '⏸' : '⬇'}</em>`);
+      el.classList.toggle('dling', !!j && j.status !== 'done');
+      el.style.setProperty('--p', j && j.status !== 'done' ? j.pct + '%' : '0%');
+    });
+    const b = $('#dlToggle', m); if (!b) return;
+    const mine = state.downloads.filter(j => j.site === site && j.vid === id);
+    const active = mine.filter(j => ACTIVE.includes(j.status));
+    const speed = fmtSpeed(active.reduce((n, j) => n + (j.speed || 0), 0));
+    let label, p = 0;
+    if (dlMode) label = '✓ 完成';
+    else if (eps.length === 1) {
+      const j = dlFor(site, id, eps[0].url);
+      if (!j) label = '⬇ 下载';
+      else if (j.status === 'done') label = '✓ 已下载';
+      else if (j.status === 'queued') label = '⬇ 排队中';
+      else if (j.status === 'downloading') { label = `⬇ ${j.pct}%${speed ? ' · ' + speed : ''}`; p = j.pct; }
+      else if (j.status === 'paused') { label = `⏸ 已暂停 ${j.pct}%`; p = j.pct; }
+      else label = '⟳ 重新下载';
+    } else if (active.length) {
+      const done = mine.filter(j => j.status === 'done').length;
+      label = `⬇ ${done}/${mine.length} 集${speed ? ' · ' + speed : ''}`;
+      p = Math.round(mine.reduce((n, j) => n + (j.status === 'done' ? 100 : j.pct || 0), 0) / mine.length);
+    } else {
+      const done = mine.filter(j => j.status === 'done').length;
+      label = done ? `⬇ 下载 · 已下 ${done} 集` : '⬇ 下载';
+    }
+    b.textContent = label;
+    b.classList.toggle('dling', p > 0);
+    b.style.setProperty('--p', p + '%');
+  };
+  let dlTimer = 0;
+  const pollDl = () => {
+    clearTimeout(dlTimer);
+    if (!m.isConnected || !state.downloads.some(j => j.site === site && j.vid === id && ACTIVE.includes(j.status))) return;
+    dlTimer = setTimeout(() => refreshDownloads(m.ctl.signal).then(() => { paintDl(); pollDl(); }), 1000);
+  };
+  m.ctl.signal.addEventListener('abort', () => clearTimeout(dlTimer));
   m.refresh = () => refreshDownloads(m.ctl.signal).then(render);
+  m.pollDl = pollDl;
+  pollDl();
   render();
   api('search', { wd: d.name }, m.ctl.signal).catch(() => ({ results: [] })).then(j => {
     if (m.ctl.signal.aborted) return;

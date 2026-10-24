@@ -138,8 +138,8 @@ a.dbtag:hover { filter: brightness(1.15); }
 .eps button:hover, .eps a:hover { background: #3a3a3a; } .eps button.seen, .eps a.seen { box-shadow: inset 0 -3px var(--red); }
 .eps a { display: block; text-align: center; background: #2a2a2a; color: #ddd; border-radius: 4px; padding: 9px 4px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 a.btn { text-decoration: none; cursor: pointer; }
-.eps button em { font-style: normal; font-size: 11px; margin-right: 4px; color: #46d369; }
-.eps button em.queued, .eps button em.downloading, .eps button em.paused { color: #f5a623; }
+.eps em { font-style: normal; font-size: 11px; margin-right: 5px; color: #46d369; font-variant-numeric: tabular-nums; }
+.eps em.queued, .eps em.paused { color: #f5a623; }
 .eps.dlmode button { outline: 1px dashed #ffffff40; }
 .eps.dlmode button:hover { outline-color: #fff; background: #333; }
 .dlhint { font-size: 13px; color: var(--muted); font-weight: 400; display: inline-flex; gap: 10px; align-items: center; }
@@ -208,6 +208,13 @@ a.btn { text-decoration: none; cursor: pointer; }
 .ch:hover .cover .star { opacity: 1; }
 @media (hover: none) { .cover .star { opacity: .9; } }
 .groups button.favg { color: #ffd34d; }
+
+/* download progress */
+.dlbtn.dling { background: linear-gradient(90deg, #46d36955 var(--p), #6d6d6eb3 var(--p)); font-variant-numeric: tabular-nums; }
+.eps .dling { background: linear-gradient(90deg, #46d36940 var(--p), #2a2a2a var(--p)); font-variant-numeric: tabular-nums; }
+.eps em.downloading { color: #46d369; }
+.eps em.error { color: #f5a623; }
+.spd { color: #46d369; font-weight: 600; }
 
 /* history */
 .card .rm { position: absolute; z-index: 3; top: 6px; right: 6px; width: 26px; height: 26px; border-radius: 50%; border: 0;

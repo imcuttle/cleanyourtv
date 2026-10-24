@@ -457,13 +457,29 @@ struct VodDetailView: View {
                         .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
                         .background(.white, in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.black)
                 }
+                let dl = downloadState(eps)
                 Button {
-                    if eps.count == 1 { dm.add(item, first); note = "已加入下载" } else { dlMode.toggle() }
+                    if eps.count > 1 { dlMode.toggle(); return }
+                    switch dm.record(for: first.url)?.status {
+                    case nil, "error": dm.add(item, first); note = "已加入下载"
+                    case "done": note = "已下载，播放时自动用本地文件"
+                    default: note = "下载中，可在「我的 → 下载」查看"
+                    }
                 } label: {
-                    Label(dlMode ? "完成" : (dm.record(for: first.url)?.status == "done" && eps.count == 1 ? "已下载" : "下载"),
-                          systemImage: dlMode ? "checkmark" : "arrow.down.to.line")
-                        .font(.headline).padding(.vertical, 12).padding(.horizontal, 16)
-                        .background(Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.white)
+                    Label(dl.text, systemImage: dl.icon)
+                        .font(.headline).monospacedDigit().lineLimit(1)
+                        .padding(.vertical, 12).padding(.horizontal, 16)
+                        .background {
+                            GeometryReader { g in
+                                ZStack(alignment: .leading) {
+                                    Color.white.opacity(0.18)
+                                    Color.green.opacity(0.45).frame(width: g.size.width * dl.progress)
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                        }
+                        .foregroundStyle(.white)
+                        .animation(.linear(duration: 0.8), value: dl.progress)
                 }
                 if level != "kids" {
                     Button {
@@ -481,6 +497,27 @@ struct VodDetailView: View {
         } else if error == nil {
             ProgressView().frame(maxWidth: .infinity)
         }
+    }
+
+    /// What the download button says: its own progress + speed for a film; done/total + speed for a series.
+    private func downloadState(_ eps: [Episode]) -> (text: String, icon: String, progress: Double) {
+        if dlMode { return ("完成", "checkmark", 0) }
+        let mine = dm.records(for: item)
+        let active = mine.filter { $0.status == "downloading" }
+        let speed = DownloadStat.speedText(active.reduce(0) { $0 + dm.stat($1.id).speed })
+        if eps.count == 1, let r = dm.record(for: eps[0].url) {
+            switch r.status {
+            case "done": return ("已下载", "checkmark", 0)
+            case "downloading": return ("\(Int(r.progress * 100))%" + (speed.isEmpty ? "" : " · \(speed)"), "arrow.down", max(0.02, r.progress))
+            default: return ("重试", "arrow.clockwise", 0)
+            }
+        }
+        let done = mine.filter { $0.status == "done" }.count
+        if !active.isEmpty {
+            let p = mine.reduce(0.0) { $0 + ($1.status == "done" ? 1 : $1.progress) } / Double(max(1, mine.count))
+            return ("\(done)/\(mine.count)" + (speed.isEmpty ? "" : " · \(speed)"), "arrow.down", max(0.02, p))
+        }
+        return (done > 0 ? "已下 \(done)" : "下载", "arrow.down.to.line", 0)
     }
 
     private func credit(_ k: String, _ v: String) -> some View {
@@ -520,13 +557,27 @@ struct VodDetailView: View {
                     } label: {
                         HStack(spacing: 3) {
                             if let rec {
-                                Image(systemName: rec.status == "done" ? "checkmark.circle.fill" : rec.status == "error" ? "exclamationmark.circle" : "arrow.down.circle")
-                                    .font(.caption2).foregroundStyle(rec.status == "done" ? .green : .orange)
+                                if rec.status == "downloading" {
+                                    Text("\(Int(rec.progress * 100))%").font(.system(size: 10, weight: .semibold)).monospacedDigit().foregroundStyle(.green)
+                                } else {
+                                    Image(systemName: rec.status == "done" ? "checkmark.circle.fill" : "exclamationmark.circle")
+                                        .font(.caption2).foregroundStyle(rec.status == "done" ? .green : .orange)
+                                }
                             }
                             Text(eps[i].name).font(.caption).lineLimit(1)
                         }
                         .frame(maxWidth: .infinity).padding(.vertical, 10)
-                        .background(Color.card).clipShape(RoundedRectangle(cornerRadius: 5))
+                        .background {
+                            GeometryReader { g in
+                                ZStack(alignment: .leading) {
+                                    Color.card
+                                    if rec?.status == "downloading" {
+                                        Color.green.opacity(0.28).frame(width: g.size.width * (rec?.progress ?? 0))
+                                    }
+                                }
+                            }
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
                         .overlay(RoundedRectangle(cornerRadius: 5)
                             .stroke(dlMode ? Color.white.opacity(0.45) : .clear, style: StrokeStyle(lineWidth: 1, dash: [3])))
                     }.buttonStyle(.plain)

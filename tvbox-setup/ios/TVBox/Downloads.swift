@@ -17,13 +17,40 @@ struct DownloadRecord: Identifiable, Codable, Hashable {
     var error: String?
 }
 
+struct DownloadStat: Equatable {
+    var bytes: Int64 = 0
+    var speed: Double = 0   // bytes/s, smoothed
+    var eta: Double = 0     // seconds
+
+    static func speedText(_ b: Double) -> String {
+        b <= 0 ? "" : b >= 1e6 ? String(format: "%.1f MB/s", b / 1e6) : "\(max(1, Int(b / 1e3))) KB/s"
+    }
+    static func sizeText(_ b: Int64) -> String {
+        b >= 1_000_000_000 ? String(format: "%.2f GB", Double(b) / 1e9) : String(format: "%.1f MB", Double(b) / 1e6)
+    }
+    static func etaText(_ s: Double) -> String {
+        s <= 0 ? "" : s < 60 ? "剩 \(Int(s)) 秒" : s < 3600 ? "剩 \(Int(ceil(s / 60))) 分" : String(format: "剩 %.1f 小时", s / 3600)
+    }
+}
+
 /// Offline downloads. HLS goes through AVAssetDownloadURLSession (handles AES-128, keeps going in the
 /// background); plain mp4 through an ordinary download task.
+///
+/// Delegate callbacks only note raw progress; a once-a-second tick publishes progress, bytes, speed and ETA
+/// together, so the UI updates at a steady rate instead of on every callback.
 final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate, URLSessionDownloadDelegate {
     static let shared = DownloadManager()
     @Published private(set) var records: [DownloadRecord] = []
+    @Published private(set) var stats: [String: DownloadStat] = [:]
     private var hls: AVAssetDownloadURLSession!
     private var files: URLSession!
+    private var tasks: [String: URLSessionTask] = [:]
+    private var packages: [String: URL] = [:]       // HLS: where the .movpkg is being written
+    private var rawProgress: [String: Double] = [:]
+    private var mp4Bytes: [String: Int64] = [:]
+    private var lastSample: [String: (Date, Int64)] = [:]
+    private var ticker: Timer?
+    private var measuring = false
 
     private override init() {
         super.init()
@@ -36,13 +63,74 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
         hls.getAllTasks { tasks in
             let alive = Set(tasks.compactMap(\.taskDescription))
             DispatchQueue.main.async {
+                for t in tasks { if let id = t.taskDescription { self.tasks[id] = t } }
                 for i in self.records.indices where self.records[i].status == "downloading" && !alive.contains(self.records[i].id) {
                     self.records[i].status = "error"
                     self.records[i].error = "已中断"
                 }
                 self.save()
+                self.startTicker()
             }
         }
+    }
+
+    // MARK: progress / speed
+
+    func stat(_ id: String) -> DownloadStat { stats[id] ?? DownloadStat() }
+
+    /// Downloads belonging to one title.
+    func records(for item: VodItem) -> [DownloadRecord] {
+        records.filter { $0.siteKey == item.site.key && $0.vodId == item.vodId }
+    }
+
+    private func startTicker() {
+        guard ticker == nil, records.contains(where: { $0.status == "downloading" }) else { return }
+        ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+    }
+
+    private func tick() {
+        let active = records.filter { $0.status == "downloading" }
+        if active.isEmpty { ticker?.invalidate(); ticker = nil; stats = [:]; return }
+        guard !measuring else { return }
+        measuring = true
+        let pkgs = packages, mp4 = mp4Bytes
+        let received = Dictionary(uniqueKeysWithValues: active.map { ($0.id, tasks[$0.id]?.countOfBytesReceived ?? 0) })
+        // Package sizes are summed off the main thread (a .movpkg holds hundreds of segment files).
+        DispatchQueue.global(qos: .utility).async {
+            var bytes: [String: Int64] = [:]
+            for r in active {
+                bytes[r.id] = max(mp4[r.id] ?? 0, received[r.id] ?? 0, pkgs[r.id].map(Self.directorySize) ?? 0)
+            }
+            DispatchQueue.main.async { self.apply(bytes); self.measuring = false }
+        }
+    }
+
+    private func apply(_ bytes: [String: Int64]) {
+        let now = Date()
+        var next: [String: DownloadStat] = [:]
+        for (id, b) in bytes {
+            var s = stats[id] ?? DownloadStat()
+            if let (t, prev) = lastSample[id], now.timeIntervalSince(t) > 0.3 {
+                let inst = max(0, Double(b - prev) / now.timeIntervalSince(t))
+                s.speed = s.speed > 0 ? s.speed * 0.6 + inst * 0.4 : inst
+            }
+            lastSample[id] = (now, b)
+            s.bytes = b
+            let p = rawProgress[id] ?? 0
+            s.eta = p > 0.01 && s.speed > 0 ? Double(b) * (1 - p) / p / s.speed : 0
+            next[id] = s
+        }
+        for i in records.indices where records[i].status == "downloading" {
+            if let p = rawProgress[records[i].id], abs(p - records[i].progress) > 0.001 { records[i].progress = p }
+        }
+        if next != stats { stats = next }
+    }
+
+    private static func directorySize(_ url: URL) -> Int64 {
+        guard let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        var n: Int64 = 0
+        for case let f as URL in e { n += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0) }
+        return n
     }
 
     private func save() {
@@ -85,7 +173,10 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
         }
         task?.taskDescription = id
         task?.resume()
+        if let task { tasks[id] = task }
+        rawProgress[id] = 0; mp4Bytes[id] = nil; lastSample[id] = nil
         save()
+        startTicker()
     }
 
     func delete(_ id: String) {
@@ -107,6 +198,10 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
 
     // MARK: HLS
 
+    func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, willDownloadTo location: URL) {
+        if let id = assetDownloadTask.taskDescription { packages[id] = location }
+    }
+
     func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, didFinishDownloadingTo location: URL) {
         update(assetDownloadTask.taskDescription) { $0.path = location.relativePath }
     }
@@ -115,7 +210,7 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
                     totalTimeRangesLoaded loaded: [NSValue], timeRangeExpectedToLoad expected: CMTimeRange) {
         let done = loaded.map { $0.timeRangeValue.duration.seconds }.reduce(0, +)
         let total = expected.duration.seconds
-        update(assetDownloadTask.taskDescription) { $0.progress = total > 0 ? min(1, done / total) : 0 }
+        if let id = assetDownloadTask.taskDescription { rawProgress[id] = total > 0 ? min(1, done / total) : 0 }
     }
 
     // MARK: mp4
@@ -131,7 +226,9 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData _: Int64,
                     totalBytesWritten written: Int64, totalBytesExpectedToWrite expected: Int64) {
-        update(downloadTask.taskDescription) { $0.progress = expected > 0 ? Double(written) / Double(expected) : 0 }
+        guard let id = downloadTask.taskDescription else { return }
+        mp4Bytes[id] = written
+        rawProgress[id] = expected > 0 ? Double(written) / Double(expected) : 0
     }
 
     // MARK: both
@@ -168,8 +265,17 @@ struct DownloadsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(r.name).font(.subheadline.weight(.semibold)).lineLimit(1)
                         Text("\(r.epName) · \(r.siteName)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        if r.status == "downloading" { ProgressView(value: r.progress).tint(.brand) }
-                        Text(label(r)).font(.caption2).foregroundStyle(r.status == "error" ? .orange : .secondary)
+                        if r.status == "downloading" { ProgressView(value: r.progress).tint(.green) }
+                        HStack(spacing: 6) {
+                            Text(label(r)).foregroundStyle(r.status == "error" ? .orange : .secondary)
+                            if r.status == "downloading" {
+                                let st = dm.stat(r.id)
+                                if st.bytes > 0 { Text(DownloadStat.sizeText(st.bytes)).foregroundStyle(.secondary) }
+                                Text(DownloadStat.speedText(st.speed)).foregroundStyle(.green).fontWeight(.semibold)
+                                Text(DownloadStat.etaText(st.eta)).foregroundStyle(.secondary)
+                            }
+                        }
+                        .font(.caption2).monospacedDigit()
                     }
                     Spacer()
                     if r.status == "done" {

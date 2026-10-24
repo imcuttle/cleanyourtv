@@ -594,6 +594,97 @@ async function doubanHot(type) {
   } catch (e) { return { list: [], error: e.message }; }
 }
 
+// ======================= 豆瓣榜单 =======================
+// Three kinds, modelled on 豆瓣's own pages:
+//   精选榜单  m.douban.com subject_collection (Top250, 一周口碑榜, 实时热门…), ranked by 豆瓣
+//   类型排行  movie.douban.com/typerank: one genre, "好于 X% 的同类影片"
+//   年度榜    movie.douban.com/explore (选影视): 电影/电视剧/综艺 × 年份 × 类型 × 地区 × 排序
+// Only the ids / values listed here are forwarded, so this isn't an open proxy to 豆瓣.
+const CHARTS = {
+  collections: [
+    { id: 'movie_top250', name: '豆瓣电影 Top250', kind: 'movie', desc: '按看过人数与评分综合排名，每周更新' },
+    { id: 'movie_weekly_best', name: '一周口碑电影榜', kind: 'movie', desc: '每周五更新' },
+    { id: 'movie_real_time_hotest', name: '实时热门电影', kind: 'movie', desc: '按最近的关注度排名' },
+    { id: 'tv_chinese_best_weekly', name: '华语口碑剧集榜', kind: 'tv', desc: '每周三更新' },
+    { id: 'tv_global_best_weekly', name: '全球口碑剧集榜', kind: 'tv', desc: '每周三更新' },
+    { id: 'tv_real_time_hotest', name: '实时热门剧集', kind: 'tv', desc: '按最近的关注度排名' },
+    { id: 'show_chinese_best_weekly', name: '国内口碑综艺榜', kind: 'show', desc: '每周三更新' },
+    { id: 'show_global_best_weekly', name: '国外口碑综艺榜', kind: 'show', desc: '每周三更新' },
+  ],
+  // movie.douban.com/j/chart/top_list?type=<id>
+  genres: [[11, '剧情'], [24, '喜剧'], [5, '动作'], [13, '爱情'], [17, '科幻'], [25, '动画'], [10, '悬疑'], [19, '惊悚'],
+    [20, '恐怖'], [3, '犯罪'], [16, '奇幻'], [15, '冒险'], [22, '战争'], [4, '历史'], [2, '传记'], [28, '家庭'], [8, '儿童'],
+    [14, '音乐'], [7, '歌舞'], [29, '武侠'], [30, '古装'], [12, '灾难'], [27, '西部'], [18, '运动'], [31, '黑色电影'],
+    [1, '纪录片'], [23, '短片'], [26, '同性'], [6, '情色']].map(([id, name]) => ({ id: String(id), name, ...(id === 6 ? { adult: 1 } : {}) })),
+  intervals: [['100:90', '前 10%'], ['90:80', '10–20%'], ['80:70', '20–30%'], ['70:60', '30–40%'], ['60:50', '40–50%']].map(([id, name]) => ({ id, name })),
+  kinds: [{ id: 'movie', name: '电影' }, { id: 'tv', name: '电视剧' }, { id: 'show', name: '综艺' }],
+  explore: {
+    movie: ['喜剧', '爱情', '动作', '科幻', '动画', '悬疑', '犯罪', '惊悚', '冒险', '奇幻', '恐怖', '战争', '历史', '传记', '音乐', '歌舞', '武侠', '灾难', '西部', '纪录片', '短片'],
+    tv: ['剧情', '喜剧', '爱情', '悬疑', '犯罪', '古装', '武侠', '家庭', '科幻', '奇幻', '动作', '历史', '战争', '惊悚', '恐怖', '动画', '传记'],
+    show: ['真人秀', '脱口秀', '音乐', '歌舞'],
+  },
+  regions: ['华语', '欧美', '韩国', '日本', '中国大陆', '中国香港', '中国台湾', '美国', '英国', '法国', '德国', '意大利', '西班牙', '印度', '泰国', '俄罗斯'],
+  decades: ['2010年代', '2000年代', '90年代', '80年代', '70年代', '60年代', '更早'],
+  sorts: [{ id: 'S', name: '高分优先' }, { id: 'T', name: '综合' }, { id: 'U', name: '近期热度' }, { id: 'R', name: '最新上映' }],
+};
+const chartYears = () => { const y = new Date().getFullYear(); return [...Array.from({ length: 8 }, (_, i) => String(y - i)), ...CHARTS.decades]; };
+// 高分优先 on 豆瓣 puts concert films with a few hundred votes first; a vote floor makes it a real ranking.
+const MIN_VOTES = { movie: 5000, tv: 2000, show: 500 };
+rpcHandlers.dbChart = q => doubanChart(q);
+
+const fmtRate = v => (Number(v) > 0 ? Number(v).toFixed(1) : '');
+// rexxar (collections, explore) item → the card shape the clients use.
+function dbSubject(x) {
+  const r = x.rating || {};
+  return { id: str(x.id), name: str(x.title), pic: str(x.pic?.normal || x.cover_url || x.cover?.url), rate: fmtRate(r.value),
+    votes: Number(r.count) || 0, rank: Number(x.rank) || 0, sub: str(x.card_subtitle), year: (/^\d{4}/.exec(str(x.card_subtitle)) || [''])[0],
+    desc: str(x.description || x.comment?.comment || '').slice(0, 120), remarks: str(x.episodes_info) };
+}
+
+async function doubanChart(q) {
+  const start = Math.max(0, Math.min(Number(q.start) || 0, 1000));
+  if (q.kind === 'collection') {
+    const c = CHARTS.collections.find(x => x.id === q.id);
+    if (!c) return { list: [], end: true, error: '没有这个榜单' };
+    const count = Math.min(Number(q.count) || 25, 50);
+    const j = await dbJson(`https://m.douban.com/rexxar/api/v2/subject_collection/${c.id}/items?start=${start}&count=${count}`, 3600e3);
+    const list = (j.subject_collection_items || []).filter(x => x.type === 'movie' || x.type === 'tv').map(dbSubject);
+    const total = Number(j.total) || 0;
+    return { list, total, next: start + count, end: start + count >= total };
+  }
+  if (q.kind === 'genre') {
+    const g = CHARTS.genres.find(x => x.id === q.type);
+    const iv = CHARTS.intervals.find(x => x.id === q.interval) || CHARTS.intervals[0];
+    if (!g || (g.adult && safety.level !== 'all')) return { list: [], end: true, error: '没有这个类型' };
+    const limit = 20;
+    const j = await dbJson(`https://movie.douban.com/j/chart/top_list?type=${g.id}&interval_id=${iv.id}&action=&start=${start}&limit=${limit}`, 3600e3);
+    const list = (Array.isArray(j) ? j : []).map(x => ({ id: str(x.id), name: str(x.title), pic: str(x.cover_url), rate: fmtRate(x.score),
+      votes: Number(x.vote_count) || 0, rank: Number(x.rank) || 0, year: '',
+      sub: [(x.regions || []).join(' '), (x.types || []).join(' '), (x.actors || []).slice(0, 3).join(' ')].filter(Boolean).join(' / '), desc: '', remarks: '' }));
+    return { list, next: start + limit, end: list.length < limit };
+  }
+  if (q.kind === 'explore') {
+    const kind = CHARTS.kinds.some(k => k.id === q.type) ? q.type : 'movie';
+    const genre = CHARTS.explore[kind].includes(q.genre) ? q.genre : '';
+    const region = CHARTS.regions.includes(q.region) ? q.region : '';
+    const year = chartYears().includes(q.year) ? q.year : '';
+    const sort = CHARTS.sorts.some(s => s.id === q.sort) ? q.sort : 'S';
+    const form = { tv: '电视剧', show: '综艺' }[kind];
+    const sel = { ...(form ? { 形式: form } : {}), ...(genre ? { 类型: genre } : {}), ...(region ? { 地区: region } : {}) };
+    const tags = [form, genre, region, year].filter(Boolean).join(',');
+    const count = 30;
+    const u = `https://m.douban.com/rexxar/api/v2/${kind === 'movie' ? 'movie' : 'tv'}/recommend?refresh=0&start=${start}&count=${count}`
+      + `&selected_categories=${encodeURIComponent(JSON.stringify(sel))}&uncollect=false&tags=${encodeURIComponent(tags)}&sort=${sort}`;
+    const j = await dbJson(u, 3600e3);
+    const raw = j.items || [];
+    const floor = sort === 'S' ? MIN_VOTES[kind] : 0;
+    const list = raw.filter(x => (x.type === 'movie' || x.type === 'tv') && (!floor || (x.rating?.count || 0) >= floor)).map(dbSubject);
+    const total = Number(j.total) || 0;
+    return { list, total, next: start + count, end: !raw.length || start + count >= total, ...(floor ? { floor } : {}) };
+  }
+  return { list: [], end: true, error: 'unknown chart' };
+}
+
 // ======================= downloads =======================
 // Each episode → data/downloads/<id>/{index.m3u8, 00001.ts…}. Segments are decrypted on the way in,
 // so the folder plays anywhere and concatenates into a single file.
@@ -739,7 +830,28 @@ async function downloadMp4(j, dir) {
   j.done = j.total = j.bytes;
 }
 
-const jobView = j => ({ ...j, play: j.status !== 'done' ? '' : fs.existsSync(path.join(DL, j.id, 'index.m3u8')) ? `/dl/${j.id}/index.m3u8` : `/dl/${j.id}/video.mp4` });
+// Speed: sampled once a second in the leader, smoothed; not persisted.
+const rates = new Map(); // job id -> { bytes, at, speed }
+if (IS_LEADER) setInterval(() => {
+  const now = Date.now();
+  for (const j of jobs) {
+    if (j.status !== 'downloading') { rates.delete(j.id); continue; }
+    const r = rates.get(j.id);
+    if (!r) { rates.set(j.id, { bytes: j.bytes, at: now, speed: 0 }); continue; }
+    const inst = Math.max(0, (j.bytes - r.bytes) * 1000 / Math.max(1, now - r.at));
+    r.speed = r.speed ? r.speed * 0.6 + inst * 0.4 : inst;
+    r.bytes = j.bytes; r.at = now;
+  }
+}, 1000).unref();
+function jobView(j) {
+  const speed = j.status === 'downloading' ? Math.round(rates.get(j.id)?.speed || 0) : 0;
+  const pct = j.status === 'done' ? 100 : j.total ? Math.min(99, Math.floor(j.done / j.total * 100)) : 0;
+  // ETA: mp4 counts bytes; HLS counts segments, so estimate the rest from the average segment so far.
+  const left = j.ext === 'mp4' ? j.total - j.done : j.done ? (j.total - j.done) * (j.bytes / j.done) : 0;
+  const eta = speed > 0 && left > 0 ? Math.round(left / speed) : 0;
+  return { ...j, pct, speed, eta,
+    play: j.status !== 'done' ? '' : fs.existsSync(path.join(DL, j.id, 'index.m3u8')) ? `/dl/${j.id}/index.m3u8` : `/dl/${j.id}/video.mp4` };
+}
 
 async function serveDownload(rest, req, res) {
   const [id, file] = rest.split('/');
@@ -852,6 +964,16 @@ async function api(route, q, res, req) {
   // ---- 豆瓣 ----
   if (route === 'douban/rating') return send(res, 200, await rpc('dbRating', { name: q.get('name') || '', year: q.get('year') || '' }));
   if (route === 'douban/hot') return send(res, 200, safety.level === 'kids' ? { list: [] } : await rpc('dbHot', { type: q.get('type') === 'movie' ? 'movie' : 'tv' }));
+  if (route === 'douban/charts') {
+    if (safety.level === 'kids') return send(res, 200, { off: true });
+    return send(res, 200, { ...CHARTS, genres: CHARTS.genres.filter(g => !g.adult || safety.level === 'all'), years: chartYears() });
+  }
+  if (route === 'douban/chart') {
+    if (safety.level === 'kids') return send(res, 200, { list: [], end: true, error: '儿童模式下榜单不可用' });
+    const args = Object.fromEntries(['kind', 'id', 'type', 'interval', 'genre', 'region', 'year', 'sort', 'start', 'count'].map(k => [k, q.get(k) || '']));
+    try { return send(res, 200, await rpc('dbChart', args)); }
+    catch (e) { return send(res, 200, { list: [], end: true, error: e.message }); }
+  }
 
   // ---- downloads (leader runs the queue) ----
   if (route === 'downloads') {
