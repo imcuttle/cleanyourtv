@@ -256,7 +256,7 @@ function drainMedia() {
 }
 function ffmpeg(args, ms, nice) {
   return new Promise((ok, bad) => {
-    const p = spawn(FFMPEG, args, { stdio: 'ignore' });
+    const p = spawn(FFMPEG, args, { stdio: 'ignore', windowsHide: true });
     if (nice) try { os.setPriority(p.pid, nice); } catch {} // background work yields to request handling
     const t = setTimeout(() => p.kill('SIGKILL'), ms);
     p.on('exit', code => { clearTimeout(t); code === 0 ? ok() : bad(new Error('ffmpeg exit ' + code)); });
@@ -1141,7 +1141,7 @@ const MEDIA_EXT = new Set(['mp4', 'm4v', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'f4v
 // What a browser <video> plays as is; the rest is remuxed (or transcoded) to HLS by ffmpeg on demand.
 const BROWSER_EXT = new Set(['mp4', 'm4v', 'webm', 'mov', 'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus']);
 const LOCAL_DEFAULT = { enabled: true, name: '本地媒体', exts: ['mp4', 'mkv', 'avi', 'mov', 'm4v', 'webm', 'flv', 'wmv', 'rmvb'], rescan: 60, dirs: [] };
-const SKIP_NAME = /^(\.|node_modules$|@eaDir$|#recycle$|\$recycle\.bin$|system volume information$|lost\+found$|samples?$|extras?$|featurettes$)/i;
+const SKIP_NAME = /^(\.|node_modules$|recycler$|@eaDir$|#recycle$|\$recycle\.bin$|system volume information$|lost\+found$|samples?$|extras?$|featurettes$)/i;
 const SKIP_SAMPLE = /(^|[\s._-])sample\.\w+$/i;
 const IMG_RE = /\.(jpe?g|png|webp)$/i;
 const POSTERS = ['poster', 'folder', 'cover', 'movie', 'show', 'fanart', 'thumb', 'landscape'];
@@ -1152,7 +1152,8 @@ function normLocal(c) {
   const exts = [...new Set(extList.map(e => str(e).trim().toLowerCase().replace(/^\./, '')).filter(e => MEDIA_EXT.has(e)))];
   const dirs = [];
   for (const d of Array.isArray(c.dirs) ? c.dirs : []) {
-    let p = str(d && d.path).trim();
+    let p = str(d && d.path).trim().replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim(); // Windows "复制为路径" wraps it in quotes
+    if (p === '~' || p.startsWith('~\\')) p = path.join(os.homedir(), p.slice(1));
     if (p === '~' || p.startsWith('~/')) p = path.join(os.homedir(), p.slice(1));
     if (!p || !path.isAbsolute(p)) continue;
     dirs.push({ path: path.resolve(p), name: str(d.name).trim().slice(0, 30), ...(Number(d.sub) ? { sub: 1 } : {}),
@@ -1421,7 +1422,10 @@ async function scanLocal() {
     const list = [...items.values()].sort((a, b) => b.mtime - a.mtime);
     const used = new Set(list.map(it => it.cat));
     fs.writeFileSync(LOCAL_INDEX + '.tmp', JSON.stringify({ at: Date.now(), cats: [...cats.values()].filter(c => used.has(c.id)), items: list }));
-    fs.renameSync(LOCAL_INDEX + '.tmp', LOCAL_INDEX);
+    for (let i = 0; ; i++) { // Windows: EPERM/EBUSY while a web worker is reading the old index
+      try { fs.renameSync(LOCAL_INDEX + '.tmp', LOCAL_INDEX); break; }
+      catch (e) { if (i >= 8 || !/^(EPERM|EBUSY|EACCES)$/.test(e.code)) throw e; await new Promise(ok => setTimeout(ok, 60 * (i + 1))); }
+    }
     localSnap.mtime = -2;
     thumbHot.clear(); // sources may have changed
     localScan = { running: false, at: Date.now(), ms: Date.now() - t0, items: list.length, files: list.reduce((n, it) => n + it.files.length, 0), dirs, error: '' };
@@ -1511,19 +1515,73 @@ async function localThumb(id) {
   }
   return mediaJobs.get(key);
 }
-// Disk cap: keep the THUMB_DISK_MAX most recently used covers (mtime is touched on first use after a restart / LRU eviction).
+// ---- hover previews: a short gif of the title (media process, cached in data/thumbs) ----
+// A title ≥ 40 s long gets three 1 s clips (15 % / 45 % / 75 % in) joined into one gif, shorter ones a single 2.5 s clip,
+// 240 px wide, 6 fps, 48 colours (≈ 100–250 KB). Same machinery as the covers: shared LIFO queue (the card being hovered now
+// is made next), at most a few ffmpeg at once at nice 10, "hot" LRU id → file, disk cap with oldest-used pruned, failures
+// remembered for an hour, files keyed by source path + size + mtime so an edited video gets a new preview.
+const GIF_DISK_MAX = 600, GIF_HOT_MAX = 600;
+const gifHot = new Map(), gifFail = new Map();
+rpcHandlers.localGif = ({ id }) => localGif(id);
+async function localGif(id) {
+  const hot = gifHot.get(id);
+  if (hot) { gifHot.delete(id); gifHot.set(id, hot); return hot; }
+  const it = localIndex().byItem.get(id);
+  if (!it || !FFMPEG) return null;
+  const f = it.files[0];
+  const st = await io(() => fsp.stat(f.path)).catch(() => null);
+  if (!st) return null;
+  const file = path.join(THUMBS, `localgif-${hashId(id + '|' + f.path + '|' + st.size + '|' + Math.round(st.mtimeMs), 12)}.gif`);
+  const done = await fsp.stat(file).catch(() => null);
+  const keep = () => { gifHot.delete(id); gifHot.set(id, file); if (gifHot.size > GIF_HOT_MAX) gifHot.delete(gifHot.keys().next().value); return file; };
+  if (done) { fsp.utimes(file, new Date(), new Date()).catch(() => {}); return keep(); } // touch = LRU stamp for pruning
+  if (Date.now() - (gifFail.get(id) || 0) < 3600e3) return null;
+  const key = 'lg|' + file;
+  if (!mediaJobs.has(key)) {
+    const tmp = file.replace(/\.gif$/, '.tmp.gif');
+    const run = async () => {
+      const { duration: dur = 0 } = await mediaInfo(f.path);
+      const clip = dur >= 40 ? 1 : 2.5;
+      const starts = dur >= 40 ? [0.15, 0.45, 0.75].map(p => dur * p) : dur >= 6 ? [dur * 0.25] : [0];
+      const inputs = starts.flatMap(t => ['-ss', t.toFixed(2), '-t', String(clip), '-i', f.path]);
+      const chains = starts.map((_, n) => `[${n}:v:0]fps=6,scale=240:-2:flags=bilinear,setpts=PTS-STARTPTS[v${n}]`);
+      if (starts.length > 1) chains.push(`${starts.map((_, n) => `[v${n}]`).join('')}concat=n=${starts.length}:v=1:a=0[c]`);
+      const fc = [...chains, `${starts.length > 1 ? '[c]' : '[v0]'}split[a][b]`, '[a]palettegen=max_colors=48:stats_mode=diff[p]',
+        '[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle'].join(';');
+      const base = ['-hide_banner', '-loglevel', 'error', '-y'];
+      const tail = ['-an', '-loop', '0', tmp];
+      // Odd containers (no index) can't seek; fall back to the first 2.5 s.
+      return ffmpeg([...base, ...inputs, '-filter_complex', fc, ...tail], 60000, 10)
+        .catch(() => ffmpeg([...base, '-t', '2.5', '-i', f.path, '-an', '-vf', 'fps=6,scale=240:-2:flags=bilinear,split[a][b];[a]palettegen=max_colors=48:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', tmp], 60000, 10));
+    };
+    mediaJobs.set(key, thumbJob(run)
+      .then(() => fsp.rename(tmp, file)).then(keep, e => {
+        fsp.rm(tmp, { force: true }).catch(() => {});
+        if (e.message === 'busy') throw e;
+        gifFail.set(id, Date.now());
+        return null;
+      })
+      .finally(() => mediaJobs.delete(key)));
+  }
+  return mediaJobs.get(key);
+}
+
+// Disk caps: keep the most recently used covers / gifs (mtime is touched on first use after a restart / LRU eviction).
 async function pruneThumbs() {
   try {
-    const names = (await fsp.readdir(THUMBS)).filter(n => n.startsWith('local-'));
-    for (const n of names) if (n.includes('.tmp.')) fsp.rm(path.join(THUMBS, n), { force: true }).catch(() => {});
-    if (names.length <= THUMB_DISK_MAX) return;
-    const st = [];
-    for (let i = 0; i < names.length; i += 64) {
-      st.push(...await Promise.all(names.slice(i, i + 64).map(n => fsp.stat(path.join(THUMBS, n)).then(s => ({ n, t: s.mtimeMs }), () => null))));
+    const all = await fsp.readdir(THUMBS);
+    for (const n of all) if (/^local(gif)?-.*\.tmp\./.test(n)) fsp.rm(path.join(THUMBS, n), { force: true }).catch(() => {});
+    for (const [prefix, cap] of [['local-', THUMB_DISK_MAX], ['localgif-', GIF_DISK_MAX]]) {
+      const names = all.filter(n => n.startsWith(prefix) && !n.includes('.tmp.'));
+      if (names.length <= cap) continue;
+      const st = [];
+      for (let i = 0; i < names.length; i += 64) {
+        st.push(...await Promise.all(names.slice(i, i + 64).map(n => fsp.stat(path.join(THUMBS, n)).then(s => ({ n, t: s.mtimeMs }), () => null))));
+      }
+      const old = st.filter(Boolean).sort((a, b) => a.t - b.t).slice(0, names.length - Math.floor(cap * 0.9));
+      await Promise.all(old.map(x => fsp.rm(path.join(THUMBS, x.n), { force: true })));
+      (prefix === 'local-' ? thumbHot : gifHot).clear();
     }
-    const old = st.filter(Boolean).sort((a, b) => a.t - b.t).slice(0, names.length - Math.floor(THUMB_DISK_MAX * 0.9));
-    await Promise.all(old.map(x => fsp.rm(path.join(THUMBS, x.n), { force: true })));
-    thumbHot.clear();
   } catch {}
 }
 if (IS_MEDIA) {
@@ -1540,7 +1598,7 @@ const HLS_IDLE = 5 * 60e3;
 function probeVideo(file) {
   return new Promise(ok => {
     let err = '';
-    const p = spawn(FFMPEG, ['-hide_banner', '-i', file], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const p = spawn(FFMPEG, ['-hide_banner', '-i', file], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     const t = setTimeout(() => p.kill('SIGKILL'), 20000);
     p.stderr.on('data', d => { if (err.length < 64e3) err += d; });
     p.on('error', () => { clearTimeout(t); ok({ copy: false }); });
@@ -1554,7 +1612,7 @@ function probeVideo(file) {
 function startHls(f) {
   const dir = path.join(TRANS, f.id);
   if (hlsJobs.size >= HLS_MAX) [...hlsJobs.values()].sort((a, b) => a.last - b.last)[0].stop();
-  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   fs.mkdirSync(dir, { recursive: true });
   const j = { last: Date.now(), proc: null, stopped: false, exited: false, error: '' };
   j.stop = () => {
@@ -1570,7 +1628,7 @@ function startHls(f) {
     const p = j.proc = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', f.path,
       '-map', '0:V:0?', '-map', '0:a:0?', ...vargs, '-c:a', 'aac', '-ac', '2', '-b:a', '192k',
       '-f', 'hls', '-hls_time', '6', '-hls_list_size', '0', '-hls_playlist_type', 'event',
-      '-hls_segment_filename', path.join(dir, '%05d.ts'), path.join(dir, 'index.m3u8')], { stdio: ['ignore', 'ignore', 'pipe'] });
+      '-hls_segment_filename', path.join(dir, '%05d.ts'), path.join(dir, 'index.m3u8')], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     try { os.setPriority(p.pid, 10); } catch {} // yields to the request workers
     p.stderr.on('data', d => { j.error = (j.error + d).slice(-300); });
     p.on('error', e => { j.error = e.message; j.exited = true; });
@@ -1589,28 +1647,36 @@ function startHls(f) {
   })();
   return j;
 }
-// Resolution of a local file for the detail page: one `ffmpeg -i` (header only), remembered in memory.
-const sizeCache = new Map();
-rpcHandlers.localProbe = ({ id }) => {
-  const f = localIndex().byFile.get(id);
-  if (!f || !FFMPEG) return {};
-  if (sizeCache.has(id)) return sizeCache.get(id);
+// Duration + resolution of a local file: one `ffmpeg -i` (header only), remembered (LRU, 3000 files).
+const infoCache = new Map();
+function mediaInfo(file) {
+  const hit = infoCache.get(file);
+  if (hit) { infoCache.delete(file); infoCache.set(file, hit); return Promise.resolve(hit); }
   return new Promise(ok => {
     let err = '';
-    const p = spawn(FFMPEG, ['-hide_banner', '-i', f.path], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const p = spawn(FFMPEG, ['-hide_banner', '-i', file], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     try { os.setPriority(p.pid, 10); } catch {}
     const t = setTimeout(() => p.kill('SIGKILL'), 15000);
     p.stderr.on('data', d => { if (err.length < 64e3) err += d; });
     p.on('error', () => { clearTimeout(t); ok({}); });
     p.on('close', () => {
       clearTimeout(t);
-      const line = err.split('\n').find(l => /Stream #.*Video:/.test(l) && !/attached pic/.test(l)) || '';
+      const line = err.split(/\r?\n/).find(l => /Stream #.*Video:/.test(l) && !/attached pic/.test(l)) || '';
       const m = /[\s,](\d{2,5})x(\d{2,5})[\s,\[]/.exec(line);
-      const v = m ? { width: +m[1], height: +m[2] } : {};
-      if (m) { sizeCache.set(id, v); if (sizeCache.size > 2000) sizeCache.delete(sizeCache.keys().next().value); }
+      const d = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(err);
+      const v = {};
+      if (m) { v.width = +m[1]; v.height = +m[2]; }
+      if (d) v.duration = +d[1] * 3600 + +d[2] * 60 + +d[3];
+      if (m || d) { infoCache.set(file, v); if (infoCache.size > 3000) infoCache.delete(infoCache.keys().next().value); }
       ok(v);
     });
   });
+}
+rpcHandlers.localProbe = async ({ id }) => {
+  const f = localIndex().byFile.get(id);
+  if (!f || !FFMPEG) return {};
+  const { width, height } = await mediaInfo(f.path);
+  return width ? { width, height } : {};
 };
 rpcHandlers.hlsOpen = async ({ id }) => {
   const f = localIndex().byFile.get(id);
@@ -1627,7 +1693,7 @@ rpcHandlers.hlsOpen = async ({ id }) => {
 };
 if (IS_MEDIA) {
   // Unfinished output from an earlier run can't be resumed.
-  for (const d of fs.readdirSync(TRANS)) if (!fs.existsSync(path.join(TRANS, d, '.done'))) fs.rmSync(path.join(TRANS, d), { recursive: true, force: true });
+  for (const d of fs.readdirSync(TRANS)) if (!fs.existsSync(path.join(TRANS, d, '.done'))) fs.rmSync(path.join(TRANS, d), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   setInterval(async () => {
     for (const j of [...hlsJobs.values()]) if (Date.now() - j.last > HLS_IDLE) j.stop();
     for (const d of await fsp.readdir(TRANS).catch(() => [])) {
@@ -1651,6 +1717,14 @@ async function serveMedia(rest, req, res) {
     try { thumb = await rpc('localThumb', { id: it.id }, 90000); }
     catch (e) { res.setHeader?.('Retry-After', '5'); return send(res, 503, 'busy', 'text/plain'); }
     return thumb ? sendFile(req, res, thumb, MIME[path.extname(thumb).toLowerCase()] || 'image/jpeg', cacheH) : send(res, 404, 'no poster', 'text/plain');
+  }
+  if (kind === 'g') {
+    const it = snap.byItem.get(raw);
+    if (!visible(it)) return send(res, 404, 'not found', 'text/plain');
+    let gif;
+    try { gif = await rpc('localGif', { id: it.id }, 120000); }
+    catch (e) { res.setHeader?.('Retry-After', '5'); return send(res, 503, 'busy', 'text/plain'); }
+    return gif ? sendFile(req, res, gif, 'image/gif', { 'Cache-Control': 'public, max-age=604800', etag: true }) : send(res, 404, 'no preview', 'text/plain');
   }
   const f = snap.byFile.get(raw.replace(/\.\w+$/, ''));
   if (!f || !visible(f.item)) return send(res, 404, 'not found', 'text/plain');
@@ -1977,10 +2051,11 @@ function isLoopback(req) {
 // Hand a file to the OS. Arguments go as an array (no shell), so file names can't inject commands.
 function openPath(file, reveal) {
   const [cmd, args] = process.platform === 'darwin' ? ['open', reveal ? ['-R', file] : [file]]
-    : process.platform === 'win32' ? (reveal ? ['explorer.exe', ['/select,' + file]] : ['rundll32', ['url.dll,FileProtocolHandler', file]])
+    : process.platform === 'win32' ? (reveal ? ['explorer.exe', [`/select,"${file}"`]] : ['rundll32', ['url.dll,FileProtocolHandler', file]])
     : ['xdg-open', [reveal ? path.dirname(file) : file]];
   return new Promise((ok, bad) => {
-    const p = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    // explorer wants /select,"path" with the quotes inside the one argument, so Windows gets it verbatim.
+    const p = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true, windowsVerbatimArguments: process.platform === 'win32' && reveal });
     p.on('error', bad);
     p.unref();
     // `open` / `xdg-open` return at once; explorer.exe exits non-zero even on success, so only a spawn error counts.

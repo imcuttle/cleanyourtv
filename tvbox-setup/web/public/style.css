@@ -522,3 +522,9 @@ nav a svg { display: none; }
 .hnav button:hover:not(:disabled) { background: #ffffff3d; }
 .hnav button:disabled { opacity: .3; cursor: default; }
 .hnav button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+
+/* 本地媒体 hover preview: the gif fades in over the poster; a thin bar shimmers while the server makes it */
+.card .img img.pvl { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.card .img img.pvl.on { opacity: 1; }
+.card .img.pvload::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; z-index: 2;
+  background: linear-gradient(90deg, transparent, #fffc, transparent) 0 0 / 200% 100%; animation: shimmer 1s linear infinite; }

@@ -263,7 +263,7 @@ const closeMenu = () => { $('#siteMenu').hidden = true; $('#siteBtn').classList.
 document.addEventListener('click', e => { if (!e.target.closest('.picker')) closeMenu(); });
 $('#searchForm').onsubmit = e => { e.preventDefault(); const q = $('#q').value.trim(); if (q) location.hash = '#/search/' + encodeURIComponent(q); };
 addEventListener('scroll', () => $('#top').classList.toggle('solid', scrollY > 30));
-addEventListener('hashchange', route);
+addEventListener('hashchange', () => route({ nav: true }));
 
 let heroTimer, pageTimer;
 function newPage() {
@@ -271,11 +271,62 @@ function newPage() {
   pageCtl = new AbortController();
   dbQueue.length = 0;
   thumbQueue.length = 0;
-  stopPreview();
+  stopPreview(); stopLocalPreview();
 }
-async function route() {
+// ---- scroll position per history entry ----
+// Every page the user lands on gets a key in its history entry's state; the scroll offset is remembered under it
+// (sessionStorage, 80 entries) and put back when that entry is visited again by Back / Forward / reload.
+// Pages fill in asynchronously (rows, infinite-scroll grids), so restoring waits for the content to get tall enough.
+history.scrollRestoration = 'manual';
+const scrollMap = (() => { try { return JSON.parse(sessionStorage.scrolls || '{}'); } catch { return {}; } })();
+let scrollGuard = false, scrollTick = 0, scrollSave = 0, routeSeq = 0, restoreCtl = null;
+const saveScroll = (k, y) => {
+  delete scrollMap[k]; scrollMap[k] = Math.round(y);
+  const ks = Object.keys(scrollMap); if (ks.length > 80) for (const x of ks.slice(0, ks.length - 80)) delete scrollMap[x];
+  clearTimeout(scrollSave); scrollSave = setTimeout(() => { try { sessionStorage.scrolls = JSON.stringify(scrollMap); } catch {} }, 400);
+};
+addEventListener('scroll', () => {
+  if (scrollTick) return;
+  scrollTick = requestAnimationFrame(() => {
+    scrollTick = 0;
+    const k = history.state?.sk;
+    if (k && !scrollGuard) saveScroll(k, scrollY);
+  });
+}, { passive: true });
+// Returns the saved offset when this entry has been visited before; otherwise gives it a key.
+function entryScroll() {
+  const st = history.state && typeof history.state === 'object' ? history.state : {};
+  if (st.sk) return scrollMap[st.sk] || 0;
+  history.replaceState({ ...st, sk: Math.random().toString(36).slice(2) + Date.now().toString(36) }, '');
+  return 0;
+}
+function restoreScroll(y) {
+  restoreCtl?.();
+  const t0 = Date.now();
+  let ro = null, timer = 0;
+  const stop = () => {
+    ro?.disconnect(); clearTimeout(timer);
+    for (const ev of ['wheel', 'touchstart', 'keydown', 'mousedown']) removeEventListener(ev, stop, true);
+    if (restoreCtl === stop) restoreCtl = null;
+    scrollGuard = false;
+  };
+  restoreCtl = stop;
+  const apply = () => {
+    const max = document.documentElement.scrollHeight - innerHeight;
+    scrollTo(0, Math.min(y, Math.max(0, max)));
+    return max >= y - 2;
+  };
+  if (apply()) return stop();
+  ro = new ResizeObserver(() => { if (apply()) stop(); });
+  ro.observe(document.documentElement);
+  timer = setTimeout(stop, 5000);                       // content never got that tall (list got shorter): give up
+  for (const ev of ['wheel', 'touchstart', 'keydown', 'mousedown']) addEventListener(ev, stop, { capture: true, passive: true });
+}
+
+async function route(opts = {}) {
   clearInterval(heroTimer); clearInterval(pageTimer); view.onclick = null;
   newPage();
+  const seq = ++routeSeq;
   let [, page, a, b, c] = location.hash.split('/');
   // Deep links (what a card's href points at, e.g. after ⌘-click into a new tab): show the page
   // underneath, then the detail / player on top.
@@ -302,6 +353,9 @@ async function route() {
     }).catch(e => { if (!isAbort(e)) throw e; });
   }
   $$('nav a').forEach(n => n.classList.toggle('on', n.dataset.nav === (page || 'home')));
+  restoreCtl?.();
+  const restoreY = entryScroll();
+  scrollGuard = true;                                     // don't let the jump to the top overwrite the saved offset
   scrollTo(0, 0);
   try {
     if (page === 'live') return await renderLive();
@@ -324,6 +378,8 @@ async function route() {
   } catch (e) {
     if (isAbort(e)) return;
     view.innerHTML = `<div class="page"><div class="err">加载失败：${esc(e.message)}。右上角换个源试试，或去 <a href="#/settings"><u>设置</u></a> 检查。</div></div>`;
+  } finally {
+    if (seq === routeSeq) { if (opts.nav && restoreY > 0) restoreScroll(restoreY); else scrollGuard = false; }
   }
 }
 
@@ -340,11 +396,12 @@ function card(it, opts = {}) {
   const h = it.site && hist.get(it.site, it.id);
   const pct = h && h.dur ? Math.min(100, (h.t / h.dur) * 100) : 0;
   const href = it.douban ? `#/find/${encodeURIComponent(it.name)}` : vodHref(it.site, it.id);
+  const pv = it.site === 'local' && /^\/media\/p\//.test(it.pic || '') ? ` data-pv="${esc(it.pic.replace('/media/p/', '/media/g/'))}"` : '';
   const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"${it.adult ? ` data-jav="${esc(javCode(it.name))}"` : ''}`;
   const rate = it.douban ? (it.rate ? `<span class="db">${esc(it.rate)}</span>` : '')
     : it.adult ? `<span class="db" hidden data-javfb data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`
     : it.site === 'local' ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
-  return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
+  return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}${pv}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
     <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${qChip(vodQ(it))}${rate}
       ${pct ? `<div class="prog" style="width:${pct}%"></div>` : ''}</div>
     <div class="name">${esc(it.name)}</div>${opts.sub ? `<div class="sub">${esc(opts.sub)}</div>` : ''}</a>`;
@@ -562,12 +619,26 @@ async function renderCategory(t, name, siteKey) {
     if ($('#grid')) { observeRatings($('#grid')); observeJav($('#grid')); }
     if (pg >= count && $('#tail')) $('#tail').innerHTML = seen.size ? '' : '<div class="empty">这个分类是空的</div>';
     busy = false;
+    // IntersectionObserver only reports changes: a tail that is still near (tall window, restored scroll position)
+    // would never be reported again, so keep filling until it is out of reach.
+    const tailEl = $('#tail');
+    if (tailEl && pg < count && tailEl.getBoundingClientRect().top < innerHeight + 600) setTimeout(() => more().catch(() => { busy = false; }), 0);
   };
   await more();
   const sig = pageCtl.signal;
-  const io = new IntersectionObserver(es => { if (es[0].isIntersecting) more().catch(() => { busy = false; }); }, { rootMargin: '600px' });
-  io.observe($('#tail'));
-  sig.addEventListener('abort', () => io.disconnect());
+  // Scroll-driven (not IntersectionObserver): a restored / programmatic scroll can move the tail into reach in the same
+  // frame the grid grew, which an observer sees as "still intersecting" and never reports.
+  let tick = 0;
+  const onScroll = () => {
+    if (tick) return;
+    tick = requestAnimationFrame(() => {
+      tick = 0;
+      const t = $('#tail');
+      if (t && !busy && pg < count && t.getBoundingClientRect().top < innerHeight + 600) more().catch(() => { busy = false; });
+    });
+  };
+  addEventListener('scroll', onScroll, { passive: true });
+  sig.addEventListener('abort', () => { removeEventListener('scroll', onScroll); cancelAnimationFrame(tick); });
 }
 
 // ---------- search (all sources) ----------
@@ -1342,6 +1413,51 @@ async function renderLive() {
   return groups;
 }
 
+// 本地媒体 hover preview: a short gif of the title made by the server (see localGif). Hover for 350 ms (60 ms when this
+// one has played before) → the gif is requested and fades in over the poster; leaving aborts the request. The server keeps
+// the gifs (disk LRU) and the browser caches them for a week; here only small bookkeeping is held: urls that loaded
+// before (→ shorter delay) and urls that just failed / were busy (→ not asked again for 90 s). One preview at a time.
+const lpvSeen = new Set(), lpvFail = new Map();
+let lpv = null;
+function startLocalPreview(card) {
+  const url = card.dataset.pv, box = $('.img', card);
+  if (!url || !box || !matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  if (Date.now() - (lpvFail.get(url) || 0) < 90e3) return;
+  stopLocalPreview();
+  const me = lpv = { card, box, img: null, timer: 0 };
+  me.timer = setTimeout(async () => {
+    if (lpv !== me) return;
+    const info = serverInfo || await infoP();
+    if (lpv !== me || !info.ffmpeg) return;
+    box.classList.add('pvload');
+    const img = new Image();
+    img.className = 'pvl'; img.decoding = 'async'; img.alt = '';
+    img.onload = () => {
+      if (lpv !== me) return;
+      box.classList.remove('pvload');
+      lpvSeen.delete(url); lpvSeen.add(url); if (lpvSeen.size > 300) lpvSeen.delete(lpvSeen.values().next().value);
+      box.append(img);
+      requestAnimationFrame(() => img.classList.add('on'));
+    };
+    img.onerror = () => {
+      if (lpv === me) box.classList.remove('pvload');
+      lpvFail.set(url, Date.now()); if (lpvFail.size > 300) lpvFail.delete(lpvFail.keys().next().value);
+    };
+    me.img = img;
+    img.src = url;
+  }, lpvSeen.has(url) ? 60 : 350);
+}
+function stopLocalPreview() {
+  if (!lpv) return;
+  clearTimeout(lpv.timer);
+  lpv.box.classList.remove('pvload');
+  if (lpv.img) { lpv.img.onload = lpv.img.onerror = null; lpv.img.src = ''; lpv.img.remove(); }
+  lpv = null;
+}
+// mouseenter / mouseleave don't bubble, but a capturing listener on document still sees every card.
+document.addEventListener('mouseenter', e => { if (e.target instanceof Element && e.target.matches('#view .card[data-pv]')) startLocalPreview(e.target); }, true);
+document.addEventListener('mouseleave', e => { if (lpv && e.target === lpv.card) stopLocalPreview(); }, true);
+
 // Hover preview: a fresh 3-second gif cut by the server's ffmpeg; without ffmpeg, a muted live mini-player
 // (through the same-origin relay, so a frame can be captured and saved as the channel's cover).
 let pv = null;
@@ -1691,4 +1807,4 @@ async function recognizeFlow(text, quiet) {
   };
 }
 
-loadSites().then(route, e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
+loadSites().then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
