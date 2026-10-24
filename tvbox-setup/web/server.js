@@ -632,6 +632,41 @@ const chartYears = () => { const y = new Date().getFullYear(); return [...Array.
 const MIN_VOTES = { movie: 5000, tv: 2000, show: 500 };
 rpcHandlers.dbChart = q => doubanChart(q);
 
+// Chart pages live on disk (data/charts.json) for 6 h; the leader refreshes the main lists in the background
+// every 3 h, and a stale copy is served when 豆瓣 doesn't answer.
+const CHART_FILE = path.join(DATA, 'charts.json');
+const CHART_TTL = 6 * 3600e3;
+const chartStore = IS_LEADER ? readJson(CHART_FILE, {}) : {};
+let chartDirty = false;
+async function chartJson(url) {
+  const hit = chartStore[url];
+  if (hit && Date.now() - hit.at < CHART_TTL) return hit;
+  try {
+    chartStore[url] = { at: Date.now(), body: await dbJson(url, 0) };
+    chartDirty = true;
+    return chartStore[url];
+  } catch (e) { if (hit) return hit; throw e; }
+}
+async function refreshCharts() {
+  const y = String(new Date().getFullYear());
+  const jobs = [
+    ...CHARTS.collections.flatMap(c => Array.from({ length: c.id === 'movie_top250' ? 5 : 1 }, (_, i) => ({ kind: 'collection', id: c.id, start: i * 50 }))),
+    ...CHARTS.genres.filter(g => !g.adult).map(g => ({ kind: 'genre', type: g.id, interval: '100:90' })),
+    ...CHARTS.kinds.flatMap(k => [y, String(y - 1)].map(year => ({ kind: 'explore', type: k.id, year, sort: 'S' }))),
+  ];
+  for (const q of jobs) await doubanChart(q).catch(() => {});
+}
+if (IS_LEADER) {
+  setTimeout(refreshCharts, 20e3).unref();
+  setInterval(refreshCharts, CHART_TTL / 2).unref();
+  setInterval(() => {
+    if (!chartDirty) return;
+    chartDirty = false;
+    for (const [k, v] of Object.entries(chartStore)) if (Date.now() - v.at > 3 * 86400e3) delete chartStore[k];
+    writeJson(CHART_FILE, chartStore);
+  }, 10000).unref();
+}
+
 const fmtRate = v => (Number(v) > 0 ? Number(v).toFixed(1) : '');
 // rexxar (collections, explore) item → the card shape the clients use.
 function dbSubject(x) {
@@ -646,22 +681,23 @@ async function doubanChart(q) {
   if (q.kind === 'collection') {
     const c = CHARTS.collections.find(x => x.id === q.id);
     if (!c) return { list: [], end: true, error: '没有这个榜单' };
-    const count = Math.min(Number(q.count) || 25, 50);
-    const j = await dbJson(`https://m.douban.com/rexxar/api/v2/subject_collection/${c.id}/items?start=${start}&count=${count}`, 3600e3);
-    const list = (j.subject_collection_items || []).filter(x => x.type === 'movie' || x.type === 'tv').map(dbSubject);
+    // Always fetch 50-aligned pages so every client page size shares the same cached request.
+    const count = Math.min(Number(q.count) || 25, 50), page = Math.floor(start / 50) * 50;
+    const { at, body: j } = await chartJson(`https://m.douban.com/rexxar/api/v2/subject_collection/${c.id}/items?start=${page}&count=50`);
+    const list = (j.subject_collection_items || []).slice(start - page, start - page + count).filter(x => x.type === 'movie' || x.type === 'tv').map(dbSubject);
     const total = Number(j.total) || 0;
-    return { list, total, next: start + count, end: start + count >= total };
+    return { list, total, next: start + count, end: start + count >= total, updated: at };
   }
   if (q.kind === 'genre') {
     const g = CHARTS.genres.find(x => x.id === q.type);
     const iv = CHARTS.intervals.find(x => x.id === q.interval) || CHARTS.intervals[0];
     if (!g || (g.adult && safety.level !== 'all')) return { list: [], end: true, error: '没有这个类型' };
     const limit = 20;
-    const j = await dbJson(`https://movie.douban.com/j/chart/top_list?type=${g.id}&interval_id=${iv.id}&action=&start=${start}&limit=${limit}`, 3600e3);
+    const { at, body: j } = await chartJson(`https://movie.douban.com/j/chart/top_list?type=${g.id}&interval_id=${iv.id}&action=&start=${start}&limit=${limit}`);
     const list = (Array.isArray(j) ? j : []).map(x => ({ id: str(x.id), name: str(x.title), pic: str(x.cover_url), rate: fmtRate(x.score),
       votes: Number(x.vote_count) || 0, rank: Number(x.rank) || 0, year: '',
       sub: [(x.regions || []).join(' '), (x.types || []).join(' '), (x.actors || []).slice(0, 3).join(' ')].filter(Boolean).join(' / '), desc: '', remarks: '' }));
-    return { list, next: start + limit, end: list.length < limit };
+    return { list, next: start + limit, end: list.length < limit, updated: at };
   }
   if (q.kind === 'explore') {
     const kind = CHARTS.kinds.some(k => k.id === q.type) ? q.type : 'movie';
@@ -675,12 +711,12 @@ async function doubanChart(q) {
     const count = 30;
     const u = `https://m.douban.com/rexxar/api/v2/${kind === 'movie' ? 'movie' : 'tv'}/recommend?refresh=0&start=${start}&count=${count}`
       + `&selected_categories=${encodeURIComponent(JSON.stringify(sel))}&uncollect=false&tags=${encodeURIComponent(tags)}&sort=${sort}`;
-    const j = await dbJson(u, 3600e3);
+    const { at, body: j } = await chartJson(u);
     const raw = j.items || [];
     const floor = sort === 'S' ? MIN_VOTES[kind] : 0;
     const list = raw.filter(x => (x.type === 'movie' || x.type === 'tv') && (!floor || (x.rating?.count || 0) >= floor)).map(dbSubject);
     const total = Number(j.total) || 0;
-    return { list, total, next: start + count, end: !raw.length || start + count >= total, ...(floor ? { floor } : {}) };
+    return { list, total, next: start + count, end: !raw.length || start + count >= total, updated: at, ...(floor ? { floor } : {}) };
   }
   return { list: [], end: true, error: 'unknown chart' };
 }
@@ -706,18 +742,28 @@ function jobsSnapshot() {
 }
 let saveTimer;
 const saveJobs = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => writeJson(DL_INDEX, jobs), 500); };
-let running = 0;
-const MAX_JOBS = 2, SEG_CONCURRENCY = 6;
+// Concurrency scales with the machine: 2–4 episodes at once, 6–12 segments per episode.
+const MAX_JOBS = Number(process.env.DL_JOBS) || Math.max(2, Math.min(4, Math.round(CPUS / 4)));
+const SEG_CONCURRENCY = Math.max(6, Math.min(12, CPUS));
 
 function pump() {
-  while (running < MAX_JOBS) {
-    const j = jobs.find(x => x.status === 'queued');
+  // Slots are counted by status, so pausing frees one at once (the old run winds down on its own).
+  while (jobs.filter(x => x.status === 'downloading').length < MAX_JOBS) {
+    // First in, first out; 优先 moves a job to the front.
+    const j = jobs.filter(x => x.status === 'queued').sort((a, b) => (a.qat ?? a.at) - (b.qat ?? b.at))[0];
     if (!j) return;
-    running++;
+    // Each run gets a token: a pause → resume while the old run is still finishing its in-flight segments
+    // must not leave two runs writing the same folder.
+    const token = j.run = (j.run || 0) + 1;
+    const mine = () => j.status === 'downloading' && j.run === token;
     j.status = 'downloading'; j.error = ''; saveJobs();
-    runJob(j).then(() => { if (j.status === 'downloading') j.status = 'done'; },
-      e => { if (j.status === 'downloading') { j.status = 'error'; j.error = e.message || String(e); } })
-      .finally(() => { running--; saveJobs(); pump(); });
+    runJob(j, mine).then(() => { if (mine()) j.status = 'done'; },
+      e => { if (mine()) { j.status = 'error'; j.error = e.message || String(e); } })
+      .finally(() => {
+        saveJobs(); pump();
+        // Deleted mid-run: its in-flight segments may have landed after the first rm.
+        if (j.status === 'deleted' && j.run === token) fsp.rm(path.join(DL, j.id), { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+      });
   }
 }
 
@@ -750,10 +796,10 @@ async function resolveMedia(url) {
   return { text, url: final };
 }
 
-async function runJob(j) {
+async function runJob(j, mine) {
   const dir = path.join(DL, j.id);
   await fsp.mkdir(dir, { recursive: true });
-  if (/\.mp4(\?|$)/i.test(j.url)) return downloadMp4(j, dir);
+  if (/\.mp4(\?|$)/i.test(j.url)) return downloadMp4(j, dir, mine);
   const { text, url: base } = await resolveMedia(j.url);
   const rows = text.split(/\r?\n/);
   const segs = [];
@@ -790,7 +836,7 @@ async function runJob(j) {
   const getKey = async uri => { if (!keys.has(uri)) keys.set(uri, (await fetchBuf(uri)).buf.subarray(0, 16)); return keys.get(uri); };
   let next = 0;
   const worker = async () => {
-    while (next < segs.length && j.status === 'downloading') {
+    while (next < segs.length && mine()) {
       const s = segs[next++];
       const fp = path.join(dir, s.file);
       const have = await fsp.stat(fp).catch(() => null);
@@ -811,19 +857,19 @@ async function runJob(j) {
     }
   };
   await Promise.all(Array.from({ length: SEG_CONCURRENCY }, worker));
-  if (j.status !== 'downloading') return;
+  if (!mine()) return;
   const head = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-MEDIA-SEQUENCE:0'];
   const body = out.filter(l => !l.startsWith('#EXTM3U') && !l.startsWith('#EXT-X-VERSION'));
   await fsp.writeFile(path.join(dir, 'index.m3u8'), [...head, ...body, '#EXT-X-ENDLIST', ''].join('\n'));
 }
 
-async function downloadMp4(j, dir) {
+async function downloadMp4(j, dir, mine) {
   const r = await fetch(j.url, { headers: { 'User-Agent': UA }, redirect: 'follow' });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   j.total = Number(r.headers.get('content-length')) || 0; j.done = 0; j.bytes = 0; j.ext = 'mp4';
   const ws = fs.createWriteStream(path.join(dir, 'video.mp4'));
   for await (const chunk of Readable.fromWeb(r.body)) {
-    if (j.status !== 'downloading') { ws.destroy(); return; }
+    if (!mine()) { ws.destroy(); return; }
     ws.write(chunk); j.bytes += chunk.length; j.done = j.bytes;
   }
   await new Promise(ok => ws.end(ok));
@@ -996,11 +1042,27 @@ async function api(route, q, res, req) {
     return send(res, 200, { list: await person(name, q.get('role'), SITES) });
   }
   if (route === 'search') {
-    const wd = q.get('wd') || '';
+    const wd = (q.get('wd') || '').trim();
     const out = await Promise.all(SITES.map(s => cmsGet(s, { ac: 'detail', wd }, false, 8000)
-      .then(b => ({ site: s.key, list: (b.list || []).map(d => item(s, d)).filter(it => itemOk(s, it)) }))
+      .then(b => ({ site: s.key, list: (b.list || []).map(d => ({ d, it: item(s, d) })).filter(x => itemOk(s, x.it)) }))
       .catch(e => ({ site: s.name, error: e.message, list: [] }))));
-    return send(res, 200, { results: out.flatMap(o => o.list), failed: out.filter(o => o.error).map(o => o.site) });
+    // Many sites' `wd` also matches vod_actor / vod_director. Any credited name containing the query counts;
+    // hits are grouped per person (most works first), each list one per title + year, newest first.
+    const credit = field => {
+      const people = new Map();
+      for (const { d, it } of out.flatMap(o => o.list)) {
+        if (!wd || /解说|预告/.test(it.name + it.type)) continue;
+        for (const p of new Set(splitPeople(d[field]).filter(p => p.includes(wd)))) {
+          if (!people.has(p)) people.set(p, { seen: new Set(), list: [] });
+          const g = people.get(p), k = it.name.replace(/\s+/g, '').replace(it.year, '') + '|' + it.year;
+          if (!g.seen.has(k)) { g.seen.add(k); g.list.push(it); }
+        }
+      }
+      return [...people].map(([name, g]) => ({ name, list: g.list.sort((a, b) => (Number(b.year) || 0) - (Number(a.year) || 0)) }))
+        .sort((a, b) => (b.name === wd) - (a.name === wd) || b.list.length - a.list.length).slice(0, 6);
+    };
+    return send(res, 200, { results: out.flatMap(o => o.list.map(x => x.it)), actor: credit('vod_actor'), director: credit('vod_director'),
+      failed: out.filter(o => o.error).map(o => o.site) });
   }
 
   const site = SITES.find(s => s.key === q.get('site')) || SITES[0];
@@ -1079,6 +1141,10 @@ rpcHandlers.config = async ({ op, body: b }) => {
   return { body: { ...config, ...extra } };
 };
 
+// Queue order: strictly increasing, so a batch added in one request keeps its episode order.
+let qSeq = 0;
+const nextQ = () => (qSeq = Math.max(Date.now() * 1000, qSeq + 1));
+
 rpcHandlers.downloads = async ({ method, id, action, body: b }) => {
   if (method === 'POST') {
     const added = [];
@@ -1086,11 +1152,11 @@ rpcHandlers.downloads = async ({ method, id, action, body: b }) => {
       if (!/^https?:\/\//.test(str(e.url))) continue;
       const key = `${e.site}|${e.id}|${e.url}`;
       let j = jobs.find(x => x.key === key);
-      if (j) { if (j.status === 'error' || j.status === 'paused') j.status = 'queued'; }
+      if (j) { if (j.status === 'error' || j.status === 'paused') { j.status = 'queued'; j.qat = nextQ(); } }
       else {
         j = { id: crypto.randomBytes(6).toString('hex'), key, site: str(e.site), siteName: str(e.siteName), vid: str(e.id), name: str(e.name),
           pic: str(e.pic), line: Number(e.line) || 0, ep: Number(e.ep) || 0, epName: str(e.epName), url: e.url,
-          status: 'queued', done: 0, total: 0, bytes: 0, at: Date.now() };
+          status: 'queued', done: 0, total: 0, bytes: 0, at: Date.now(), qat: nextQ() };
         jobs.unshift(j);
       }
       added.push(j.id);
@@ -1099,20 +1165,32 @@ rpcHandlers.downloads = async ({ method, id, action, body: b }) => {
     return { body: { added } };
   }
   if (method === 'DELETE') {
-    const i = jobs.findIndex(x => x.id === id);
-    if (i >= 0) { jobs[i].status = 'deleted'; await fsp.rm(path.join(DL, jobs[i].id), { recursive: true, force: true }); jobs.splice(i, 1); saveJobs(); }
+    const j = jobs.find(x => x.id === id);
+    if (j) {
+      const wasRunning = j.status === 'downloading';
+      j.status = 'deleted';                         // stops its run (mine() turns false)
+      jobs = jobs.filter(x => x !== j);             // remove first: the index can shift while we await
+      saveJobs();
+      // A running job's folder is removed again once its run has stopped (see pump()).
+      await fsp.rm(path.join(DL, j.id), { recursive: true, force: true, maxRetries: wasRunning ? 3 : 0 }).catch(() => {});
+    }
     return { body: { ok: true } };
   }
   if (method === 'PATCH') {
-    const j = jobs.find(x => x.id === id);
-    if (j && action === 'pause' && ['queued', 'downloading'].includes(j.status)) j.status = 'paused';
-    if (j && action === 'resume' && ['paused', 'error'].includes(j.status)) j.status = 'queued';
+    // id '*' = every job (全部暂停 / 全部开始).
+    const order = j => j.qat ?? j.at;
+    for (const j of id === '*' ? [...jobs].sort((a, b) => order(a) - order(b)) : jobs.filter(x => x.id === id)) {
+      if (action === 'pause' && ['queued', 'downloading'].includes(j.status)) j.status = 'paused';
+      if (action === 'resume' && ['paused', 'error'].includes(j.status)) { j.status = 'queued'; j.qat = nextQ(); }
+      if (action === 'top' && ['queued', 'paused', 'error'].includes(j.status)) { j.status = 'queued'; j.qat = Math.min(0, ...jobs.map(x => x.qat ?? 0)) - 1; }
+    }
     saveJobs(); pump();
     return { body: { ok: true } };
   }
   let free = null;
   try { const st = await fsp.statfs(DL); free = st.bavail * st.bsize; } catch {}
-  return { body: { jobs: jobs.map(jobView), free, dir: DL } };
+  const queue = jobs.filter(x => x.status === 'queued').sort((a, b) => (a.qat ?? a.at) - (b.qat ?? b.at)).map(x => x.id);
+  return { body: { jobs: jobs.map(j => ({ ...jobView(j), qpos: queue.indexOf(j.id) + 1 })), free, dir: DL, maxJobs: MAX_JOBS } };
 };
 
 function lanIps() {

@@ -460,10 +460,12 @@ struct VodDetailView: View {
                 let dl = downloadState(eps)
                 Button {
                     if eps.count > 1 { dlMode.toggle(); return }
-                    switch dm.record(for: first.url)?.status {
-                    case nil, "error": dm.add(item, first); note = "已加入下载"
+                    let r = dm.record(for: first.url)
+                    switch r?.status {
+                    case nil: dm.add(item, first); note = "已加入下载"
                     case "done": note = "已下载，播放时自动用本地文件"
-                    default: note = "下载中，可在「我的 → 下载」查看"
+                    case "downloading", "queued": dm.pause(r!.id); note = "已暂停"
+                    default: dm.resume(r!.id); note = "已继续"
                     }
                 } label: {
                     Label(dl.text, systemImage: dl.icon)
@@ -503,12 +505,14 @@ struct VodDetailView: View {
     private func downloadState(_ eps: [Episode]) -> (text: String, icon: String, progress: Double) {
         if dlMode { return ("完成", "checkmark", 0) }
         let mine = dm.records(for: item)
-        let active = mine.filter { $0.status == "downloading" }
+        let active = mine.filter { ["downloading", "queued"].contains($0.status) }
         let speed = DownloadStat.speedText(active.reduce(0) { $0 + dm.stat($1.id).speed })
         if eps.count == 1, let r = dm.record(for: eps[0].url) {
             switch r.status {
             case "done": return ("已下载", "checkmark", 0)
-            case "downloading": return ("\(Int(r.progress * 100))%" + (speed.isEmpty ? "" : " · \(speed)"), "arrow.down", max(0.02, r.progress))
+            case "downloading": return ("\(Int(r.progress * 100))%" + (speed.isEmpty ? "" : " · \(speed)"), "pause.fill", max(0.02, r.progress))
+            case "queued": return ("排队第 \(dm.queuePosition(r.id)) 位", "hourglass", 0)
+            case "paused": return ("继续 \(Int(r.progress * 100))%", "play.fill", r.progress)
             default: return ("重试", "arrow.clockwise", 0)
             }
         }
@@ -544,7 +548,11 @@ struct VodDetailView: View {
                 Text("剧集 · \(eps.count)").font(.headline)
                 Spacer()
                 if dlMode {
-                    Text("点选要下载的集").font(.caption).foregroundStyle(.secondary)
+                    Text("点选下载，再点暂停/继续").font(.caption).foregroundStyle(.secondary)
+                    if dm.records(for: item).contains(where: { ["downloading", "queued"].contains($0.status) }) {
+                        Button("全部暂停") { dm.records(for: item).forEach { dm.pause($0.id) } }
+                            .font(.caption.weight(.semibold)).buttonStyle(.bordered)
+                    }
                     Button("全部下载") { eps.forEach { dm.add(item, $0) }; note = "已加入下载：\(eps.count) 集" }
                         .font(.caption.weight(.semibold)).buttonStyle(.bordered)
                 }
@@ -553,12 +561,24 @@ struct VodDetailView: View {
                 ForEach(eps.indices, id: \.self) { i in
                     let rec = dm.record(for: eps[i].url)
                     Button {
-                        if dlMode { dm.add(item, eps[i]) } else { play(eps, i, resume: lib.entry(item).flatMap { $0.line == lineIdx ? $0 : nil }) }
+                        if dlMode {
+                            // Tap again to pause / resume that episode.
+                            switch rec?.status {
+                            case nil: dm.add(item, eps[i])
+                            case "downloading", "queued": dm.pause(rec!.id)
+                            case "paused", "error": dm.resume(rec!.id)
+                            default: break
+                            }
+                        } else { play(eps, i, resume: lib.entry(item).flatMap { $0.line == lineIdx ? $0 : nil }) }
                     } label: {
                         HStack(spacing: 3) {
                             if let rec {
                                 if rec.status == "downloading" {
                                     Text("\(Int(rec.progress * 100))%").font(.system(size: 10, weight: .semibold)).monospacedDigit().foregroundStyle(.green)
+                                } else if rec.status == "queued" {
+                                    Text("排队").font(.system(size: 10, weight: .semibold)).foregroundStyle(.orange)
+                                } else if rec.status == "paused" {
+                                    Image(systemName: "pause.fill").font(.system(size: 9)).foregroundStyle(.orange)
                                 } else {
                                     Image(systemName: rec.status == "done" ? "checkmark.circle.fill" : "exclamationmark.circle")
                                         .font(.caption2).foregroundStyle(rec.status == "done" ? .green : .orange)
@@ -571,7 +591,7 @@ struct VodDetailView: View {
                             GeometryReader { g in
                                 ZStack(alignment: .leading) {
                                     Color.card
-                                    if rec?.status == "downloading" {
+                                    if rec?.status == "downloading" || rec?.status == "paused" {
                                         Color.green.opacity(0.28).frame(width: g.size.width * (rec?.progress ?? 0))
                                     }
                                 }

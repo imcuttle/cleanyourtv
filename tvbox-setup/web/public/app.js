@@ -118,6 +118,8 @@ async function loadSites() {
   $('.picker').hidden = !state.sites.length;
   $('#levelTag').hidden = j.level === 'standard';
   $('[data-nav=favorites]').hidden = j.level === 'kids';
+  $('[data-nav=charts]').hidden = j.level === 'kids';
+  chartCat = null;
   $('#levelTag').textContent = j.level === 'kids' ? '儿童模式' : '无限制';
   $('#levelTag').className = 'level ' + j.level;
   $('#siteMenu').innerHTML = `<div class="mhead">点播源 · ${state.sites.length}</div>` + state.sites.map(s =>
@@ -178,6 +180,7 @@ async function route() {
     if (page === 'live') return await renderLive();
     if (page === 'settings') return await renderSettings();
     if (page === 'downloads') return await renderDownloads();
+    if (page === 'charts') return await renderCharts();
     if (!state.sites.length) return renderNoSites();
     if (page === 'history') return renderHistory();
     if (page === 'favorites') return renderFavorites();
@@ -213,7 +216,7 @@ function card(it, opts = {}) {
   const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"`;
   const rate = it.douban ? (it.rate ? `<span class="db">${esc(it.rate)}</span>` : '')
     : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
-  return `<a class="card" href="${esc(href)}" ${data}>${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
+  return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
     <div class="img">${it.pic ? `<img src="${esc(img(it.pic))}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="this.classList.add('ok')" onerror="this.remove()">` : ''}${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${rate}
       ${pct ? `<div class="prog" style="width:${pct}%"></div>` : ''}</div>
     <div class="name">${esc(it.name)}</div>${opts.sub ? `<div class="sub">${esc(opts.sub)}</div>` : ''}</a>`;
@@ -237,9 +240,10 @@ document.addEventListener('click', e => {
 async function openByName(name) {
   toast(`在所有源里找「${name}」…`);
   const j = await api('search', { wd: name }).catch(() => ({ results: [] }));
-  const hit = j.results.find(r => r.name === name);
+  const hit = j.results.find(r => r.name === name) || j.results.find(r => normName(r.name) === normName(name));
   if (hit) openDetail(hit.site, hit.id); else location.hash = '#/search/' + encodeURIComponent(name);
 }
+const normName = s => String(s || '').replace(/[\s·:：\-—!！,，.。]/g, '').toLowerCase();
 function row(title, items, href, sub, opts = {}) {
   return `<section class="row"><h2>${href ? `<a href="${href}">${esc(title)}</a>` : esc(title)}${opts.extra || ''}</h2>
     <div class="track"><button class="arrow l">‹</button>
@@ -279,8 +283,8 @@ async function renderHome() {
   if (!kids) {
     Promise.all(['tv', 'movie'].map(t => api('douban/hot', { type: t }).catch(() => ({ list: [] })))).then(([tv, mv]) => {
       if (sig.aborted || !$('#dbRows')) return;
-      $('#dbRows').innerHTML = (tv.list.length ? row('豆瓣热门剧集', tv.list.map(x => ({ ...x, douban: 1 }))) : '')
-        + (mv.list.length ? row('豆瓣热门电影', mv.list.map(x => ({ ...x, douban: 1 }))) : '');
+      $('#dbRows').innerHTML = (tv.list.length ? row('豆瓣热门剧集', tv.list.map(x => ({ ...x, douban: 1 })), '#/charts') : '')
+        + (mv.list.length ? row('豆瓣热门电影', mv.list.map(x => ({ ...x, douban: 1 })), '#/charts') : '');
     });
   }
   const isWhitelisted = kids || state.cats.length <= 8;
@@ -377,23 +381,163 @@ async function renderCategory(t, name, siteKey) {
   sig.addEventListener('abort', () => io.disconnect());
 }
 
-// ---------- search (all sources) ----------
+// ---------- search (all sources; titles, plus works whose 演员/导演 credits contain the query) ----------
 async function renderSearch(q) {
   $('#q').value = q;
-  view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1><p class="lan">正在搜索全部 ${state.sites.length} 个源…</p>${spinner}</div>`;
+  view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1><p class="lan">正在搜索全部 ${state.sites.length} 个源（片名 / 演员 / 导演）…</p>${spinner}</div>`;
   const j = await api('search', { wd: q });
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
   const order = Object.fromEntries(state.sites.map((s, i) => [s.key, i]));
-  const res = j.results.sort((a, b) => (b.name === q) - (a.name === q) || order[a.site] - order[b.site]);
+  const key = it => it.site + '|' + it.id;
+  const people = [...(j.actor || []).map(p => ({ ...p, role: 'actor', label: '演员' })), ...(j.director || []).map(p => ({ ...p, role: 'director', label: '导演' }))]
+    .sort((a, b) => (b.name === q) - (a.name === q) || b.list.length - a.list.length);
+  const byCredit = new Set(people.flatMap(p => p.list.map(key)));
+  // Credit-only hits go to the per-person rows; titles that contain the query stay in the main grid.
+  const res = j.results.filter(it => !byCredit.has(key(it)) || normName(it.name).includes(normName(q)))
+    .sort((a, b) => (b.name === q) - (a.name === q) || order[a.site] - order[b.site]);
   view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1>
-    <p class="lan">${state.sites.length} 个源，共 ${res.length} 条${j.failed.length ? `；${esc(j.failed.join(' / '))} 未响应` : ''}</p>
-    ${res.length ? `<div class="grid">${res.map(it => card(it, { sub: names[it.site] || it.siteName })).join('')}</div>` : '<div class="empty">没搜到，换个关键词</div>'}</div>`;
+    <p class="lan">${state.sites.length} 个源，片名匹配 ${res.length} 条${people.length ? `；演职员：${people.map(p => `${esc(p.name)}（${p.label} ${p.list.length} 部）`).join('、')}` : ''}${j.failed.length ? `；${esc(j.failed.join(' / '))} 未响应` : ''}</p></div>
+    ${people.length ? `<div class="srows">${people.map(p => row(`${p.label} · ${p.name}`, p.list, `#/person/${p.role}/${encodeURIComponent(p.name)}`,
+      it => [it.year, it.siteName].filter(x => x && x !== '0').join(' · '))).join('')}</div>` : ''}
+    <div class="page spage">${people.length && res.length ? '<h2 class="rtitle">片名匹配</h2>' : ''}
+    ${res.length ? `<div class="grid">${res.map(it => card(it, { sub: names[it.site] || it.siteName })).join('')}</div>` : people.length ? '' : '<div class="empty">没搜到，换个关键词（片名、演员或导演的全名）</div>'}</div>`;
   observeRatings(view);
 }
 
+// ---------- 榜单 (豆瓣) ----------
+// #/charts                                   精选榜单: Top 10 rows of each 豆瓣 collection
+// #/charts/c/<id>                            one collection, full ranked list
+// #/charts/genre/<type>/<interval>           类型排行 (movie.douban.com/typerank)
+// #/charts/year/<kind>/<year>/<genre>/<region>/<sort>   年度榜 (豆瓣 选影视); empty segment = 全部
+let chartCat = null;
+const chartHref = (...p) => '#/charts/' + p.map(x => encodeURIComponent(x ?? '')).join('/');
+const fmtVotes = v => v >= 1e4 ? (v / 1e4).toFixed(v >= 1e5 ? 0 : 1) + '万' : String(v);
+const fmtAgo = t => { const m = Math.round((Date.now() - t) / 60e3); return m < 2 ? '刚刚' : m < 60 ? m + ' 分钟前' : m < 1440 ? Math.round(m / 60) + ' 小时前' : Math.round(m / 1440) + ' 天前'; };
+const pianName = n => /片$|电影$|剧$/.test(n) ? n : n + '片';
+
+function rankRow(it, n) {
+  return `<div class="rk"><a class="rmain" href="#/find/${encodeURIComponent(it.name)}" data-db="${esc(it.name)}" title="在所有源里找「${esc(it.name)}」">
+      <span class="no ${n <= 3 ? 'hi' : ''}">${n}</span>
+      <div class="rimg">${it.pic ? `<img src="${esc(img(it.pic))}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="this.classList.add('ok')" onerror="this.remove()">` : ''}</div>
+      <div class="rinfo"><div class="rt">${esc(it.name)}${it.year ? `<span>${esc(it.year)}</span>` : ''}</div>
+        <div class="rs">${it.rate ? `<i class="stars" style="--v:${Number(it.rate)}"></i><b>${esc(it.rate)}</b>` : '<span>暂无评分</span>'}${it.votes ? `<span>${fmtVotes(it.votes)}人评价</span>` : ''}${it.remarks ? `<span>${esc(it.remarks)}</span>` : ''}</div>
+        <div class="rsub">${esc(it.sub)}</div>${it.desc ? `<div class="rq">“${esc(it.desc)}”</div>` : ''}</div></a>
+    <a class="rdb" href="https://movie.douban.com/subject/${encodeURIComponent(it.id)}/" target="_blank" rel="noreferrer" title="在豆瓣打开">豆瓣 ↗</a></div>`;
+}
+document.addEventListener('click', e => {
+  const a = e.target.closest('#view .rmain'); if (!a || !plainClick(e)) return;
+  e.preventDefault(); openByName(a.dataset.db);
+});
+
+// Ranked list with infinite scroll. Numbers come from 豆瓣 when it ranks (collections, typerank), else by order.
+async function rankList(params) {
+  let start = 0, end = false, busy = false, n = 0;
+  const sig = pageCtl.signal;
+  const tail = $('#tail');
+  const more = async () => {
+    if (busy || end || !$('#rlist')) return;
+    busy = true;
+    try {
+      const j = await api('douban/chart', { ...params, start });
+      start = j.next; end = !!j.end;
+      if (j.floor && $('#floor')) $('#floor').textContent = `只算评价人数 ≥ ${fmtVotes(j.floor)} 的，免得几百人打分的冷门片冲到榜首`;
+      if (j.updated && $('#updated')) $('#updated').textContent = '· 更新于 ' + fmtAgo(j.updated);
+      $('#rlist').insertAdjacentHTML('beforeend', j.list.map(it => rankRow(it, it.rank || ++n)).join(''));
+      if (j.list.length) n = Math.max(n, j.list[j.list.length - 1].rank || 0);
+    } catch (e) {
+      if (isAbort(e)) return;
+      end = true;
+      if (tail) tail.innerHTML = `<div class="err">豆瓣没响应：${esc(e.message)}</div>`;
+      return;
+    } finally { busy = false; }
+    if (end && tail) tail.innerHTML = $('#rlist .rk') ? '<div class="empty rend">— 到底了 —</div>' : '<div class="empty">没有符合条件的影片，放宽一下筛选</div>';
+    // A page can come back short after filtering; keep going while the tail is still on screen.
+    else if (tail && tail.getBoundingClientRect().top < innerHeight + 600) more();
+  };
+  await more();
+  const io = new IntersectionObserver(es => { if (es[0].isIntersecting) more(); }, { rootMargin: '600px' });
+  if (tail) io.observe(tail);
+  sig.addEventListener('abort', () => io.disconnect());
+}
+
+function filterRow(label, opts) {
+  return `<div class="frow"><b>${label}</b><div class="opts">${opts.map(([href, text, on]) => `<a href="${esc(href)}" class="${on ? 'on' : ''}">${esc(text)}</a>`).join('')}</div></div>`;
+}
+
+async function renderCharts() {
+  if (kidsMode()) { view.innerHTML = '<div class="page"><h1>榜单</h1><p class="empty">儿童模式下榜单不可用。</p></div>'; return; }
+  const [, , tab = '', ...p] = location.hash.split('/').map(s => { try { return decodeURIComponent(s); } catch { return s; } });
+  view.innerHTML = `<div class="page">${spinner}</div>`;
+  if (!chartCat) chartCat = await api('douban/charts');
+  const C = chartCat;
+  const cur = tab === 'c' ? '' : tab;
+  const head = `<div class="pagehead"><h1>榜单</h1><div class="seg">${[['', '精选榜单'], ['genre', '类型排行'], ['year', '年度榜']].map(([k, n]) =>
+    `<a href="#/charts${k ? '/' + k : ''}" class="${cur === k ? 'on' : ''}">${n}</a>`).join('')}</div><span class="lan">数据来自豆瓣，服务端每 3 小时自动刷新 · 点影片在所有源里找 <span id="updated"></span></span></div>`;
+
+  if (tab === 'c') {
+    const c = C.collections.find(x => x.id === p[0]) || C.collections[0];
+    view.innerHTML = `<div class="page charts">${head}
+      ${filterRow('榜单', C.collections.map(x => [chartHref('c', x.id), x.name, x.id === c.id]))}
+      <h2 class="rtitle">${esc(c.name)} <span class="lan">${esc(c.desc)}</span></h2>
+      <div class="rlist" id="rlist"></div><div id="tail">${spinner}</div></div>`;
+    return rankList({ kind: 'collection', id: c.id });
+  }
+
+  if (tab === 'genre') {
+    const g = C.genres.find(x => x.id === p[0]) || C.genres[0];
+    const iv = C.intervals.find(x => x.id === p[1]) || C.intervals[0];
+    view.innerHTML = `<div class="page charts">${head}
+      <div class="filters">${filterRow('类型', C.genres.map(x => [chartHref('genre', x.id, iv.id), x.name, x.id === g.id]))}
+        ${filterRow('排名', C.intervals.map(x => [chartHref('genre', g.id, x.id), x.name, x.id === iv.id]))}</div>
+      <h2 class="rtitle">${esc(pianName(g.name))}排行榜 <span class="lan">豆瓣评分排在所有${esc(pianName(g.name))}的${esc(iv.name.replace(/^前 /, '前'))}</span></h2>
+      <div class="rlist" id="rlist"></div><div id="tail">${spinner}</div></div>`;
+    return rankList({ kind: 'genre', type: g.id, interval: iv.id });
+  }
+
+  if (tab === 'year') {
+    const kind = C.kinds.some(k => k.id === p[0]) ? p[0] : 'movie';
+    const year = p[1] === undefined ? C.years[0] : C.years.includes(p[1]) ? p[1] : '';
+    const genre = C.explore[kind].includes(p[2]) ? p[2] : '';
+    const region = C.regions.includes(p[3]) ? p[3] : '';
+    const sort = C.sorts.some(s => s.id === p[4]) ? p[4] : 'S';
+    const h = o => { const v = { kind, year, genre, region, sort, ...o }; if (o.kind && o.kind !== kind) v.genre = ''; return chartHref('year', v.kind, v.year, v.genre, v.region, v.sort); };
+    const kindName = C.kinds.find(k => k.id === kind).name;
+    const title = `${year || '历年'}${region ? ' · ' + region : ''}${genre ? ' · ' + genre : ''} ${kindName}${{ S: '高分榜', T: '综合榜', U: '热度榜', R: '新片' }[sort]}`;
+    view.innerHTML = `<div class="page charts">${head}
+      <div class="filters">${filterRow('类别', C.kinds.map(k => [h({ kind: k.id }), k.name, k.id === kind]))}
+        ${filterRow('年份', [[h({ year: '' }), '全部', !year], ...C.years.map(y => [h({ year: y }), y, y === year])])}
+        ${filterRow('类型', [[h({ genre: '' }), '全部', !genre], ...C.explore[kind].map(x => [h({ genre: x }), x, x === genre])])}
+        ${filterRow('地区', [[h({ region: '' }), '全部', !region], ...C.regions.map(x => [h({ region: x }), x, x === region])])}
+        ${filterRow('排序', C.sorts.map(s => [h({ sort: s.id }), s.name, s.id === sort]))}</div>
+      <h2 class="rtitle">${esc(title)} <span class="lan" id="floor"></span></h2>
+      <div class="rlist" id="rlist"></div><div id="tail">${spinner}</div></div>`;
+    return rankList({ kind: 'explore', type: kind, year, genre, region, sort });
+  }
+
+  // 精选榜单: one Netflix-style Top 10 row per collection, then entry points to the other two.
+  const skeleton = Array.from({ length: 6 }, (_, i) => `<div class="card top"><span class="num">${i + 1}</span><div class="img"></div><div class="name">&nbsp;</div></div>`).join('');
+  view.innerHTML = `<div class="page charts chome">${head}</div>
+    <div class="srows">${C.collections.map(c => `<section class="row" data-c="${esc(c.id)}"><h2><a href="${chartHref('c', c.id)}">${esc(c.name)}</a><small>${esc(c.desc)}</small></h2>
+      <div class="track"><button class="arrow l">‹</button><div class="scroller">${skeleton}</div><button class="arrow r">›</button></div></section>`).join('')}
+      <section class="row"><h2><a href="#/charts/genre">类型排行榜</a><small>好于同类 X% 的影片</small></h2><div class="chips">${C.genres.map(g => `<a class="chip" href="${chartHref('genre', g.id)}">${esc(g.name)}</a>`).join('')}</div></section>
+      <section class="row"><h2><a href="#/charts/year">年度榜</a><small>按年份看高分电影 / 剧集 / 综艺</small></h2><div class="chips">${C.years.map(y => `<a class="chip" href="${chartHref('year', 'movie', y)}">${esc(y)}</a>`).join('')}
+        ${C.kinds.slice(1).map(k => `<a class="chip" href="${chartHref('year', k.id, C.years[1])}">${C.years[1]} ${esc(k.name)}</a>`).join('')}</div></section></div>`;
+  const sig = pageCtl.signal;
+  await Promise.all(C.collections.map(c => api('douban/chart', { kind: 'collection', id: c.id, count: 10 }).then(j => {
+    const sec = !sig.aborted && $(`#view .row[data-c="${c.id}"]`); if (!sec) return;
+    if (!j.list.length) return sec.remove();
+    if (j.updated && $('#updated')) $('#updated').textContent = '· 更新于 ' + fmtAgo(j.updated);
+    $('.scroller', sec).innerHTML = j.list.slice(0, 10).map((x, i) => card({ ...x, douban: 1 }, { rank: x.rank || i + 1, sub: x.year })).join('');
+  }, e => { if (!isAbort(e)) $(`#view .row[data-c="${c.id}"]`)?.remove(); })));
+}
+
 // ---------- downloads ----------
-async function refreshDownloads(signal) { state.downloads = (await api('downloads', {}, signal).catch(() => ({ jobs: state.downloads }))).jobs; return state.downloads; }
-const dlFor = (site, id, url) => state.downloads.find(j => j.site === site && j.vid === id && j.url === url);
+async function refreshDownloads(signal) {
+  const j = await api('downloads', {}, signal).catch(() => null);
+  if (Array.isArray(j?.jobs)) state.downloads = j.jobs;
+  return state.downloads;
+}
+const dlFor = (site, id, url) => (state.downloads || []).find(j => j.site === site && j.vid === id && j.url === url);
 async function enqueue(d, line, eps) {
   await req('POST', '/api/downloads', { items: eps.map(i => ({ site: d.site, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, line, ep: i, epName: d.lines[line].episodes[i].name, url: d.lines[line].episodes[i].url })) });
   await refreshDownloads();
@@ -408,25 +552,32 @@ async function renderDownloads() {
     state.downloads = j.jobs;
     if (!location.hash.startsWith('#/downloads')) return;
     const total = j.jobs.reduce((s, x) => s + (x.bytes || 0), 0);
-    view.innerHTML = `<div class="page"><h1>下载</h1>
-      <p class="lan">保存在服务端 <code>${esc(j.dir)}</code>，局域网里任何设备都能播放。已用 ${fmtSize(total)}${j.free ? `，磁盘剩余 ${fmtSize(j.free)}` : ''}。</p>
+    const anyActive = j.jobs.some(x => ACTIVE.includes(x.status)), anyPaused = j.jobs.some(x => ['paused', 'error'].includes(x.status));
+    const totalSpeed = j.jobs.reduce((n, x) => n + (x.speed || 0), 0);
+    view.innerHTML = `<div class="page"><div class="pagehead"><h1>下载</h1>
+        ${anyActive ? '<button class="small" data-op="pause" data-all>全部暂停</button>' : ''}
+        ${anyPaused ? '<button class="small" data-op="resume" data-all>全部开始</button>' : ''}
+        ${totalSpeed ? `<span class="spd">${fmtSpeed(totalSpeed)}</span>` : ''}</div>
+      <p class="lan">同时下载 ${j.maxJobs} 集，其余排队。保存在服务端 <code>${esc(j.dir)}</code>，局域网里任何设备都能播放。已用 ${fmtSize(total)}${j.free ? `，磁盘剩余 ${fmtSize(j.free)}` : ''}。</p>
       ${j.jobs.length ? `<div class="dls">${j.jobs.map(x => {
         const pct = x.pct || 0;
         return `<div class="dl ${x.status}" data-id="${esc(x.id)}">
           <div class="thumb" style="${bg(x.pic)}"></div>
           <div class="dinfo"><div><b>${esc(x.name)}</b> <span>${esc(x.epName)}</span></div>
-            <div class="lan">${esc(x.siteName)} · ${status[x.status] || x.status}${['downloading', 'paused'].includes(x.status) ? ` ${pct}%` : ''} · ${fmtSize(x.bytes || 0)}${x.status === 'downloading' && x.speed ? ` · <b class="spd">${fmtSpeed(x.speed)}</b> · ${fmtEta(x.eta)}` : ''}${x.error ? ' · ' + esc(x.error) : ''}</div>
+            <div class="lan">${esc(x.siteName)} · ${status[x.status] || x.status}${x.status === 'queued' && x.qpos ? ` 第 ${x.qpos} 位` : ''}${['downloading', 'paused'].includes(x.status) ? ` ${pct}%` : ''} · ${fmtSize(x.bytes || 0)}${x.status === 'downloading' && x.speed ? ` · <b class="spd">${fmtSpeed(x.speed)}</b> · ${fmtEta(x.eta)}` : ''}${x.error ? ' · ' + esc(x.error) : ''}</div>
             <div class="bar"><i style="width:${x.status === 'done' ? 100 : pct}%"></i></div></div>
           <div class="dops">
             ${x.status === 'done' ? `<button class="btn play sm" data-op="play">▶ 播放</button><a class="small" href="/dl/${esc(x.id)}/save" download>保存到本机</a>` : ''}
-            ${['queued', 'downloading'].includes(x.status) ? '<button class="small" data-op="pause">暂停</button>' : ''}
-            ${['paused', 'error'].includes(x.status) ? '<button class="small" data-op="resume">继续</button>' : ''}
+            ${['queued', 'downloading'].includes(x.status) ? '<button class="small" data-op="pause">⏸ 暂停</button>' : ''}
+            ${['paused', 'error'].includes(x.status) ? `<button class="small" data-op="resume">▶ ${x.status === 'error' ? '重试' : '继续'}</button>` : ''}
+            ${(x.status === 'queued' && x.qpos > 1) || ['paused', 'error'].includes(x.status) ? '<button class="small" data-op="top" title="排到队首，下一个就下">⇡ 优先</button>' : ''}
             <button class="small" data-op="del">删除</button></div></div>`;
       }).join('')}</div>` : '<p class="empty">还没有下载。打开任意影片，点「⬇ 下载」再选集。</p>'}</div>`;
   };
   await draw();
   view.onclick = async e => {
     const op = e.target.dataset.op; if (!op) return;
+    if (e.target.dataset.all !== undefined) { await req('PATCH', `/api/downloads?id=*&action=${op}`); return draw(); }
     const id = e.target.closest('.dl').dataset.id;
     const x = state.downloads.find(j => j.id === id);
     if (op === 'play') { cur = { kind: 'local', eps: [{ name: x.epName, url: x.play }], ep: 0, title: x.name }; return openPlayer(0); }
@@ -463,7 +614,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         <button class="close">✕</button>
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
           ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
-            <button class="btn more dlbtn" id="dlToggle"></button>` : ''}
+            <button class="btn more dlbtn" id="dlToggle">⬇ 下载</button>` : ''}
           ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
         </div></div></div>
       <div class="body">
@@ -475,7 +626,8 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         ${people('导演', 'director', d.directors)}
         ${people('演员', 'actor', d.actors, 16)}
         ${d.lines.length ? `<h3>剧集 <span class="lines">${d.lines.map((l, i) => `<button data-line="${i}" class="${i === line ? 'on' : ''}">${esc(l.name)} (${l.episodes.length})</button>`).join('')}</span>
-            ${dlMode ? `<span class="dlhint">点选要下载的集 <button class="small" id="dlAll">全部下载</button></span>` : ''}</h3>
+            ${dlMode ? `<span class="dlhint">点选要下载的集，再点一下暂停/继续 <button class="small" id="dlAll">全部下载</button>
+              ${state.downloads.some(j => j.site === site && j.vid === id && ACTIVE.includes(j.status)) ? '<button class="small" id="dlAllPause">全部暂停</button>' : ''}</span>` : ''}</h3>
           <div class="eps ${dlMode ? 'dlmode' : ''}">${eps.map((e, i) => {
             const inner = esc(e.name);
             const cls = h && h.line === line && i <= h.ep ? 'seen' : '';
@@ -488,16 +640,22 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     m.querySelector('.close').onclick = () => history.back();
     $$('[data-line]', m).forEach(b => b.onclick = () => { line = +b.dataset.line; render(); });
     $$('[data-ep]', m).forEach(b => b.onclick = e => { if (!plainClick(e)) return; e.preventDefault(); play(d, line, +b.dataset.ep); });
-    $$('[data-dl]', m).forEach(b => b.onclick = () => enqueue(d, line, [+b.dataset.dl]).then(paintDl, e => toast(e.message)));
+    // In 下载 mode a chip starts that episode; tapping it again pauses / resumes it.
+    $$('[data-dl]', m).forEach(b => b.onclick = () => {
+      const j = dlFor(site, id, eps[+b.dataset.dl].url);
+      if (j && j.status !== 'done') return dlAction(j, j.status === 'paused' || j.status === 'error' ? 'resume' : 'pause');
+      if (!j) enqueue(d, line, [+b.dataset.dl]).then(paintDl, e => toast(e.message));
+    });
     if ($('#dlToggle', m)) $('#dlToggle', m).onclick = () => {
       if (eps.length > 1) { dlMode = !dlMode; return render(); }
       // Single episode (a film): the button itself downloads, then shows its progress.
       const j = dlFor(site, id, eps[0].url);
-      if (!j || ['error', 'paused'].includes(j.status)) return enqueue(d, line, [0]).then(paintDl, e => toast(e.message));
+      if (!j) return enqueue(d, line, [0]).then(paintDl, e => toast(e.message));
       if (j.status === 'done') return toast('已下载，播放时会自动用本地文件');
-      location.hash = '#/downloads';
+      dlAction(j, ACTIVE.includes(j.status) ? 'pause' : 'resume');
     };
-    paintDl();
+    if ($('#dlAllPause', m)) $('#dlAllPause', m).onclick = () => Promise.all(state.downloads.filter(j => j.site === site && j.vid === id && ACTIVE.includes(j.status)).map(j => req('PATCH', `/api/downloads?id=${j.id}&action=pause`))).then(() => refreshDownloads(m.ctl.signal)).then(paintDl);
+    try { paintDl(); } catch (err) { console.error('paintDl', err); }
     if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
@@ -512,6 +670,8 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     box.innerHTML = alts.length ? alts.map(a => `<a href="${esc(vodHref(a.site, a.id))}" data-s="${esc(a.site)}" data-i="${esc(a.id)}">${esc(a.siteName)}<small>${esc(a.remarks)}</small></a>`).join('') : '<span class="lan">其他源没有同名的</span>';
     $$('a', box).forEach(b => b.onclick = e => { if (!plainClick(e)) return; e.preventDefault(); openDetail(b.dataset.s, b.dataset.i, false, true); });
   };
+  const dlAction = (j, action) => req('PATCH', `/api/downloads?id=${j.id}&action=${action}`)
+    .then(() => refreshDownloads(m.ctl.signal)).then(() => { paintDl(); pollDl(); toast(action === 'pause' ? '已暂停' : '已继续'); }, e => toast(e.message));
   // Download state, updated in place every second while this title has active jobs.
   const paintDl = () => {
     if (!m.isConnected) return;
@@ -519,12 +679,13 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     $$('.eps [data-ep], .eps [data-dl]', m).forEach(el => {
       const j = dlFor(site, id, eps[+(el.dataset.ep ?? el.dataset.dl)]?.url);
       el.querySelector('em')?.remove();
-      if (j) el.insertAdjacentHTML('afterbegin', `<em class="${j.status}">${j.status === 'done' ? '✓' : j.status === 'downloading' ? `${j.pct}%` : j.status === 'error' ? '!' : j.status === 'paused' ? '⏸' : '⬇'}</em>`);
+      if (j) el.insertAdjacentHTML('afterbegin', `<em class="${j.status}">${j.status === 'done' ? '✓' : j.status === 'downloading' ? `${j.pct}%` : j.status === 'error' ? '!' : j.status === 'paused' ? `⏸${j.pct ? j.pct + '%' : ''}` : '排队'}</em>`);
+      if (j) el.title = `${eps[+(el.dataset.ep ?? el.dataset.dl)].name} · ${{ done: '已下载', downloading: '下载中，点一下暂停', queued: `排队第 ${j.qpos} 位，点一下暂停`, paused: '已暂停，点一下继续', error: '失败，点一下重试' }[j.status] || ''}`;
       el.classList.toggle('dling', !!j && j.status !== 'done');
       el.style.setProperty('--p', j && j.status !== 'done' ? j.pct + '%' : '0%');
     });
     const b = $('#dlToggle', m); if (!b) return;
-    const mine = state.downloads.filter(j => j.site === site && j.vid === id);
+    const mine = (state.downloads || []).filter(j => j.site === site && j.vid === id);
     const active = mine.filter(j => ACTIVE.includes(j.status));
     const speed = fmtSpeed(active.reduce((n, j) => n + (j.speed || 0), 0));
     let label, p = 0;
@@ -533,10 +694,11 @@ async function openDetail(site, id, autoplay = false, replace = false) {
       const j = dlFor(site, id, eps[0].url);
       if (!j) label = '⬇ 下载';
       else if (j.status === 'done') label = '✓ 已下载';
-      else if (j.status === 'queued') label = '⬇ 排队中';
-      else if (j.status === 'downloading') { label = `⬇ ${j.pct}%${speed ? ' · ' + speed : ''}`; p = j.pct; }
-      else if (j.status === 'paused') { label = `⏸ 已暂停 ${j.pct}%`; p = j.pct; }
+      else if (j.status === 'queued') label = `⏳ 排队第 ${j.qpos} 位`;
+      else if (j.status === 'downloading') { label = `⏸ ${j.pct}%${speed ? ' · ' + speed : ''}`; p = j.pct; }
+      else if (j.status === 'paused') { label = `▶ 继续 ${j.pct}%`; p = j.pct; }
       else label = '⟳ 重新下载';
+      b.title = j ? { downloading: '点一下暂停', queued: '点一下暂停', paused: '点一下继续' }[j.status] || '' : '';
     } else if (active.length) {
       const done = mine.filter(j => j.status === 'done').length;
       label = `⬇ ${done}/${mine.length} 集${speed ? ' · ' + speed : ''}`;

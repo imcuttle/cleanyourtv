@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import SwiftUI
+import Network
 
 struct DownloadRecord: Identifiable, Codable, Hashable {
     var id: String
@@ -11,8 +12,9 @@ struct DownloadRecord: Identifiable, Codable, Hashable {
     var pic: String
     var epName: String
     var url: String
-    var status: String  // downloading / done / error
+    var status: String  // queued / downloading / paused / done / error
     var progress: Double
+    var queuedAt: Double? = nil  // queue order (oldest first); 优先 puts it in front
     var path: String?   // relative to the app's home directory (it changes between installs)
     var error: String?
 }
@@ -51,6 +53,9 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
     private var lastSample: [String: (Date, Int64)] = [:]
     private var ticker: Timer?
     private var measuring = false
+    private let pathMonitor = NWPathMonitor()
+    /// How many episodes download at once: 1 on cellular / Low Data Mode, otherwise half the cores (2–3).
+    @Published private(set) var maxJobs = 2
 
     private override init() {
         super.init()
@@ -59,19 +64,71 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
         hls = AVAssetDownloadURLSession(configuration: .background(withIdentifier: "tvbox.hls"),
                                         assetDownloadDelegate: self, delegateQueue: .main)
         files = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
-        // Background HLS tasks survive relaunch; anything else that was "downloading" is gone.
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let n = path.isExpensive || path.isConstrained ? 1 : min(3, max(2, ProcessInfo.processInfo.activeProcessorCount / 2))
+            DispatchQueue.main.async {
+                guard let self, self.maxJobs != n else { return }
+                self.maxJobs = n
+                self.pump()
+            }
+        }
+        pathMonitor.start(queue: .global(qos: .utility))
+        // Background HLS tasks survive relaunch; a "downloading" record without one goes back in the queue.
         hls.getAllTasks { tasks in
             let alive = Set(tasks.compactMap(\.taskDescription))
             DispatchQueue.main.async {
                 for t in tasks { if let id = t.taskDescription { self.tasks[id] = t } }
                 for i in self.records.indices where self.records[i].status == "downloading" && !alive.contains(self.records[i].id) {
-                    self.records[i].status = "error"
-                    self.records[i].error = "已中断"
+                    self.records[i].status = "queued"
                 }
                 self.save()
-                self.startTicker()
+                self.pump()
             }
         }
+    }
+
+    // MARK: queue
+
+    var queue: [DownloadRecord] {
+        records.filter { $0.status == "queued" }.sorted { ($0.queuedAt ?? 0) < ($1.queuedAt ?? 0) }
+    }
+    func queuePosition(_ id: String) -> Int { (queue.firstIndex { $0.id == id } ?? -1) + 1 }
+
+    /// Start queued downloads until the concurrency limit is reached.
+    private func pump() {
+        while records.filter({ $0.status == "downloading" }).count < maxJobs, let next = queue.first {
+            start(next.id)
+        }
+        save()
+        startTicker()
+    }
+
+    func pause(_ id: String) {
+        guard let i = records.firstIndex(where: { $0.id == id }), ["queued", "downloading"].contains(records[i].status) else { return }
+        tasks[id]?.suspend()
+        records[i].status = "paused"
+        stats[id] = nil; lastSample[id] = nil
+        pump()
+    }
+
+    func resume(_ id: String) {
+        guard let i = records.firstIndex(where: { $0.id == id }), ["paused", "error"].contains(records[i].status) else { return }
+        records[i].status = "queued"
+        records[i].queuedAt = Date().timeIntervalSince1970
+        pump()
+    }
+
+    /// 优先: next in line.
+    func prioritize(_ id: String) {
+        guard let i = records.firstIndex(where: { $0.id == id }), records[i].status != "done", records[i].status != "downloading" else { return }
+        records[i].status = "queued"
+        records[i].queuedAt = (queue.first?.queuedAt ?? Date().timeIntervalSince1970) - 1
+        pump()
+    }
+
+    func pauseAll() { records.filter { ["queued", "downloading"].contains($0.status) }.forEach { pause($0.id) } }
+    func resumeAll() {
+        records.filter { ["paused", "error"].contains($0.status) }.reversed().forEach { resume($0.id) }
     }
 
     // MARK: progress / speed
@@ -147,21 +204,29 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
 
     func add(_ item: VodItem, _ ep: Episode) {
         if let r = record(for: ep.url) {
-            if r.status == "error" { retry(r.id) }
+            if ["error", "paused"].contains(r.status) { resume(r.id) }
             return
         }
+        // Strictly increasing, so 全部下载 keeps episode order.
+        let at = max(Date().timeIntervalSince1970, (records.compactMap(\.queuedAt).max() ?? 0) + 0.001)
         records.insert(DownloadRecord(id: UUID().uuidString, siteKey: item.site.key, siteName: item.site.name, vodId: item.vodId,
                                       name: item.name, pic: item.pic, epName: ep.name, url: ep.url,
-                                      status: "downloading", progress: 0), at: 0)
-        start(records[0].id)
+                                      status: "queued", progress: 0, queuedAt: at), at: 0)
+        pump()
     }
 
-    func retry(_ id: String) { start(id) }
+    func retry(_ id: String) { resume(id) }
 
     private func start(_ id: String) {
         guard let i = records.firstIndex(where: { $0.id == id }), let url = API.url(records[i].url) else { return }
         records[i].status = "downloading"
         records[i].error = nil
+        // Paused earlier: carry on where it stopped.
+        if let t = tasks[id], t.state == .suspended {
+            t.resume()
+            lastSample[id] = nil
+            return
+        }
         records[i].progress = 0
         let task: URLSessionTask?
         if url.path.lowercased().hasSuffix(".mp4") {
@@ -175,17 +240,17 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
         task?.resume()
         if let task { tasks[id] = task }
         rawProgress[id] = 0; mp4Bytes[id] = nil; lastSample[id] = nil
-        save()
-        startTicker()
     }
 
     func delete(_ id: String) {
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
         let r = records.remove(at: i)
-        save()
+        tasks[id]?.cancel()
+        tasks[id] = nil; stats[id] = nil; rawProgress[id] = nil; packages[id] = nil
         for s in [hls as URLSession, files] {
             s?.getAllTasks { $0.filter { $0.taskDescription == id }.forEach { $0.cancel() } }
         }
+        pump()
         if let p = r.path { try? FileManager.default.removeItem(at: URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(p)) }
     }
 
@@ -234,6 +299,10 @@ final class DownloadManager: NSObject, ObservableObject, AVAssetDownloadDelegate
     // MARK: both
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        defer {
+            if let id = task.taskDescription, tasks[id] === task { tasks[id] = nil }
+            pump()
+        }
         update(task.taskDescription) { r in
             if let error {
                 r.status = "error"
@@ -257,6 +326,13 @@ struct DownloadsView: View {
         List {
             if dm.records.isEmpty {
                 Text("还没有下载。打开影片，点「下载」再选集。").foregroundStyle(.secondary)
+            } else {
+                let speed = dm.records.reduce(0.0) { $0 + dm.stat($1.id).speed }
+                HStack {
+                    Text("同时下载 \(dm.maxJobs) 集，其余排队").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(DownloadStat.speedText(speed)).font(.caption.weight(.semibold)).foregroundStyle(.green).monospacedDigit()
+                }
             }
             ForEach(dm.records) { r in
                 HStack(spacing: 12) {
@@ -278,19 +354,38 @@ struct DownloadsView: View {
                         .font(.caption2).monospacedDigit()
                     }
                     Spacer()
-                    if r.status == "done" {
+                    switch r.status {
+                    case "done":
                         Button {
                             playing = PlayRequest(title: r.name, episodes: [Episode(name: r.epName, url: r.url)], index: 0)
                         } label: { Image(systemName: "play.circle.fill").font(.system(size: 34)) }
                             .buttonStyle(.plain)
-                    } else if r.status == "error" {
-                        Button("重试") { dm.retry(r.id) }.buttonStyle(.bordered)
+                    case "downloading", "queued":
+                        Button { dm.pause(r.id) } label: { Image(systemName: "pause.circle").font(.system(size: 30)) }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                    default:
+                        Button { dm.resume(r.id) } label: {
+                            Image(systemName: r.status == "error" ? "arrow.clockwise.circle" : "play.circle").font(.system(size: 30))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(r.status == "error" ? .orange : .green)
+                    }
+                }
+                .swipeActions(edge: .leading) {
+                    if r.status != "done", r.status != "downloading" {
+                        Button { dm.prioritize(r.id) } label: { Label("优先", systemImage: "arrow.up.to.line") }.tint(.blue)
                     }
                 }
             }
             .onDelete { idx in idx.map { dm.records[$0].id }.forEach(dm.delete) }
         }
         .navigationTitle("下载")
+        .toolbar {
+            if dm.records.contains(where: { ["downloading", "queued"].contains($0.status) }) {
+                Button("全部暂停") { dm.pauseAll() }
+            } else if dm.records.contains(where: { ["paused", "error"].contains($0.status) }) {
+                Button("全部开始") { dm.resumeAll() }
+            }
+        }
         .fullScreenCover(item: $playing) { PlayerScreen(request: $0) }
     }
 
@@ -298,6 +393,8 @@ struct DownloadsView: View {
         switch r.status {
         case "done": return "已下载 · 可离线播放"
         case "downloading": return "下载中 \(Int(r.progress * 100))%"
+        case "queued": return "排队第 \(dm.queuePosition(r.id)) 位 · 右滑可优先"
+        case "paused": return "已暂停 \(Int(r.progress * 100))%"
         default: return "失败：\(r.error ?? "")"
         }
     }
