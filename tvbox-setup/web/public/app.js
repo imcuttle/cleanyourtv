@@ -101,12 +101,95 @@ const get = (path, signal) => req('GET', path, undefined, false, signal === unde
 // Only successful results are kept; the sources list changing / a rescan / settings saves clear it.
 const apiMemo = new Map(), MEMO_TTL = { list: 300e3, categories: 600e3, 'douban/hot': 1800e3 }, MEMO_MAX = 160;
 let memoSig = '';
+
+// ---------- DataLoader: coalesce single reads into batches ----------
+// Modelled on the `dataloader` npm package: every load(key) made within one short window is collected and sent as ONE
+// request (max `maxBatch` keys); the same key asked twice while in flight shares one promise. Differences from the
+// original, for a UI: results are settled one by one as the server streams them (a slow key never holds back fast
+// ones), and the cache only covers in-flight keys (`keep` ms after settling; 0 = none) — freshness stays with the
+// callers' own caches (localStorage, apiMemo). batchFn(keys, settle): call settle(i, valueOrError) per key, or return
+// an array of results.
+class DataLoader {
+  constructor(batchFn, { maxBatch = 24, wait = 6, keep = 0 } = {}) {
+    this.fn = batchFn; this.maxBatch = maxBatch; this.wait = wait; this.keep = keep;
+    this.cache = new Map(); this.queue = []; this.timer = 0;
+  }
+  load(key) {
+    const hit = this.cache.get(key);
+    if (hit) return hit;
+    const p = new Promise((res, rej) => this.queue.push({ key, res, rej }));
+    this.cache.set(key, p);
+    p.then(() => this.drop(key, p), () => this.drop(key, p));
+    if (this.queue.length >= this.maxBatch) this.flush();
+    else if (!this.timer) this.timer = setTimeout(() => this.flush(), this.wait);
+    return p;
+  }
+  loadMany(keys) { return Promise.all(keys.map(k => this.load(k).catch(e => e))); }
+  drop(key, p) { const del = () => this.cache.get(key) === p && this.cache.delete(key); this.keep ? setTimeout(del, this.keep) : del(); }
+  clear(key) { this.cache.delete(key); return this; }
+  clearAll() { this.cache.clear(); return this; }
+  prime(key, value) { if (!this.cache.has(key)) this.cache.set(key, Promise.resolve(value)); return this; }
+  flush() {
+    clearTimeout(this.timer); this.timer = 0;
+    while (this.queue.length) this.run(this.queue.splice(0, this.maxBatch));
+  }
+  async run(batch) {
+    const done = new Set();
+    const settle = (i, v) => {
+      if (done.has(i) || !batch[i]) return;
+      done.add(i);
+      v instanceof Error ? batch[i].rej(v) : batch[i].res(v);
+    };
+    try {
+      const out = await this.fn(batch.map(b => b.key), settle);
+      if (Array.isArray(out)) out.forEach((v, i) => settle(i, v));
+    } catch (e) { batch.forEach((_, i) => settle(i, e instanceof Error ? e : new Error(String(e)))); }
+    batch.forEach((_, i) => settle(i, new Error('没有返回结果')));
+  }
+}
+// The server runs these as GETs inside POST /api/batch and streams back one NDJSON line per request, as it finishes.
+const BATCHABLE = /^(list|categories|probe|javdb|douban\/(rating|hot|chart|charts))$/;
+async function fetchBatch(keys, settle) {
+  const requests = keys.map(k => { const q = k.indexOf('?'); return { route: k.slice(0, q), q: Object.fromEntries(new URLSearchParams(k.slice(q + 1))) }; });
+  const headers = { 'Content-Type': 'application/json' };
+  if (sessionStorage.pin) headers['X-Pin'] = sessionStorage.pin;
+  const r = await fetch('/api/batch', { method: 'POST', headers, body: JSON.stringify({ requests }) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const line = t => {
+    if (!t) return;
+    let m; try { m = JSON.parse(t); } catch { return; }
+    settle(m.i, m.status >= 400 || m.body?.error ? new Error(m.body?.error || `HTTP ${m.status}`) : m.body);
+  };
+  if (!r.body || !r.body.getReader) { (await r.text()).split('\n').forEach(line); return; }
+  const rd = r.body.getReader(), dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await rd.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    for (let nl; (nl = buf.indexOf('\n')) >= 0;) { line(buf.slice(0, nl)); buf = buf.slice(nl + 1); }
+  }
+  line(buf + dec.decode());
+}
+const apiLoader = new DataLoader(fetchBatch);
+// A caller that leaves (page change, closed sheet) just stops waiting; the shared request itself is not cancelled.
+const withSignal = (p, signal) => !signal ? p : new Promise((ok, bad) => {
+  const gone = () => bad(new DOMException('aborted', 'AbortError'));
+  if (signal.aborted) return gone();
+  signal.addEventListener('abort', gone, { once: true });
+  p.then(ok, bad).finally(() => signal.removeEventListener('abort', gone));
+});
+const fetchApi = (route, params, signal) => {
+  if (!BATCHABLE.test(route)) return get(`/api/${route}?` + new URLSearchParams(params), signal);
+  const qs = new URLSearchParams(params); qs.sort();
+  return withSignal(apiLoader.load(`${route}?${qs}`), signal === undefined ? pageCtl.signal : signal || undefined);
+};
 const api = (route, params = {}, signal) => {
-  const path = `/api/${route}?` + new URLSearchParams(params), ttl = MEMO_TTL[route];
-  if (!ttl) return get(path, signal);
-  const k = state.level + '|' + path, hit = apiMemo.get(k);
+  const ttl = MEMO_TTL[route];
+  if (!ttl) return fetchApi(route, params, signal);
+  const k = state.level + '|' + route + '?' + new URLSearchParams(params), hit = apiMemo.get(k);
   if (hit && Date.now() - hit.at < ttl) { apiMemo.delete(k); apiMemo.set(k, hit); return Promise.resolve(hit.v); }
-  return get(path, signal).then(v => {
+  return fetchApi(route, params, signal).then(v => {
     apiMemo.set(k, { at: Date.now(), v });
     if (apiMemo.size > MEMO_MAX) apiMemo.delete(apiMemo.keys().next().value);
     return v;
@@ -167,23 +250,16 @@ const liveFavs = {
 
 // ---------- 豆瓣 ratings (lazy, cached) ----------
 const dbCache = JSON.parse(localStorage.douban || '{}');
-const dbQueue = []; let dbActive = 0;
 function dbRate(name, year) {
   const k = name + '|' + (year || '');
   const c = dbCache[k];
   if (c && c.v === 2 && Date.now() - c.at < 3 * 86400e3) return Promise.resolve(c);
-  return new Promise(ok => { dbQueue.push({ name, year, k, ok }); dbPump(); });
-}
-function dbPump() {
-  while (dbActive < 2 && dbQueue.length) {
-    const { name, year, k, ok } = dbQueue.shift();
-    dbActive++;
-    api('douban/rating', { name, year: year || '' }).catch(() => ({ found: false, error: 1 })).then(r => {
-      const v = { rate: r.rate || '', id: r.id || '', pic: r.pic || '', v: 2, at: Date.now() };
-      if (!r.error) { dbCache[k] = v; localStorage.douban = JSON.stringify(dbCache); }
-      ok(v);
-    }).finally(() => { dbActive--; dbPump(); });
-  }
+  // Not tied to the page: the answer is worth keeping even if the user already moved on. Batched by apiLoader.
+  return api('douban/rating', { name, year: year || '' }, null).catch(() => ({ found: false, error: 1 })).then(r => {
+    const v = { rate: r.rate || '', id: r.id || '', pic: r.pic || '', v: 2, at: Date.now() };
+    if (!r.error) { dbCache[k] = v; localStorage.douban = JSON.stringify(dbCache); }
+    return v;
+  });
 }
 const dbIO = new IntersectionObserver(es => es.forEach(e => {
   if (!e.isIntersecting) return;
@@ -195,37 +271,28 @@ function observeRatings(root = document) { $$('.db[data-n]:not([data-javfb])', r
 // ---------- javdb (成人元数据, lazy, cached) ----------
 const javCode = s => {
   const up = String(s ?? '').toUpperCase();
-  for (const re of [
-    /(?:^|[^A-Z0-9])FC2[\s\-_]?PPV[\s\-_]?\d{5,8}(?![A-Z0-9])/,
-    /(?:^|[^A-Z0-9])[A-Z]{2,6}[\-_]\d{2,5}(?![A-Z0-9])/,
-    /(?:^|[^A-Z0-9])\d{6}[\-_]\d{3}(?![A-Z0-9])/,
-    /(?:^|[^A-Z0-9])[A-Z]{2,6}\d{2,5}(?![A-Z0-9])/,
-  ]) {
-    const m = up.match(re);
-    if (!m) continue;
-    let c = m[0].replace(/^[^A-Z0-9]+/, '').replace(/[\s_]+/g, '-');
-    if (!c.includes('-')) c = c.replace(/^(FC2)(PPV)(\d{5,8})$/, '$1-$2-$3').replace(/^([A-Z]{2,6})(\d{2,5})$/, '$1-$2');
-    return c;
-  }
+  // Release-name words that look like LETTERS+DIGITS but are not a 番号.
+  const STOP = /^(?:AAC|AC|DTS|DDP|HEVC|AVC|HDR|UHD|FHD|WEB|BD|DVD|MP|EP|HD|HQ|CD|VOL|NO|PART|CAM|TS|SE)$/;
+  // IPX00988 → IPX-988, ABP-0123 → ABP-123 (zero-padded to 5 on some sites); real 4-digit codes (DV-1656) stay.
+  const num = n => n.length > 3 ? n.replace(/^0+/, '').padStart(3, '0') : n;
+  const pats = [
+    [/(?:^|[^A-Z0-9])(FC2)[\s\-_]?(PPV)[\s\-_]?(\d{5,8})(?![A-Z0-9])/g, m => `${m[1]}-${m[2]}-${m[3]}`],
+    [/(?:^|[^A-Z0-9])([A-Z]{2,6})[\-_](\d{2,5})(?![A-Z0-9])/g, m => `${m[1]}-${num(m[2])}`],
+    [/(?:^|[^A-Z0-9])(\d{6})[\-_](\d{3})(?![A-Z0-9])/g, m => `${m[1]}-${m[2]}`],
+    [/(?:^|[^A-Z0-9])([A-Z]{2,6})(\d{2,5})(?![A-Z0-9])/g, m => STOP.test(m[1]) ? '' : `${m[1]}-${num(m[2])}`],
+  ];
+  for (const [re, fmt] of pats) for (const m of up.matchAll(re)) { const c = fmt(m); if (c) return c; }
   return '';
 };
 const javCache = JSON.parse(localStorage.javdb || '{}');
-const javQueue = []; let javActive = 0;
 function javMeta(code) {
   const c = javCache[code];
   if (c && c.found && Date.now() - c.at < 30 * 86400e3) return Promise.resolve(c);
-  return new Promise(ok => { javQueue.push({ code, ok }); javPump(); });
-}
-function javPump() {
-  while (javActive < 2 && javQueue.length) {
-    const { code, ok } = javQueue.shift();
-    javActive++;
-    api('javdb', { code }).catch(() => ({ found: false })).then(r => {
-      const v = { ...r, at: Date.now() };
-      if (r.found) { javCache[code] = v; localStorage.javdb = JSON.stringify(javCache); }
-      ok(v);
-    }).finally(() => { javActive--; javPump(); });
-  }
+  return api('javdb', { code }, null).catch(() => ({ found: false })).then(r => {
+    const v = { ...r, at: Date.now() };
+    if (r.found) { javCache[code] = v; localStorage.javdb = JSON.stringify(javCache); }
+    return v;
+  });
 }
 // Cards: javdb 优先补封面+评分；没番号 / 匹配不到 / 抓取失败 → 豆瓣兜底（成人条目不预先走豆瓣）。
 const javIO = new IntersectionObserver(es => es.forEach(e => {
@@ -286,7 +353,6 @@ let heroTimer, pageTimer;
 function newPage() {
   pageCtl.abort();
   pageCtl = new AbortController();
-  dbQueue.length = 0;
   thumbQueue.length = 0;
   stopPreview(); stopLocalPreview(true);
 }

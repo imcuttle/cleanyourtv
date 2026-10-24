@@ -725,18 +725,17 @@ function javText(url) {
 // "第一会所…@SIS001@SONE-123" or "169bbs.com@SONE-645 [4k]" resolve to the real 番号, not the site id.
 const javCode = s => {
   const up = str(s).toUpperCase();
-  for (const re of [
-    /(?:^|[^A-Z0-9])FC2[\s\-_]?PPV[\s\-_]?\d{5,8}(?![A-Z0-9])/,
-    /(?:^|[^A-Z0-9])[A-Z]{2,6}[\-_]\d{2,5}(?![A-Z0-9])/,
-    /(?:^|[^A-Z0-9])\d{6}[\-_]\d{3}(?![A-Z0-9])/,
-    /(?:^|[^A-Z0-9])[A-Z]{2,6}\d{2,5}(?![A-Z0-9])/,
-  ]) {
-    const m = up.match(re);
-    if (!m) continue;
-    let c = m[0].replace(/^[^A-Z0-9]+/, '').replace(/[\s_]+/g, '-');
-    if (!c.includes('-')) c = c.replace(/^(FC2)(PPV)(\d{5,8})$/, '$1-$2-$3').replace(/^([A-Z]{2,6})(\d{2,5})$/, '$1-$2');
-    return c;
-  }
+  // Release-name words that look like LETTERS+DIGITS but are not a 番号.
+  const STOP = /^(?:AAC|AC|DTS|DDP|HEVC|AVC|HDR|UHD|FHD|WEB|BD|DVD|MP|EP|HD|HQ|CD|VOL|NO|PART|CAM|TS|SE)$/;
+  // IPX00988 → IPX-988, ABP-0123 → ABP-123 (zero-padded to 5 on some sites); real 4-digit codes (DV-1656) stay.
+  const num = n => n.length > 3 ? n.replace(/^0+/, '').padStart(3, '0') : n;
+  const pats = [
+    [/(?:^|[^A-Z0-9])(FC2)[\s\-_]?(PPV)[\s\-_]?(\d{5,8})(?![A-Z0-9])/g, m => `${m[1]}-${m[2]}-${m[3]}`],
+    [/(?:^|[^A-Z0-9])([A-Z]{2,6})[\-_](\d{2,5})(?![A-Z0-9])/g, m => `${m[1]}-${num(m[2])}`],
+    [/(?:^|[^A-Z0-9])(\d{6})[\-_](\d{3})(?![A-Z0-9])/g, m => `${m[1]}-${m[2]}`],
+    [/(?:^|[^A-Z0-9])([A-Z]{2,6})(\d{2,5})(?![A-Z0-9])/g, m => STOP.test(m[1]) ? '' : `${m[1]}-${num(m[2])}`],
+  ];
+  for (const [re, fmt] of pats) for (const m of up.matchAll(re)) { const c = fmt(m); if (c) return c; }
   return '';
 };
 const stripHtml = s => str(s).replace(/<[^>]*>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
@@ -1788,11 +1787,56 @@ function readBody(req) {
 }
 const needPin = res => send(res, 403, { error: '需要家长 PIN', pin: true });
 
+// ---- batch support ----
+const BATCH_MAX = 60, BATCH_PAR = 6;
+// Read-only routes the client may bundle. (search / person / detail are slow and one-off: left out on purpose.)
+const BATCHABLE = /^(list|categories|probe|javdb|douban\/(rating|hot|chart|charts))$/;
+// Runs api() as a GET against an in-memory response and returns {status, body}.
+async function captureApi(route, params, req) {
+  const cap = { destroyed: false, headersSent: false, req: { headers: {} }, code: 200, out: '',
+    writeHead(c) { this.code = c; }, setHeader() {}, end(b) { this.out = b == null ? '' : String(b); } };
+  try {
+    await api(route, params, cap, { method: 'GET', headers: req.headers, socket: req.socket, url: '/api/' + route });
+    let body; try { body = JSON.parse(cap.out); } catch { body = { error: 'bad response' }; }
+    return { status: cap.code, body };
+  } catch (e) { return { status: 502, body: { error: e.message || String(e) } }; }
+}
 async function api(route, q, res, req) {
   const SITES = visibleSites();
   const write = req.method !== 'GET';
 
   const leader = async (op, args) => { const r = await rpc(op, args); return send(res, r.code || 200, r.body); };
+
+  // ---- batch: many small reads in one round trip (client DataLoader) ----
+  // POST {requests:[{route, q}]} → NDJSON, one line {i, status, body} per request *as it finishes*, so a slow one
+  // (javdb is paced) never holds back the fast ones. Each sub-request runs through this very function as a GET,
+  // so safety level, site visibility and error handling are identical to the single endpoints. Identical
+  // sub-requests in one batch are computed once.
+  if (route === 'batch') {
+    if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+    const body = await readBody(req);
+    const list = (Array.isArray(body.requests) ? body.requests : []).slice(0, BATCH_MAX);
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+    const shared = new Map();
+    const run = r => {
+      const route = str(r && r.route), params = new URLSearchParams(r && typeof r.q === 'object' && r.q ? r.q : {});
+      if (!BATCHABLE.test(route)) return Promise.resolve({ status: 400, body: { error: 'not batchable' } });
+      params.sort();
+      const key = route + '?' + params;
+      if (!shared.has(key)) shared.set(key, captureApi(route, params, req));
+      return shared.get(key);
+    };
+    let next = 0;
+    const worker = async () => {
+      while (next < list.length && !res.destroyed) {
+        const i = next++;
+        const out = await run(list[i]);
+        if (!res.destroyed) res.write(JSON.stringify({ i, ...out }) + '\n');
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(BATCH_PAR, list.length) }, worker));
+    return res.end();
+  }
 
   // ---- safety / config: written by the leader, then every worker reloads ----
   if (route === 'safety') {
