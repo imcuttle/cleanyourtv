@@ -112,6 +112,10 @@ const hist = {
   },
   del(site, id) { localStorage.history = JSON.stringify(hist.all().filter(h => !(h.site === site && h.id === id))); },
   clear() { localStorage.history = '[]'; },
+  // 成人 local titles are private to the 本地媒体 source: never listed under other sources (legacy local entries
+  // without the flag count as private too); the local source itself lists only its own history.
+  visible: (h, site = state.site) => site === 'local' ? h.site === 'local' : !(h.site === 'local' && h.adult !== 0),
+  list: () => hist.all().filter(h => hist.visible(h)),
 };
 
 // ---------- favorites (hidden in 儿童 mode) ----------
@@ -363,7 +367,7 @@ async function renderHome() {
     state.cats.length ? { categories: state.cats } : api('categories', { site }).catch(() => ({ categories: [] }))]);
   state.cats = cats.categories;
   const sig = pageCtl.signal;
-  const cont = hist.all().filter(h => state.sites.some(s => s.key === h.site)).slice(0, 20);
+  const cont = hist.list().filter(h => state.sites.some(s => s.key === h.site)).slice(0, 20);
   const favList = favs.all().filter(f => state.sites.some(s => s.key === f.site)).slice(0, 30);
   const kids = state.level === 'kids';
   const own = site === 'local'; // 本地媒体: its own folders only, no 豆瓣
@@ -422,7 +426,7 @@ function hero(items) {
 
 // ---------- watch history ----------
 function renderHistory() {
-  const list = hist.all();
+  const list = hist.list();
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
   view.innerHTML = `<div class="page"><div class="pagehead"><h1>观看历史</h1>
       ${list.length ? '<button class="small" data-clear="hist">清空全部</button>' : ''}</div>
@@ -966,7 +970,7 @@ video.addEventListener('timeupdate', () => {
   if (!cur || cur.kind !== 'vod' || Date.now() - lastSave < 4000 || !video.duration) return;
   lastSave = Date.now();
   const { d, line, ep, eps } = cur;
-  hist.put({ site: d.site, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
+  hist.put({ site: d.site, adult: d.adult ? 1 : 0, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
     line, ep, epName: eps[ep].name, t: video.currentTime, dur: video.duration });
 });
 function step(n) { cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(0); }

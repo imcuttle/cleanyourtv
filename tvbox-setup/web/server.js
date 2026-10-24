@@ -1012,7 +1012,12 @@ async function serveDownload(rest, req, res) {
 async function sendFile(req, res, fp, type, extra = {}) {
   const st = await fsp.stat(fp).catch(() => null);
   if (!st || !st.isFile()) return send(res, 404, 'not found', 'text/plain');
-  const head = { 'Content-Type': type, 'Accept-Ranges': 'bytes', ...extra };
+  const { etag: useEtag, ...extraHeaders } = extra;
+  const head = { 'Content-Type': type, 'Accept-Ranges': 'bytes', ...extraHeaders };
+  if (useEtag) { // validators for cacheable images: a revalidating client gets 304 without a body
+    head.ETag = `W/"${st.size.toString(36)}-${Math.round(st.mtimeMs).toString(36)}"`;
+    if (req.headers['if-none-match'] === head.ETag) { delete head['Accept-Ranges']; res.writeHead(304, { ETag: head.ETag, 'Cache-Control': head['Cache-Control'] }); return res.end(); }
+  }
   const pipe = rs => { rs.on('error', () => res.destroy()); res.on('close', () => rs.destroy()); rs.pipe(res); };
   const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
   if (m && (m[1] || m[2])) {
@@ -1111,7 +1116,7 @@ function localCms(params, base) {
 function localVod(it, type, base) {
   const url = f => (base || BROWSER_EXT.has(f.ext) || !FFMPEG) ? `${base}/media/f/${f.id}.${f.ext}` : `/media/h/${f.id}/index.m3u8`;
   const size = it.files.reduce((n, f) => n + f.size, 0);
-  return { vod_id: it.id, vod_name: it.name, vod_pic: (it.pic || FFMPEG) ? `${base}/media/p/${it.id}` : '', type_id: it.cat, type_name: type,
+  return { vod_id: it.id, vod_name: it.name, vod_pic: (it.pic || FFMPEG) ? `${base}/media/p/${it.id}?v=${hashId(it.pic + '|' + it.mtime + '|' + it.files.length, 6)}` : '', type_id: it.cat, type_name: type,
     vod_year: it.year || '', vod_actor: it.actor || '', vod_director: it.director || '',
     vod_remarks: it.files.length > 1 ? `${it.files.length}集` : fmtBytes(size), vod_version: it.quality || '',
     vod_content: it.plot || `${it.files.length} 个文件 · ${fmtBytes(size)}`,
@@ -1122,6 +1127,8 @@ function localVod(it, type, base) {
 // ---- scanning (media process) ----
 const natural = (a, b) => a.localeCompare(b, 'zh-CN', { numeric: true, sensitivity: 'base' });
 const hashId = (s, n) => crypto.createHash('sha1').update(s).digest('hex').slice(0, n);
+// Category identity: same-named folders merge regardless of case, surrounding spaces or unicode form (NFC/NFD from NAS/macOS).
+const catId = name => hashId('c|' + str(name).normalize('NFC').trim().toLowerCase(), 8);
 const noDelim = s => str(s).replace(/[$#]+/g, ' ').trim(); // $ and # separate episodes in 苹果CMS play lists
 const SEASON = /^(?:season|series|s)[\s._-]*(\d{1,2})$|^第\s*([一二三四五六七八九十\d]+)\s*季$/i;
 const EP_MARK = /S\d{1,2}[\s._-]?E\d{1,3}|第\s*\d+\s*[集话話期]|(^|[^a-z])EP?[\s._-]?\d{1,3}(\D|$)/i;
@@ -1244,7 +1251,8 @@ async function groupItems(g, root, cat, flat) {
     ext: path.extname(x.f).slice(1).toLowerCase(), size: x.st.size, name });
   const nfoFor = base => { const n = g.nfos.find(n => n.toLowerCase() === base.toLowerCase() + '.nfo'); return n ? readNfo(path.join(g.dir, n)) : null; };
   const make = (key, t, nfo, files, pic, mtime) => ({ id: hashId('i|' + key, 12), name: nfo?.title || t.name, year: nfo?.year || t.year, cat, quality: t.quality || qualityOf(path.basename(files[0].path)),
-    pic: pic ? path.join(g.dir, pic) : '', plot: nfo?.plot || '', actor: nfo?.actor || '', director: nfo?.director || '', mtime, files });
+    pic: pic ? path.join(g.dir, pic) : '', plot: nfo?.plot || '', actor: nfo?.actor || '', director: nfo?.director || '', mtime, files,
+    ...(files.length > 1 || key === g.dir ? { _dir: 1 } : {}) });
   // Files lying directly in a category folder are always titles of their own.
   if (g.dir !== root && !flat && (entries.length === 1 || isSeries(bases))) {
     const folder = path.basename(g.dir), season = SEASON.exec(folder);
@@ -1264,7 +1272,7 @@ let scanQueued = false;
 async function scanLocal() {
   if (localScan.running) { scanQueued = true; return; }
   const t0 = Date.now(), cfg = localCfg, exts = new Set(cfg.exts);
-  const cats = new Map(), items = new Map(), dirs = [];
+  const cats = new Map(), items = new Map(), merged = new Map(), dirs = [];
   localScan = { ...localScan, running: true, dirs, error: '' };
   try {
     // Every configured folder and category root is scanned in parallel (I/O is gated by io()); results are
@@ -1286,7 +1294,7 @@ async function scanLocal() {
         const groups = [];
         await walkMedia(r.dir, exts, groups, r.deep);
         groups.sort((a, b) => natural(a.dir, b.dir));
-        const found = (await Promise.all(groups.map(g => groupItems(g, r.dir, hashId('c|' + r.cat, 8), d.flat)))).flat();
+        const found = (await Promise.all(groups.map(g => groupItems(g, r.dir, catId(r.cat), d.flat)))).flat();
         for (const it of found) { ds.items++; ds.files += it.files.length; }
         return { d, r, found };
       }));
@@ -1295,18 +1303,34 @@ async function scanLocal() {
       if (!res.found.length) continue;
       const { d, r } = res;
       // The same name from several folders is one category: 成人 if any of them is, 少儿 only if all are.
-      const id = hashId('c|' + r.cat, 8);
+      const id = catId(r.cat);
       const c = cats.get(id) || { id, name: r.cat, adult: 0, kids: 1 };
       if (d.adult) c.adult = 1;
       if (!d.kids) c.kids = 0;
       cats.set(id, c);
-      for (const it of res.found) if (!items.has(it.id)) items.set(it.id, it);
+      for (const it of res.found) {
+        if (items.has(it.id)) continue;
+        // Same-named series folders (in several folders / same-named subfolders) are one title: merge their episodes.
+        const mk = it._dir ? `${it.cat}|${it.name.toLowerCase()}|${it.year}` : '';
+        const prev = mk && merged.get(mk);
+        if (prev) {
+          prev.files.push(...it.files);
+          prev.files.sort((a, b) => natural(a.name, b.name) || natural(a.path, b.path));
+          prev.mtime = Math.max(prev.mtime, it.mtime);
+          prev.pic = prev.pic || it.pic; prev.plot = prev.plot || it.plot; prev.actor = prev.actor || it.actor; prev.director = prev.director || it.director;
+          continue;
+        }
+        items.set(it.id, it);
+        if (mk) merged.set(mk, it);
+      }
     }
+    for (const it of items.values()) delete it._dir;
     const list = [...items.values()].sort((a, b) => b.mtime - a.mtime);
     const used = new Set(list.map(it => it.cat));
     fs.writeFileSync(LOCAL_INDEX + '.tmp', JSON.stringify({ at: Date.now(), cats: [...cats.values()].filter(c => used.has(c.id)), items: list }));
     fs.renameSync(LOCAL_INDEX + '.tmp', LOCAL_INDEX);
     localSnap.mtime = -2;
+    thumbHot.clear(); // sources may have changed
     localScan = { running: false, at: Date.now(), ms: Date.now() - t0, items: list.length, files: list.reduce((n, it) => n + it.files.length, 0), dirs, error: '' };
   } catch (e) {
     localScan = { ...localScan, running: false, at: Date.now(), error: e.message || String(e) };
@@ -1331,26 +1355,87 @@ if (IS_MEDIA) {
   }, 60e3).unref();
 }
 
-// ---- posters: an ffmpeg frame when the folder has no image (media process, cached in data/thumbs) ----
-const thumbFail = new Map();
+// ---- posters (media process, cached in data/thumbs) ----
+// Cover = the folder's image (downscaled once when it is big) or an ffmpeg frame of the first video. Built for throughput:
+//  · own LIFO queue with low concurrency + nice 10 — what the user is looking at now is made first, scrolled-past requests
+//    are dropped when the backlog is long (they get a 503 and are simply asked again), and live previews are not starved;
+//  · "hot" LRU map id → ready file, so repeat requests need no stat/ffmpeg; disk is capped (oldest-used covers pruned);
+//  · cover files are keyed by their source, so a changed image/video yields a new cover instead of a stale one.
+const THUMB_CONC = Math.max(1, Math.min(3, CPUS >> 1));
+const THUMB_BACKLOG = 240, THUMB_DISK_MAX = 4000, THUMB_HOT_MAX = 3000, PIC_DIRECT = 150e3;
+const thumbFail = new Map(), thumbHot = new Map(), thumbQ = [];
+let thumbRun = 0;
+const hotGet = id => { const f = thumbHot.get(id); if (f) { thumbHot.delete(id); thumbHot.set(id, f); } return f; };
+function hotSet(id, f) { thumbHot.delete(id); thumbHot.set(id, f); if (thumbHot.size > THUMB_HOT_MAX) thumbHot.delete(thumbHot.keys().next().value); }
+function thumbJob(fn) {
+  return new Promise((ok, bad) => {
+    thumbQ.push({ fn, ok, bad });
+    if (thumbQ.length > THUMB_BACKLOG) thumbQ.shift().bad(new Error('busy')); // oldest request = most likely scrolled away
+    drainThumbs();
+  });
+}
+function drainThumbs() {
+  while (thumbRun < THUMB_CONC && thumbQ.length) {
+    const { fn, ok, bad } = thumbQ.pop(); // newest first
+    thumbRun++;
+    fn().then(ok, bad).finally(() => { thumbRun--; drainThumbs(); });
+  }
+}
+// Resolves to a file path, null (no cover possible) or rejects with 'busy'.
 rpcHandlers.localThumb = ({ id }) => localThumb(id);
-function localThumb(id) {
+async function localThumb(id) {
+  const hot = hotGet(id);
+  if (hot) return hot;
   const it = localIndex().byItem.get(id);
-  if (!it || !FFMPEG) return null;
-  const file = path.join(THUMBS, `local-${id}.jpg`);
-  if (fs.existsSync(file)) return file;
-  if (Date.now() - (thumbFail.get(id) || 0) < 3600e3) return null;
-  const key = 'lt|' + id;
+  if (!it) return null;
+  const pic = it.pic ? await io(() => fsp.stat(it.pic)).catch(() => null) : null;
+  if (pic && (pic.size <= PIC_DIRECT || !FFMPEG)) { hotSet(id, it.pic); return it.pic; }
+  if (!FFMPEG) return null;
+  const src = pic ? it.pic : it.files[0].path;
+  const file = path.join(THUMBS, `local-${hashId(id + '|' + src + '|' + (pic ? pic.mtimeMs : ''), 12)}.jpg`);
+  const done = await fsp.stat(file).catch(() => null);
+  if (done) { hotSet(id, file); fsp.utimes(file, new Date(), new Date()).catch(() => {}); return file; } // touch = LRU stamp for pruning
+  if (Date.now() - (thumbFail.get(id) || 0) < 3600e3) return pic ? it.pic : null;
+  const key = 'lt|' + file;
   if (!mediaJobs.has(key)) {
     const tmp = file.replace(/\.jpg$/, '.tmp.jpg');
-    // Skip the opening (logos / black); short clips fall back to the start.
-    const args = ss => ['-hide_banner', '-loglevel', 'error', '-y', ...(ss ? ['-ss', String(ss)] : []), '-i', it.files[0].path,
-      '-map', '0:v:0', '-vf', 'thumbnail=30,scale=480:-2', '-frames:v', '1', '-q:v', '5', tmp];
-    mediaJobs.set(key, limited(() => ffmpeg(args(90), 40000, 10).then(() => fsp.stat(tmp)).catch(() => ffmpeg(args(0), 40000, 10)))
-      .then(() => fsp.rename(tmp, file)).then(() => file, () => { thumbFail.set(id, Date.now()); fsp.rm(tmp, { force: true }).catch(() => {}); return null; })
+    const run = pic
+      ? () => ffmpeg(['-hide_banner', '-loglevel', 'error', '-y', '-i', src, '-vf', 'scale=480:-2:force_original_aspect_ratio=decrease', '-frames:v', '1', '-q:v', '4', tmp], 30000, 10)
+      // Skip the opening (logos / black); short clips fall back to the start.
+      : () => {
+        const args = ss => ['-hide_banner', '-loglevel', 'error', '-y', ...(ss ? ['-ss', String(ss)] : []), '-i', src,
+          '-map', '0:v:0', '-vf', 'thumbnail=30,scale=480:-2', '-frames:v', '1', '-q:v', '5', tmp];
+        return ffmpeg(args(90), 40000, 10).then(() => fsp.stat(tmp)).catch(() => ffmpeg(args(0), 40000, 10));
+      };
+    mediaJobs.set(key, thumbJob(run)
+      .then(() => fsp.rename(tmp, file)).then(() => { hotSet(id, file); return file; }, e => {
+        fsp.rm(tmp, { force: true }).catch(() => {});
+        if (e.message === 'busy') throw e; // dropped from the backlog: not a failure of the source
+        thumbFail.set(id, Date.now());
+        return pic ? it.pic : null; // an image we could not shrink is still better than nothing
+      })
       .finally(() => mediaJobs.delete(key)));
   }
   return mediaJobs.get(key);
+}
+// Disk cap: keep the THUMB_DISK_MAX most recently used covers (mtime is touched on first use after a restart / LRU eviction).
+async function pruneThumbs() {
+  try {
+    const names = (await fsp.readdir(THUMBS)).filter(n => n.startsWith('local-'));
+    for (const n of names) if (n.includes('.tmp.')) fsp.rm(path.join(THUMBS, n), { force: true }).catch(() => {});
+    if (names.length <= THUMB_DISK_MAX) return;
+    const st = [];
+    for (let i = 0; i < names.length; i += 64) {
+      st.push(...await Promise.all(names.slice(i, i + 64).map(n => fsp.stat(path.join(THUMBS, n)).then(s => ({ n, t: s.mtimeMs }), () => null))));
+    }
+    const old = st.filter(Boolean).sort((a, b) => a.t - b.t).slice(0, names.length - Math.floor(THUMB_DISK_MAX * 0.9));
+    await Promise.all(old.map(x => fsp.rm(path.join(THUMBS, x.n), { force: true })));
+    thumbHot.clear();
+  } catch {}
+}
+if (IS_MEDIA) {
+  setTimeout(pruneThumbs, 30e3).unref();
+  setInterval(pruneThumbs, 30 * 60e3).unref();
 }
 
 // ---- browser playback of mkv/avi/rmvb…: ffmpeg → HLS in data/transcode/<file id>/ (media process) ----
@@ -1467,10 +1552,12 @@ async function serveMedia(rest, req, res) {
   if (kind === 'p') {
     const it = snap.byItem.get(raw);
     if (!visible(it)) return send(res, 404, 'not found', 'text/plain');
-    const cacheH = { 'Cache-Control': 'max-age=86400' };
-    if (it.pic) return sendFile(req, res, it.pic, MIME[path.extname(it.pic).toLowerCase()] || 'image/jpeg', cacheH);
-    const thumb = await rpc('localThumb', { id: it.id }, 90000).catch(() => null);
-    return thumb ? sendFile(req, res, thumb, 'image/jpeg', cacheH) : send(res, 404, 'no poster', 'text/plain');
+    // The url carries ?v=<version> (see localVod), so a cover can be cached for good; the ETag covers bare urls.
+    const cacheH = { 'Cache-Control': 'public, max-age=2592000, stale-while-revalidate=86400', etag: true };
+    let thumb;
+    try { thumb = await rpc('localThumb', { id: it.id }, 90000); }
+    catch (e) { res.setHeader?.('Retry-After', '5'); return send(res, 503, 'busy', 'text/plain'); }
+    return thumb ? sendFile(req, res, thumb, MIME[path.extname(thumb).toLowerCase()] || 'image/jpeg', cacheH) : send(res, 404, 'no poster', 'text/plain');
   }
   const f = snap.byFile.get(raw.replace(/\.\w+$/, ''));
   if (!f || !visible(f.item)) return send(res, 404, 'not found', 'text/plain');
@@ -1655,7 +1742,7 @@ async function api(route, q, res, req) {
     if (!itemOk(site, it)) return send(res, 403, { error: '当前安全级别下不可看' });
     const ls = lines(d);
     return send(res, 200, { ...it, quality: it.quality || bestQuality(ls.map(l => l.quality)), blurb: clean(d.vod_content), actor: str(d.vod_actor), director: str(d.vod_director),
-      actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: ls, ...(site.local ? { local: true } : {}) });
+      actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: ls, ...(site.local ? { local: true, adult: localIndex().catById.get(str(d.type_id))?.adult ? 1 : 0 } : {}) });
   }
   send(res, 404, { error: 'unknown api' });
 }
