@@ -93,11 +93,17 @@ struct VodHomeView: View {
     @ObservedObject private var lib = Library.shared
     @AppStorage("safety.level") private var level = "standard"
     @AppStorage("siteKey") private var siteKey = ""
+    @AppStorage("douban.tv") private var dbTv = true
+    @AppStorage("douban.movie") private var dbMovie = true
+    @AppStorage("douban.show") private var dbShow = true
+    @AppStorage("douban.anime") private var dbAnime = true
     @State private var cats: [VodCategory] = []
     @State private var latest: [VodItem] = []
     @State private var rows: [Row] = []
     @State private var tvHot: [DoubanItem] = []
     @State private var movieHot: [DoubanItem] = []
+    @State private var showHot: [DoubanItem] = []
+    @State private var animeHot: [DoubanItem] = []
     @State private var error: String?
     @State private var loading = false
     @State private var loadedKey = ""
@@ -105,7 +111,7 @@ struct VodHomeView: View {
     private var sites: [Site] { Safety.visible(cfg.sites) }
     private var site: Site? { sites.first { $0.key == siteKey } ?? sites.first }
     // Reload only when what we show actually changes — not every time the view reappears (back-swipe).
-    private var loadKey: String { "\(site?.key ?? "")|\(site?.api ?? "")|\(level)" }
+    private var loadKey: String { "\(site?.key ?? "")|\(site?.api ?? "")|\(level)|\(dbTv)\(dbMovie)\(dbShow)\(dbAnime)" }
 
     var body: some View {
         ScrollView {
@@ -122,8 +128,12 @@ struct VodHomeView: View {
                 if latest.count > 6 {
                     vodRow(level == "kids" ? "少儿精选" : "最新更新", Array(latest.dropFirst(6)), VodCategory(id: "", pid: "", name: level == "kids" ? "少儿精选" : "最新更新"))
                 }
-                if !tvHot.isEmpty { doubanRow("豆瓣热门剧集", tvHot) }
-                if !movieHot.isEmpty { doubanRow("豆瓣热门电影", movieHot) }
+                if level != "kids" {
+                    if dbTv, !tvHot.isEmpty { doubanRow("豆瓣热门剧集", tvHot) }
+                    if dbMovie, !movieHot.isEmpty { doubanRow("豆瓣热门电影", movieHot) }
+                    if dbShow, !showHot.isEmpty { doubanRow("豆瓣热门综艺", showHot) }
+                    if dbAnime, !animeHot.isEmpty { doubanRow("豆瓣热门动漫", animeHot) }
+                }
                 ForEach(rows) { vodRow($0.cat.name, $0.items, $0.cat) }
                 if !cats.isEmpty { allCategories }
             }
@@ -171,7 +181,7 @@ struct VodHomeView: View {
 
     private func historyRow(_ list: [(LibEntry, VodItem)]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            NavigationLink { HistoryView() } label: { header("继续观看") }.padding(.horizontal)
+            NavigationLink { HistoryView() } label: { header("继续观看") }.buttonStyle(.press).padding(.horizontal)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 8) {
                     ForEach(list, id: \.0.id) { e, item in
@@ -192,9 +202,9 @@ struct VodHomeView: View {
     @ViewBuilder private func vodRow(_ title: String, _ items: [VodItem], _ cat: VodCategory?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let cat, let site {
-                NavigationLink(value: CatRoute(site: site, cat: cat)) { header(title) }.padding(.horizontal)
+                NavigationLink(value: CatRoute(site: site, cat: cat)) { header(title) }.buttonStyle(.press).padding(.horizontal)
             } else if cat == nil {
-                NavigationLink { FavoritesView() } label: { header(title) }.padding(.horizontal)
+                NavigationLink { FavoritesView() } label: { header(title) }.buttonStyle(.press).padding(.horizontal)
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 8) {
@@ -230,6 +240,7 @@ struct VodHomeView: View {
                             .background(Color.card).foregroundStyle(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
+                    .buttonStyle(.press)
                 }
             }.padding(.horizontal)
         }
@@ -237,7 +248,7 @@ struct VodHomeView: View {
 
     private func load() async {
         loadedKey = loadKey
-        latest = []; rows = []; cats = []; tvHot = []; movieHot = []; error = nil
+        latest = []; rows = []; cats = []; tvHot = []; movieHot = []; showHot = []; animeHot = []; error = nil
         guard let site else {
             error = level == "kids" ? "儿童模式下没有少儿源，去「设置」添加或标记" : "还没有点播源，去「设置」添加"
             return
@@ -245,10 +256,13 @@ struct VodHomeView: View {
         loading = true
         defer { loading = false }
         if level != "kids" {
+            let (wantTv, wantMovie, wantShow, wantAnime) = (dbTv, dbMovie, dbShow, dbAnime)
             Task {
-                async let tv = API.doubanHot("tv")
-                async let mv = API.doubanHot("movie")
-                (tvHot, movieHot) = await (tv, mv)
+                async let tv = wantTv ? API.doubanHot("tv") : []
+                async let mv = wantMovie ? API.doubanHot("movie") : []
+                async let sh = wantShow ? API.doubanHot("show") : []
+                async let an = wantAnime ? API.doubanHot("anime") : []
+                (tvHot, movieHot, showHot, animeHot) = await (tv, mv, sh, an)
             }
         }
         do {
@@ -430,7 +444,7 @@ struct VodDetailView: View {
         let parts = [detail?.year, detail?.area, detail?.lang, item.remarks].compactMap { $0 }.filter { !$0.isEmpty && $0 != "0" }
         return HStack(spacing: 8) {
             if !douban.id.isEmpty, let u = URL(string: "https://movie.douban.com/subject/\(douban.id)/") {
-                Link(destination: u) { RateBadge(rate: douban.rate.isEmpty ? "豆瓣 暂无" : "豆瓣 \(douban.rate)") }
+                Link(destination: u) { RateBadge(rate: douban.rate.isEmpty ? "豆瓣 暂无" : "豆瓣 \(douban.rate)") }.buttonStyle(.press)
             }
             Text(item.site.name).font(.caption.weight(.bold)).padding(.horizontal, 6).padding(.vertical, 2)
                 .overlay(RoundedRectangle(cornerRadius: 3).stroke(.white.opacity(0.5)))
@@ -440,6 +454,7 @@ struct VodDetailView: View {
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color(red: 0.33, green: 0.73, blue: 0.77)))
                 }
+                .buttonStyle(.press)
             }
             Text(parts.joined(separator: "  •  ")).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
         }

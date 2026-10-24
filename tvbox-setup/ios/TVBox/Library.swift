@@ -335,9 +335,10 @@ struct PeopleRow: View {
                             .buttonStyle(.press(.chip(false)))
                     }
                     if !all, names.count > max {
-                        Button("+\(names.count - max)") { all = true }
-                            .font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
-                            .overlay(Capsule().stroke(Color.white.opacity(0.25))).foregroundStyle(.secondary)
+                        Button { all = true } label: {
+                            Text("+\(names.count - max)").font(.caption).foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.press(.chip(false)))
                     }
                 }
             }

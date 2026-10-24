@@ -249,7 +249,8 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
                                    MPNowPlayingInfoPropertyPlaybackRate: playing ? Double(rate) : 0,
                                    MPNowPlayingInfoPropertyIsLiveStream: isLive]
         if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
-        if !artwork.isEmpty, let img = ImagePipeline.shared.cached(artwork, 360) {
+        let px = Poster.defaultPx, v = ImagePipeline.variants(artwork, px)
+        if !artwork.isEmpty, let img = ImagePipeline.shared.cached(v.high, px) ?? v.low.flatMap({ ImagePipeline.shared.cached($0, px) }) {
             info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
@@ -590,10 +591,9 @@ struct PlayerScreen: View {
                             }
                         }
                     } label: {
-                        Text(m.rate == 1 ? "倍速" : rateText(m.rate)).font(.subheadline.weight(.semibold))
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(Color.white.opacity(0.12), in: Capsule()).foregroundStyle(.white)
+                        Text(m.rate == 1 ? "倍速" : rateText(m.rate))
                     }
+                    .menuStyle(.button).buttonStyle(.press(.chip(false)))
                 }
                 if request.episodes.count > 1 {
                     Button(isLiveList ? "频道" : "选集") { withAnimation(.spring(duration: 0.3)) { showList = true } }

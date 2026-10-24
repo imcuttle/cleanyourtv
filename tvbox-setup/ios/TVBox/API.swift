@@ -324,13 +324,13 @@ enum API {
     static func doubanRating(name: String, year: String) async -> DoubanRating {
         let key = name + "|" + year
         lock.lock(); let hit = ratings[key]; lock.unlock()
-        if let hit { return hit }
+        if let hit, let at = hit.at, Date().timeIntervalSince(at) < (hit.rate.isEmpty ? 86400 : 7 * 86400) { return hit }
         var c = URLComponents(string: "https://movie.douban.com/j/subject_suggest")!
         c.queryItems = [URLQueryItem(name: "q", value: name)]
-        guard let list = await douban(c.url!) as? [[String: Any]], !Task.isCancelled else { return DoubanRating() }
+        guard let list = await douban(c.url!) as? [[String: Any]], !Task.isCancelled else { return hit ?? DoubanRating() }
         let norm: (String) -> String = { $0.replacingOccurrences(of: "[\\s·:：\\-—!！,，.。]", with: "", options: .regularExpression).lowercased() }
         let exact = list.filter { str($0["title"]) == name || norm(str($0["title"])) == norm(name) }
-        var out = DoubanRating()
+        var out = DoubanRating(at: Date())
         if let pick = exact.first(where: { !year.isEmpty && str($0["year"]) == year }) ?? exact.first {
             out.id = str(pick["id"])
             if let o = await douban(URL(string: "https://movie.douban.com/j/subject_abstract?subject_id=\(out.id)")!) as? [String: Any] {
@@ -360,9 +360,10 @@ enum API {
     /// Rate-limited 豆瓣 JSON for other files (榜单).
     static func doubanJSON(_ url: URL) async -> Any? { await douban(url) }
 
+    /// type: "tv" / "movie" (热门), "show" (综艺) or "anime" (日本动画) — the latter two are tags of 豆瓣's tv type.
     static func doubanHot(_ type: String) async -> [DoubanItem] {
         var c = URLComponents(string: "https://movie.douban.com/j/search_subjects")!
-        c.queryItems = [.init(name: "type", value: type), .init(name: "tag", value: "热门"),
+        c.queryItems = [.init(name: "type", value: type == "movie" ? "movie" : "tv"), .init(name: "tag", value: ["show": "综艺", "anime": "日本动画"][type] ?? "热门"),
                         .init(name: "page_limit", value: "30"), .init(name: "page_start", value: "0")]
         guard let obj = await douban(c.url!) as? [String: Any] else { return [] }
         return (obj["subjects"] as? [[String: Any]] ?? []).map {

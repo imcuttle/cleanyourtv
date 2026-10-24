@@ -23,7 +23,7 @@ final class ImagePipeline {
     private let lock = NSLock()
     private let dir = cacheDir("img")
 
-    init() { mem.totalCostLimit = 120 * 1024 * 1024 }
+    init() { mem.totalCostLimit = 200 * 1024 * 1024 }
 
     func cached(_ url: String, _ px: CGFloat) -> UIImage? { mem.object(forKey: "\(px)|\(url)" as NSString) }
 
@@ -52,8 +52,26 @@ final class ImagePipeline {
         return img
     }
 
-    func prefetch(_ urls: [String], _ px: CGFloat = 360) {
-        for u in urls where !u.isEmpty { Task.detached(priority: .utility) { _ = await self.load(u, px) } }
+    /// Warms what a Poster of this size shows first (the small 豆瓣 size when there is one).
+    func prefetch(_ urls: [String], _ px: CGFloat = Poster.defaultPx) {
+        for u in urls where !u.isEmpty {
+            let first = Self.variants(u, px).low ?? u
+            Task.detached(priority: .utility) { _ = await self.load(first, px) }
+        }
+    }
+
+    /// 豆瓣 serves every poster at s (270px) / m (540px) / l (1080px) wide, whatever size the API handed us.
+    static func douban(_ url: String, _ size: String) -> String? {
+        guard url.contains("doubanio.com/view/photo/"),
+              let r = url.range(of: #"/view/photo/([sml]_ratio_poster|[sml])/"#, options: .regularExpression) else { return nil }
+        return url.replacingCharacters(in: r, with: "/view/photo/\(size)_ratio_poster/")
+    }
+
+    /// The size worth drawing at `px` (longest side, pixels), plus a small one to show while it loads.
+    static func variants(_ url: String, _ px: CGFloat) -> (low: String?, high: String) {
+        let size = px <= 300 ? "s" : px <= 600 ? "m" : "l"
+        guard let high = douban(url, size) else { return (nil, url) }
+        return (size == "s" ? nil : douban(url, "s"), high)
     }
 
     static func downsample(_ data: Data, _ px: CGFloat) -> UIImage? {
@@ -67,23 +85,29 @@ final class ImagePipeline {
     }
 }
 
+/// Shows the small 豆瓣 size at once, then cross-fades to the sharp one; other hosts load as-is.
 struct Poster: View {
+    static let defaultPx: CGFloat = 540  // longest side: a 112pt-wide 2:3 cell is ~500px tall at 3x
     let url: String
-    var px: CGFloat = 360
+    var px: CGFloat
+    @State private var low: UIImage?
     @State private var image: UIImage?
     @State private var shimmer = false
 
-    init(url: String, px: CGFloat = 360) {
+    init(url: String, px: CGFloat = Poster.defaultPx) {
         self.url = url
         self.px = px
-        _image = State(initialValue: ImagePipeline.shared.cached(url, px))
+        let v = ImagePipeline.variants(url, px)
+        let hi = ImagePipeline.shared.cached(v.high, px)
+        _image = State(initialValue: hi)
+        _low = State(initialValue: hi == nil ? v.low.flatMap { ImagePipeline.shared.cached($0, px) } : nil)
     }
 
     var body: some View {
         ZStack {
-            if let image {
-                Image(uiImage: image).resizable().scaledToFill().transition(.opacity)
-            } else {
+            if let low { Image(uiImage: low).resizable().scaledToFill().transition(.opacity) }
+            if let image { Image(uiImage: image).resizable().scaledToFill().transition(.opacity) }
+            if low == nil && image == nil {
                 Rectangle().fill(Color.card)
                     .overlay(LinearGradient(colors: [.clear, .white.opacity(0.06), .clear], startPoint: .leading, endPoint: .trailing)
                         .offset(x: shimmer ? 200 : -200))
@@ -92,8 +116,12 @@ struct Poster: View {
         }
         .task(id: url) {
             guard image == nil, !url.isEmpty else { return }
-            let img = await ImagePipeline.shared.load(url, px)
-            withAnimation(.easeOut(duration: 0.25)) { image = img }
+            let v = ImagePipeline.variants(url, px)
+            if low == nil, let l = v.low, let img = await ImagePipeline.shared.load(l, px) {
+                withAnimation(.easeOut(duration: 0.25)) { low = img }
+            }
+            guard !Task.isCancelled, let img = await ImagePipeline.shared.load(v.high, px) else { return }
+            withAnimation(.easeInOut(duration: low == nil ? 0.25 : 0.45)) { image = img }
         }
     }
 }

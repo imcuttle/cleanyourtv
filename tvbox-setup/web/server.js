@@ -5,6 +5,7 @@
 //   - /api/*    sources (editable), 苹果CMS proxy, 豆瓣, safety level, downloads
 //   - /hls?u=   relays m3u8/ts for CDNs that send no CORS headers
 //   - /dl/<id>/ downloaded episodes, playable by every device on the LAN
+//   - /media/   本地媒体: scanned local folders as a built-in source (also /api/local/vod for TVBox)
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -29,24 +30,31 @@ fs.mkdirSync(DL, { recursive: true });
 
 const CPUS = (os.availableParallelism ? os.availableParallelism() : os.cpus().length) || 1;
 const WORKERS = Math.max(1, Math.min(Number(process.env.WORKERS) || CPUS, 16));
+const MEDIA_OP = /^(local|hls)/; // rpc ops handled by the media process
 if (cluster.isPrimary && WORKERS > 1) return primary();
 const IS_LEADER = !cluster.isWorker || process.env.TVBOX_LEADER === '1';
+// 本地媒体 (folder scans, poster frames, ffmpeg → HLS) runs in its own process that never serves HTTP,
+// so scanning / transcoding can't take event-loop time from the request workers. Single-process mode does it all.
+const IS_MEDIA = !cluster.isWorker || process.env.TVBOX_MEDIA === '1';
+const MEDIA_ONLY = cluster.isWorker && process.env.TVBOX_MEDIA === '1';
 
-// ---- primary: fork, restart, relay RPC between workers and the leader ----
+// ---- primary: fork, restart, relay RPC between workers and the leader / media process ----
 function primary() {
   cluster.schedulingPolicy = cluster.SCHED_RR; // even spread, also on Windows
-  let leader = null, announced = false, stopping = false;
+  let leader = null, media = null, announced = false, stopping = false;
   const pending = new Map(); // rpc id -> requesting worker
-  const fork = lead => {
-    const w = cluster.fork({ TVBOX_LEADER: lead ? '1' : '0' });
-    w.isLeader = lead;
-    if (lead) leader = w;
+  const fork = role => {
+    const w = cluster.fork({ TVBOX_LEADER: role === 'leader' ? '1' : '0', TVBOX_MEDIA: role === 'media' ? '1' : '0' });
+    w.role = role;
+    if (role === 'leader') leader = w;
+    if (role === 'media') media = w;
     w.on('message', m => {
       if (!m || typeof m !== 'object') return;
       if (m.t === 'rpc') {
-        if (!leader || !leader.isConnected()) return w.send({ t: 'rpc-res', id: m.id, error: '服务重启中，稍后再试' });
+        const to = MEDIA_OP.test(m.op) ? media : leader;
+        if (!to || !to.isConnected()) return w.send({ t: 'rpc-res', id: m.id, error: '服务重启中，稍后再试' });
         pending.set(m.id, w);
-        leader.send(m);
+        to.send(m);
       } else if (m.t === 'rpc-res') {
         const to = pending.get(m.id);
         pending.delete(m.id);
@@ -59,13 +67,15 @@ function primary() {
       }
     });
   };
-  fork(true);
-  for (let i = 1; i < WORKERS; i++) fork(false);
+  fork('leader');
+  for (let i = 1; i < WORKERS; i++) fork('web');
+  fork('media');
   cluster.on('exit', (w, code, sig) => {
     if (stopping) return;
-    if (w.isLeader) leader = null;
-    console.log(`  进程 ${w.process.pid} 退出（${sig || code}），1 秒后重启`);
-    setTimeout(() => fork(w.isLeader), 1000);
+    if (w.role === 'leader') leader = null;
+    if (w.role === 'media') media = null;
+    console.log(`  进程 ${w.process.pid}（${w.role}）退出（${sig || code}），1 秒后重启`);
+    setTimeout(() => fork(w.role), 1000);
   });
   for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { stopping = true; for (const w of Object.values(cluster.workers)) w.kill(); process.exit(0); });
 }
@@ -80,12 +90,13 @@ function banner(n, ffmpeg, dl) {
   console.log('  关闭这个窗口即停止服务。\n');
 }
 
-// ---- RPC: run `op` in the leader (directly when we are the leader) ----
+// ---- RPC: run `op` in the process that owns it (leader, or media for local*/hls*) — directly when that is us ----
 const rpcHandlers = {};
 const rpcWait = new Map();
 let rpcSeq = 0;
+const ownsOp = op => !cluster.isWorker || (MEDIA_OP.test(op) ? IS_MEDIA : IS_LEADER);
 function rpc(op, args, ms = 60000) {
-  if (IS_LEADER) return Promise.resolve().then(() => rpcHandlers[op](args));
+  if (ownsOp(op)) return Promise.resolve().then(() => rpcHandlers[op](args));
   return new Promise((ok, bad) => {
     const id = `${process.pid}:${++rpcSeq}`;
     const t = setTimeout(() => { rpcWait.delete(id); bad(new Error('内部请求超时')); }, ms);
@@ -96,7 +107,7 @@ function rpc(op, args, ms = 60000) {
 if (cluster.isWorker) {
   process.on('message', async m => {
     if (!m || typeof m !== 'object') return;
-    if (m.t === 'rpc' && IS_LEADER) {
+    if (m.t === 'rpc' && ownsOp(m.op)) {
       try { process.send({ t: 'rpc-res', id: m.id, result: await rpcHandlers[m.op](m.args) }); }
       catch (e) { process.send({ t: 'rpc-res', id: m.id, error: e.message || String(e) }); }
     } else if (m.t === 'rpc-res') {
@@ -116,12 +127,16 @@ function reloadState() {
   const c = readJson(STORE, null);
   if (c) config = normalize(c);
   safety = readJson(SAFETY, { level: 'standard', pin: '' });
+  localCfg = readLocalCfg();
   cache.clear();
 }
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon', '.json': 'application/json',
-  '.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.mp4': 'video/mp4', '.m4s': 'video/iso.segment' };
+  '.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.mp4': 'video/mp4', '.m4s': 'video/iso.segment',
+  '.webp': 'image/webp', '.jpeg': 'image/jpeg', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+  '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo', '.flv': 'video/x-flv', '.wmv': 'video/x-ms-wmv',
+  '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.opus': 'audio/ogg' };
 
 const str = v => (v === undefined || v === null ? '' : String(v));
 const clean = h => str(h).replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&[a-z]+;/g, '').trim();
@@ -140,7 +155,7 @@ function defaults() {
 //   adult: 1       hidden unless 安全级别 = 全部
 //   categories: [] TVBox-style whitelist of category names
 function normalize(cfg) {
-  const seen = new Set(), keys = new Set();
+  const seen = new Set(), keys = new Set(['local']); // "local" = the built-in 本地媒体 source
   const sites = [];
   for (const s of cfg.sites || []) {
     if (!s || !/^https?:\/\//.test(str(s.api).trim()) || (s.type !== undefined && Number(s.type) !== 1)) continue;
@@ -178,11 +193,13 @@ const ADULT = /伦理|理论|三级|福利|写真|里番|两性|擦边|成人|�
 const KIDS_CATS = /动漫|动画|儿童|少儿|卡通|亲子|早教|绘本/;
 
 function visibleSites() {
-  if (safety.level === 'kids') return config.sites.filter(s => s.kids);
-  if (safety.level === 'standard') return config.sites.filter(s => !s.adult);
-  return config.sites;
+  const sites = safety.level === 'kids' ? config.sites.filter(s => s.kids)
+    : safety.level === 'standard' ? config.sites.filter(s => !s.adult) : config.sites;
+  const loc = localSite();
+  return loc ? [loc, ...sites] : sites;
 }
 function catAllowed(site, name) {
+  if (site.local) return true; // 本地媒体 filters by its folders' 少儿/成人 flags itself
   if (site.categories && !site.categories.includes(name)) return false;
   if (safety.level === 'all') return true;
   if (ADULT.test(name)) return false;
@@ -237,9 +254,10 @@ function drainMedia() {
     fn().then(ok, bad).finally(() => { mediaRunning--; drainMedia(); });
   }
 }
-function ffmpeg(args, ms) {
+function ffmpeg(args, ms, nice) {
   return new Promise((ok, bad) => {
     const p = spawn(FFMPEG, args, { stdio: 'ignore' });
+    if (nice) try { os.setPriority(p.pid, nice); } catch {} // background work yields to request handling
     const t = setTimeout(() => p.kill('SIGKILL'), ms);
     p.on('exit', code => { clearTimeout(t); code === 0 ? ok() : bad(new Error('ffmpeg exit ' + code)); });
     p.on('error', e => { clearTimeout(t); bad(e); });
@@ -294,6 +312,7 @@ async function cachedText(url) {
   });
 }
 async function cmsGet(site, params, fresh = false, ms = 15000) {
+  if (site.local) return localCms(params, '');
   const u = new URL(site.api);
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.searchParams.set(k, v);
   const key = u.toString();
@@ -324,7 +343,7 @@ function lines(d) {
       const [a, b] = p.split('$');
       const url = (b === undefined ? a : b || '').trim();
       return { name: b === undefined ? '播放' : a, url };
-    }).filter(e => /^https?:\/\//.test(e.url) && /\.(m3u8|mp4)(\?|$)/i.test(e.url)),
+    }).filter(e => (/^https?:\/\//.test(e.url) && /\.(m3u8|mp4)(\?|$)/i.test(e.url)) || e.url.startsWith('/media/')),
   })).filter(l => l.episodes.length);
 }
 
@@ -586,8 +605,9 @@ async function doubanRating(name, year) {
     return out.id ? { found: true, ...out } : { found: false };
   } catch (e) { return { found: false, error: e.message }; }
 }
+// 综艺 / 日本动画 are tags of the tv type on 豆瓣's search_subjects.
 async function doubanHot(type) {
-  const url = `https://movie.douban.com/j/search_subjects?type=${type}&tag=${encodeURIComponent('热门')}&page_limit=30&page_start=0`;
+  const url = `https://movie.douban.com/j/search_subjects?type=${type === 'movie' ? 'movie' : 'tv'}&tag=${encodeURIComponent({ show: '综艺', anime: '日本动画' }[type] || '热门')}&page_limit=30&page_start=0`;
   try {
     const j = await dbJson(url, 3600e3);
     return { list: (j.subjects || []).map(x => ({ id: x.id, name: x.title, pic: x.cover, rate: x.rate, remarks: x.episodes_info || '' })) };
@@ -916,18 +936,462 @@ async function serveDownload(rest, req, res) {
     for (const p of parts) await new Promise((ok, bad) => fs.createReadStream(path.join(dir, p)).on('end', ok).on('error', bad).pipe(res, { end: false }));
     return res.end();
   }
-  const fp = path.join(dir, file);
+  return sendFile(req, res, path.join(dir, file), MIME[path.extname(file)] || 'application/octet-stream');
+}
+
+// A file with Range support (seeking), incl. suffix ranges ("bytes=-N").
+async function sendFile(req, res, fp, type, extra = {}) {
   const st = await fsp.stat(fp).catch(() => null);
-  if (!st) return send(res, 404, 'not found', 'text/plain');
-  const type = MIME[path.extname(fp)] || 'application/octet-stream';
-  const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
-  if (range) {
-    const start = range[1] ? Number(range[1]) : 0, end = range[2] ? Number(range[2]) : st.size - 1;
-    res.writeHead(206, { 'Content-Type': type, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes' });
-    return fs.createReadStream(fp, { start, end }).pipe(res);
+  if (!st || !st.isFile()) return send(res, 404, 'not found', 'text/plain');
+  const head = { 'Content-Type': type, 'Accept-Ranges': 'bytes', ...extra };
+  const pipe = rs => { rs.on('error', () => res.destroy()); res.on('close', () => rs.destroy()); rs.pipe(res); };
+  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  if (m && (m[1] || m[2])) {
+    const start = m[1] ? Number(m[1]) : Math.max(0, st.size - Number(m[2]));
+    const end = m[1] && m[2] ? Math.min(Number(m[2]), st.size - 1) : st.size - 1;
+    if (start >= st.size || start > end) { res.writeHead(416, { 'Content-Range': `bytes */${st.size}` }); return res.end(); }
+    res.writeHead(206, { ...head, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Content-Length': end - start + 1 });
+    return req.method === 'HEAD' ? res.end() : pipe(fs.createReadStream(fp, { start, end }));
   }
-  res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Accept-Ranges': 'bytes' });
-  fs.createReadStream(fp).pipe(res);
+  res.writeHead(200, { ...head, 'Content-Length': st.size });
+  return req.method === 'HEAD' ? res.end() : pipe(fs.createReadStream(fp));
+}
+
+// ======================= 本地媒体（内置点播源） =======================
+// Folders on this machine or a mounted NAS → one built-in 苹果CMS source (key "local"). Each configured
+// folder is a category (with `sub`, each of its first-level subfolders is one). Inside, a folder of
+// numbered videos becomes a series; any other video is a title of its own (`flat`: always one per file).
+// Posters: poster/folder/cover or a same-name image, else an ffmpeg frame; an .nfo gives title/plot/cast.
+// Files are reachable only by opaque ids from the scan index, so nothing else on disk can be requested.
+// The media process (IS_MEDIA) scans and writes data/local-index.json; the web workers re-read it when it changes.
+// Also served as a real CMS API at /api/local/vod (absolute urls, original files) for TVBox/FongMi on the TV.
+const LOCAL_CFG = path.join(DATA, 'local.json');
+const LOCAL_INDEX = path.join(DATA, 'local-index.json');
+const TRANS = path.join(DATA, 'transcode');
+fs.mkdirSync(TRANS, { recursive: true });
+const MEDIA_EXT = new Set(['mp4', 'm4v', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'f4v', 'ts', 'm2ts', 'mts', 'webm', 'rmvb', 'rm',
+  'mpg', 'mpeg', 'vob', '3gp', 'ogv', 'divx', 'asf', 'mp3', 'flac', 'm4a', 'aac', 'wav', 'ogg', 'opus', 'ape', 'wma']);
+// What a browser <video> plays as is; the rest is remuxed (or transcoded) to HLS by ffmpeg on demand.
+const BROWSER_EXT = new Set(['mp4', 'm4v', 'webm', 'mov', 'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus']);
+const LOCAL_DEFAULT = { enabled: true, name: '本地媒体', exts: ['mp4', 'mkv', 'avi', 'mov', 'm4v', 'webm', 'flv', 'wmv', 'rmvb'], rescan: 60, dirs: [] };
+const SKIP_NAME = /^(\.|node_modules$|@eaDir$|#recycle$|\$recycle\.bin$|system volume information$|lost\+found$|samples?$|extras?$|featurettes$)/i;
+const SKIP_SAMPLE = /(^|[\s._-])sample\.\w+$/i;
+const IMG_RE = /\.(jpe?g|png|webp)$/i;
+const POSTERS = ['poster', 'folder', 'cover', 'movie', 'show', 'fanart', 'thumb', 'landscape'];
+
+function normLocal(c) {
+  c = c && typeof c === 'object' ? c : {};
+  const extList = Array.isArray(c.exts) ? c.exts : str(c.exts).split(/[\s,，;；]+/);
+  const exts = [...new Set(extList.map(e => str(e).trim().toLowerCase().replace(/^\./, '')).filter(e => MEDIA_EXT.has(e)))];
+  const dirs = [];
+  for (const d of Array.isArray(c.dirs) ? c.dirs : []) {
+    let p = str(d && d.path).trim();
+    if (p === '~' || p.startsWith('~/')) p = path.join(os.homedir(), p.slice(1));
+    if (!p || !path.isAbsolute(p)) continue;
+    dirs.push({ path: path.resolve(p), name: str(d.name).trim().slice(0, 30), ...(Number(d.sub) ? { sub: 1 } : {}),
+      ...(Number(d.flat) ? { flat: 1 } : {}), ...(Number(d.kids) ? { kids: 1 } : {}), ...(Number(d.adult) ? { adult: 1 } : {}) });
+  }
+  const rescan = Math.round(Number(c.rescan ?? LOCAL_DEFAULT.rescan));
+  return { enabled: c.enabled !== false, name: str(c.name).trim().slice(0, 20) || LOCAL_DEFAULT.name,
+    exts: exts.length ? exts : LOCAL_DEFAULT.exts, rescan: Math.max(0, Math.min(rescan || 0, 1440)), dirs };
+}
+function readLocalCfg() { return normLocal(readJson(LOCAL_CFG, LOCAL_DEFAULT)); }
+let localCfg = readLocalCfg();
+
+let localSnap = { mtime: -1, cats: [], items: [], byItem: new Map(), byFile: new Map(), catById: new Map() };
+function localIndex() {
+  let mtime = -1;
+  try { mtime = fs.statSync(LOCAL_INDEX).mtimeMs; } catch {}
+  if (mtime !== localSnap.mtime) {
+    const idx = readJson(LOCAL_INDEX, {}) || {};
+    const cats = idx.cats || [], items = idx.items || [];
+    const byItem = new Map(), byFile = new Map();
+    for (const it of items) { byItem.set(it.id, it); for (const f of it.files) byFile.set(f.id, { ...f, item: it }); }
+    localSnap = { mtime, cats, items, byItem, byFile, catById: new Map(cats.map(c => [c.id, c])) };
+  }
+  return localSnap;
+}
+// 儿童: only folders marked 少儿; 标准: everything but folders marked 成人; 全部: all.
+const localCatOk = c => !!c && (safety.level === 'all' || (safety.level === 'kids' ? !!c.kids && !c.adult : !c.adult));
+function localSite() {
+  if (!localCfg.enabled || !localCfg.dirs.length || !localIndex().cats.some(localCatOk)) return null;
+  return { key: 'local', name: localCfg.name, type: 1, api: '', local: 1, ...(safety.level === 'kids' ? { kids: 1 } : {}) };
+}
+
+const LOCAL_PAGE = 30;
+const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB';
+// base '' = this web app (relative urls, HLS for what browsers can't play); 'http://host' = external CMS clients.
+function localCms(params, base) {
+  const snap = localIndex();
+  const cats = localCfg.enabled ? snap.cats.filter(localCatOk) : [];
+  const ok = new Set(cats.map(c => c.id));
+  const ids = str(params.ids).split(',').map(s => s.trim()).filter(Boolean);
+  let list;
+  if (ids.length) list = ids.map(i => snap.byItem.get(i)).filter(it => it && ok.has(it.cat));
+  else {
+    const t = str(params.t), wd = str(params.wd).trim().toLowerCase();
+    list = snap.items.filter(it => ok.has(it.cat) && (!t || it.cat === t)
+      && (!wd || it.name.toLowerCase().includes(wd) || str(it.actor).toLowerCase().includes(wd)));
+  }
+  const pg = Math.max(1, Number(params.pg) || 1);
+  const page = ids.length ? list : list.slice((pg - 1) * LOCAL_PAGE, pg * LOCAL_PAGE);
+  return { code: 1, msg: '数据列表', page: pg, pagecount: Math.max(1, Math.ceil(list.length / LOCAL_PAGE)), limit: String(LOCAL_PAGE),
+    total: list.length, class: cats.map(c => ({ type_id: c.id, type_pid: 0, type_name: c.name })),
+    list: page.map(it => localVod(it, snap.catById.get(it.cat)?.name || '', base)) };
+}
+function localVod(it, type, base) {
+  const url = f => (base || BROWSER_EXT.has(f.ext) || !FFMPEG) ? `${base}/media/f/${f.id}.${f.ext}` : `/media/h/${f.id}/index.m3u8`;
+  const size = it.files.reduce((n, f) => n + f.size, 0);
+  return { vod_id: it.id, vod_name: it.name, vod_pic: (it.pic || FFMPEG) ? `${base}/media/p/${it.id}` : '', type_id: it.cat, type_name: type,
+    vod_year: it.year || '', vod_actor: it.actor || '', vod_director: it.director || '',
+    vod_remarks: it.files.length > 1 ? `${it.files.length}集` : fmtBytes(size),
+    vod_content: it.plot || `${it.files.length} 个文件 · ${fmtBytes(size)}`,
+    vod_time: new Date(it.mtime).toISOString().replace('T', ' ').slice(0, 19),
+    vod_play_from: '本地', vod_play_url: it.files.map(f => `${f.name}$${url(f)}`).join('#') };
+}
+
+// ---- scanning (media process) ----
+const natural = (a, b) => a.localeCompare(b, 'zh-CN', { numeric: true, sensitivity: 'base' });
+const hashId = (s, n) => crypto.createHash('sha1').update(s).digest('hex').slice(0, n);
+const noDelim = s => str(s).replace(/[$#]+/g, ' ').trim(); // $ and # separate episodes in 苹果CMS play lists
+const SEASON = /^(?:season|series|s)[\s._-]*(\d{1,2})$|^第\s*([一二三四五六七八九十\d]+)\s*季$/i;
+const EP_MARK = /S\d{1,2}[\s._-]?E\d{1,3}|第\s*\d+\s*[集话話期]|(^|[^a-z])EP?[\s._-]?\d{1,3}(\D|$)/i;
+const RELEASE = /\s(2160p|1080[pi]|720p|480p|4k|uhd|blu-?ray|bdrip|web-?dl|webrip|hdtv|hdrip|dvdrip|remux|x26[45]|h\.?26[45]|hevc|avc|10bit|hdr|dts|aac|ac3|atmos)\b.*$/i;
+
+const CODE_PROJECT = /^(package\.json|tsconfig(\..+)?\.json|deno\.jsonc?|pnpm-lock\.yaml|yarn\.lock|package-lock\.json)$/i;
+const AMBIGUOUS_EXT = new Set(['ts', 'mts']);
+// All scan I/O goes through one gate: many requests in flight hide NAS (SMB/NFS) latency, but not unbounded.
+const IO_LIMIT = Math.max(8, Math.min(Number(process.env.SCAN_IO) || 24, 64));
+let ioBusy = 0; const ioWait = [];
+async function io(fn) {
+  if (ioBusy >= IO_LIMIT) await new Promise(ok => ioWait.push(ok));
+  ioBusy++;
+  try { return await fn(); } finally { ioBusy--; ioWait.shift()?.(); }
+}
+// MPEG-TS = 188-byte packets (192 with a 4-byte timestamp, m2ts) that each start with sync byte 0x47.
+async function isMpegTs(file) {
+  let fh;
+  try {
+    fh = await io(() => fsp.open(file));
+    const b = Buffer.alloc(580);
+    const { bytesRead } = await io(() => fh.read(b, 0, b.length, 0));
+    const at = (o, step) => [0, 1, 2].every(i => o + i * step < bytesRead && b[o + i * step] === 0x47);
+    return at(0, 188) || at(4, 192);
+  } catch { return false; } finally { await fh?.close().catch(() => {}); }
+}
+
+async function walkMedia(dir, exts, out, deep, depth = 0) {
+  let ents;
+  try { ents = await io(() => fsp.readdir(dir, { withFileTypes: true })); } catch { return; }
+  const g = { dir, files: [], images: [], nfos: [] }, subs = [], maybe = [];
+  for (const e of ents) {
+    if (SKIP_NAME.test(e.name)) continue;
+    if (e.isDirectory()) { subs.push(e.name); continue; } // symlinked folders are not followed (no loops)
+    if (!e.isFile() && !e.isSymbolicLink()) continue;
+    const ext = path.extname(e.name).slice(1).toLowerCase();
+    if (CODE_PROJECT.test(e.name)) return; // a source tree, not a media folder: .ts here is TypeScript
+    if (exts.has(ext)) { if (!SKIP_SAMPLE.test(e.name)) (AMBIGUOUS_EXT.has(ext) ? maybe : g.files).push(e.name); }
+    else if (IMG_RE.test(e.name)) g.images.push(e.name);
+    else if (/\.nfo$/i.test(e.name)) g.nfos.push(e.name);
+  }
+  // .ts / .mts are also TypeScript: keep only files that really are MPEG transport streams.
+  for (const f of await Promise.all(maybe.map(async f => (await isMpegTs(path.join(dir, f))) ? f : ''))) if (f) g.files.push(f);
+  if (g.files.length) out.push(g);
+  if (deep && depth < 8) await Promise.all(subs.map(s => walkMedia(path.join(dir, s), exts, out, deep, depth + 1)));
+}
+
+function titleOf(raw) {
+  let s = raw.replace(/^(\s*(\[[^\]]*\]|【[^】]*】))+\s*/, '');
+  if (!/\s/.test(s) && /[._]/.test(s)) s = s.replace(/[._]+/g, ' ');
+  let year = '';
+  const m = /^(.+)[\s(\[（]+((?:19|20)\d{2})(?=$|[\s)\]）])/.exec(s);
+  if (m && m[1].trim()) { s = m[1]; year = m[2]; }
+  s = s.replace(RELEASE, '').replace(/[\s(\[（-]+$/, '').trim();
+  return { name: noDelim(s) || noDelim(raw), year };
+}
+function commonAffix(bases) {
+  let pre = bases[0], suf = bases[0];
+  for (const b of bases) {
+    while (pre && !b.startsWith(pre)) pre = pre.slice(0, -1);
+    while (suf && !b.endsWith(suf)) suf = suf.slice(1);
+  }
+  pre = pre.replace(/\d+$/, ''); suf = suf.replace(/^\d+/, ''); // never cut into the episode number
+  if (pre.length + suf.length >= Math.min(...bases.map(b => b.length))) suf = '';
+  return [pre, suf];
+}
+// Episodes: most names carry a marker (S01E02, 第3集, EP04), or the part that differs is a run of
+// close numbers. "ABC-123 / ABC-456" in one folder are separate titles, not episodes.
+function isSeries(bases) {
+  if (bases.filter(b => EP_MARK.test(b)).length * 2 >= bases.length) return true;
+  const [pre, suf] = commonAffix(bases);
+  const nums = bases.map(b => /^\D{0,2}(\d{1,3})(?!\d)/.exec(b.slice(pre.length, b.length - suf.length)));
+  if (nums.some(n => !n)) return false;
+  const v = nums.map(n => Number(n[1]));
+  return Math.max(...v) - Math.min(...v) < bases.length * 2;
+}
+function epNames(bases) {
+  const se = bases.map(b => /S(\d{1,2})[\s._-]?E(\d{1,3})/i.exec(b));
+  if (se.every(Boolean)) {
+    const multi = new Set(se.map(m => +m[1])).size > 1;
+    return se.map(m => multi ? `S${+m[1]}E${+m[2]}` : `第${+m[2]}集`);
+  }
+  const [pre, suf] = commonAffix(bases);
+  return bases.map(b => {
+    const x = b.slice(pre.length, b.length - suf.length).replace(/^[\s._\-–—]+|[\s._\-–—]+$/g, '');
+    const n = /^(?:EP?|第)?\s*(\d{1,4})\s*[集话話期]?$/i.exec(x);
+    return noDelim(n ? `第${+n[1]}集` : x || b);
+  });
+}
+function pickImage(images, base) {
+  const named = images.map(i => [i, i.toLowerCase().replace(IMG_RE, '')]);
+  if (base) {
+    const b = base.toLowerCase();
+    return (named.find(([, n]) => n === b) || named.find(([, n]) => [b + '-poster', b + '.poster', b + '-thumb', b + '-fanart'].includes(n)) || [''])[0];
+  }
+  for (const p of POSTERS) { const hit = named.find(([, n]) => n === p); if (hit) return hit[0]; }
+  return named.length ? named[0][0] : '';
+}
+async function readNfo(file) {
+  let x;
+  try {
+    const fh = await io(() => fsp.open(file));
+    try { const b = Buffer.alloc(256e3); const { bytesRead } = await io(() => fh.read(b, 0, b.length, 0)); x = b.subarray(0, bytesRead).toString('utf8'); }
+    finally { await fh.close(); }
+  } catch { return null; }
+  const tag = t => { const m = new RegExp(`<${t}>([\\s\\S]*?)</${t}>`, 'i').exec(x); return m ? clean(m[1].replace(/<!\[CDATA\[|\]\]>/g, '')) : ''; };
+  const actors = [...x.matchAll(/<actor>[\s\S]*?<name>([\s\S]*?)<\/name>/gi)].map(m => noDelim(clean(m[1]))).filter(Boolean);
+  const directors = [...x.matchAll(/<director[^>]*>([\s\S]*?)<\/director>/gi)].map(m => noDelim(clean(m[1]))).filter(Boolean);
+  return { title: noDelim(tag('title')), plot: tag('plot') || tag('outline'), year: (/\d{4}/.exec(tag('year') || tag('premiered')) || [''])[0],
+    actor: [...new Set(actors)].slice(0, 30).join(','), director: [...new Set(directors)].join(',') };
+}
+
+// One folder's media files → titles.
+async function groupItems(g, root, cat, flat) {
+  const stats = await Promise.all(g.files.map(f => io(() => fsp.stat(path.join(g.dir, f))).catch(() => null)));
+  const entries = g.files.map((f, i) => ({ f, st: stats[i] })).filter(x => x.st && x.st.isFile()).sort((a, b) => natural(a.f, b.f));
+  if (!entries.length) return [];
+  const bases = entries.map(x => x.f.replace(/\.[^.]+$/, ''));
+  const rec = (x, name) => ({ id: hashId('f|' + path.join(g.dir, x.f), 16), path: path.join(g.dir, x.f),
+    ext: path.extname(x.f).slice(1).toLowerCase(), size: x.st.size, name });
+  const nfoFor = base => { const n = g.nfos.find(n => n.toLowerCase() === base.toLowerCase() + '.nfo'); return n ? readNfo(path.join(g.dir, n)) : null; };
+  const make = (key, t, nfo, files, pic, mtime) => ({ id: hashId('i|' + key, 12), name: nfo?.title || t.name, year: nfo?.year || t.year, cat,
+    pic: pic ? path.join(g.dir, pic) : '', plot: nfo?.plot || '', actor: nfo?.actor || '', director: nfo?.director || '', mtime, files });
+  // Files lying directly in a category folder are always titles of their own.
+  if (g.dir !== root && !flat && (entries.length === 1 || isSeries(bases))) {
+    const folder = path.basename(g.dir), season = SEASON.exec(folder);
+    const t = titleOf(season ? path.basename(path.dirname(g.dir)) : folder);
+    if (season) t.name += ` 第${season[1] || season[2]}季`;
+    const nfoName = g.nfos.find(n => /^(tvshow|movie)\.nfo$/i.test(n)) || (g.nfos.length === 1 ? g.nfos[0] : '');
+    const nfo = season ? null : nfoName ? await readNfo(path.join(g.dir, nfoName)) : null;
+    const names = entries.length === 1 ? ['正片'] : epNames(bases);
+    return [make(g.dir, t, nfo, entries.map((x, i) => rec(x, names[i])), pickImage(g.images, ''), Math.max(...entries.map(x => x.st.mtimeMs)))];
+  }
+  return Promise.all(entries.map(async (x, i) => make(path.join(g.dir, x.f), titleOf(bases[i]), await nfoFor(bases[i]), [rec(x, '正片')],
+    pickImage(g.images, bases[i]), x.st.mtimeMs)));
+}
+
+let localScan = { running: false, at: 0, ms: 0, items: 0, files: 0, dirs: [], error: '' };
+let scanQueued = false;
+async function scanLocal() {
+  if (localScan.running) { scanQueued = true; return; }
+  const t0 = Date.now(), cfg = localCfg, exts = new Set(cfg.exts);
+  const cats = new Map(), items = new Map(), dirs = [];
+  localScan = { ...localScan, running: true, dirs, error: '' };
+  try {
+    // Every configured folder and category root is scanned in parallel (I/O is gated by io()); results are
+    // merged afterwards in configuration order so the outcome doesn't depend on which finished first.
+    const perDir = await Promise.all(cfg.dirs.map(async d => {
+      const ds = { path: d.path, items: 0, files: 0, error: '' };
+      dirs.push(ds);
+      const st = await io(() => fsp.stat(d.path)).catch(() => null);
+      if (!st || !st.isDirectory()) { ds.error = '目录不存在或没有权限'; return []; }
+      const own = d.name || path.basename(d.path) || d.path;
+      const roots = [];
+      if (d.sub) {
+        for (const e of await io(() => fsp.readdir(d.path, { withFileTypes: true })).catch(() => [])) {
+          if (e.isDirectory() && !SKIP_NAME.test(e.name)) roots.push({ dir: path.join(d.path, e.name), cat: e.name, deep: true });
+        }
+        roots.push({ dir: d.path, cat: own, deep: false }); // loose files in the folder itself
+      } else roots.push({ dir: d.path, cat: own, deep: true });
+      return Promise.all(roots.map(async r => {
+        const groups = [];
+        await walkMedia(r.dir, exts, groups, r.deep);
+        groups.sort((a, b) => natural(a.dir, b.dir));
+        const found = (await Promise.all(groups.map(g => groupItems(g, r.dir, hashId('c|' + r.cat, 8), d.flat)))).flat();
+        for (const it of found) { ds.items++; ds.files += it.files.length; }
+        return { d, r, found };
+      }));
+    }));
+    for (const res of perDir.flat()) {
+      if (!res.found.length) continue;
+      const { d, r } = res;
+      // The same name from several folders is one category: 成人 if any of them is, 少儿 only if all are.
+      const id = hashId('c|' + r.cat, 8);
+      const c = cats.get(id) || { id, name: r.cat, adult: 0, kids: 1 };
+      if (d.adult) c.adult = 1;
+      if (!d.kids) c.kids = 0;
+      cats.set(id, c);
+      for (const it of res.found) if (!items.has(it.id)) items.set(it.id, it);
+    }
+    const list = [...items.values()].sort((a, b) => b.mtime - a.mtime);
+    const used = new Set(list.map(it => it.cat));
+    fs.writeFileSync(LOCAL_INDEX + '.tmp', JSON.stringify({ at: Date.now(), cats: [...cats.values()].filter(c => used.has(c.id)), items: list }));
+    fs.renameSync(LOCAL_INDEX + '.tmp', LOCAL_INDEX);
+    localSnap.mtime = -2;
+    localScan = { running: false, at: Date.now(), ms: Date.now() - t0, items: list.length, files: list.reduce((n, it) => n + it.files.length, 0), dirs, error: '' };
+  } catch (e) {
+    localScan = { ...localScan, running: false, at: Date.now(), error: e.message || String(e) };
+  }
+  if (scanQueued) { scanQueued = false; scanLocal(); }
+}
+const localStatus = () => ({ ...localScan, dirs: localScan.dirs.map(d => ({ ...d })) });
+rpcHandlers.localStatus = () => localStatus();
+rpcHandlers.localScan = () => { if (localCfg.enabled) scanLocal(); return localStatus(); };
+rpcHandlers.localSave = b => {
+  localCfg = normLocal(b);
+  writeJson(LOCAL_CFG, localCfg);
+  broadcastReload();
+  if (localCfg.enabled) scanLocal();
+  return { cfg: localCfg, status: localStatus() };
+};
+if (IS_MEDIA) {
+  setTimeout(() => { if (localCfg.enabled && localCfg.dirs.length) scanLocal(); }, 1500).unref();
+  setInterval(() => {
+    if (localCfg.enabled && localCfg.rescan && localCfg.dirs.length && !localScan.running
+      && Date.now() - localScan.at > localCfg.rescan * 60e3) scanLocal();
+  }, 60e3).unref();
+}
+
+// ---- posters: an ffmpeg frame when the folder has no image (media process, cached in data/thumbs) ----
+const thumbFail = new Map();
+rpcHandlers.localThumb = ({ id }) => localThumb(id);
+function localThumb(id) {
+  const it = localIndex().byItem.get(id);
+  if (!it || !FFMPEG) return null;
+  const file = path.join(THUMBS, `local-${id}.jpg`);
+  if (fs.existsSync(file)) return file;
+  if (Date.now() - (thumbFail.get(id) || 0) < 3600e3) return null;
+  const key = 'lt|' + id;
+  if (!mediaJobs.has(key)) {
+    const tmp = file.replace(/\.jpg$/, '.tmp.jpg');
+    // Skip the opening (logos / black); short clips fall back to the start.
+    const args = ss => ['-hide_banner', '-loglevel', 'error', '-y', ...(ss ? ['-ss', String(ss)] : []), '-i', it.files[0].path,
+      '-map', '0:v:0', '-vf', 'thumbnail=30,scale=480:-2', '-frames:v', '1', '-q:v', '5', tmp];
+    mediaJobs.set(key, limited(() => ffmpeg(args(90), 40000, 10).then(() => fsp.stat(tmp)).catch(() => ffmpeg(args(0), 40000, 10)))
+      .then(() => fsp.rename(tmp, file)).then(() => file, () => { thumbFail.set(id, Date.now()); fsp.rm(tmp, { force: true }).catch(() => {}); return null; })
+      .finally(() => mediaJobs.delete(key)));
+  }
+  return mediaJobs.get(key);
+}
+
+// ---- browser playback of mkv/avi/rmvb…: ffmpeg → HLS in data/transcode/<file id>/ (media process) ----
+// H.264 video is copied (fast, about disk speed); anything else is encoded to H.264. Audio → AAC stereo.
+// The playlist grows while ffmpeg runs (EVENT); a finished one (.done) is kept a day after last use.
+const hlsJobs = new Map(), hlsFail = new Map();
+const HLS_MAX = Math.max(2, Math.min(4, Math.floor(CPUS / 3)));
+const HLS_IDLE = 5 * 60e3;
+function probeVideo(file) {
+  return new Promise(ok => {
+    let err = '';
+    const p = spawn(FFMPEG, ['-hide_banner', '-i', file], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const t = setTimeout(() => p.kill('SIGKILL'), 20000);
+    p.stderr.on('data', d => { if (err.length < 64e3) err += d; });
+    p.on('error', () => { clearTimeout(t); ok({ copy: false }); });
+    p.on('close', () => {
+      clearTimeout(t);
+      const line = err.split('\n').find(l => /Stream #.*Video:/.test(l) && !/attached pic/.test(l)) || '';
+      ok({ copy: /Video: h264\b/.test(line) && !/high 10|10le|4:2:2|4:4:4|yuv42[24]/i.test(line) });
+    });
+  });
+}
+function startHls(f) {
+  const dir = path.join(TRANS, f.id);
+  if (hlsJobs.size >= HLS_MAX) [...hlsJobs.values()].sort((a, b) => a.last - b.last)[0].stop();
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const j = { last: Date.now(), proc: null, stopped: false, exited: false, error: '' };
+  j.stop = () => {
+    j.stopped = true; j.proc?.kill('SIGKILL');
+    if (hlsJobs.get(f.id) === j) hlsJobs.delete(f.id);
+    fsp.rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+  };
+  hlsJobs.set(f.id, j);
+  j.ready = (async () => {
+    const v = await probeVideo(f.path);
+    if (j.stopped) return;
+    const vargs = v.copy ? ['-c:v', 'copy'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p', '-force_key_frames', 'expr:gte(t,n_forced*6)'];
+    const p = j.proc = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', f.path,
+      '-map', '0:V:0?', '-map', '0:a:0?', ...vargs, '-c:a', 'aac', '-ac', '2', '-b:a', '192k',
+      '-f', 'hls', '-hls_time', '6', '-hls_list_size', '0', '-hls_playlist_type', 'event',
+      '-hls_segment_filename', path.join(dir, '%05d.ts'), path.join(dir, 'index.m3u8')], { stdio: ['ignore', 'ignore', 'pipe'] });
+    try { os.setPriority(p.pid, 10); } catch {} // yields to the request workers
+    p.stderr.on('data', d => { j.error = (j.error + d).slice(-300); });
+    p.on('error', e => { j.error = e.message; j.exited = true; });
+    p.on('exit', code => {
+      j.exited = true;
+      if (hlsJobs.get(f.id) === j) hlsJobs.delete(f.id);
+      if (j.stopped) return;
+      if (code === 0) fs.writeFileSync(path.join(dir, '.done'), '');
+      else hlsFail.set(f.id, { at: Date.now(), error: j.error.trim() || 'exit ' + code });
+    });
+    // Ready once the first segment is listed (or ffmpeg gave up).
+    for (let i = 0; i < 200 && !j.exited && !j.stopped; i++) {
+      if (/\.ts\s*$/m.test(await fsp.readFile(path.join(dir, 'index.m3u8'), 'utf8').catch(() => ''))) return;
+      await new Promise(ok => setTimeout(ok, 300));
+    }
+  })();
+  return j;
+}
+rpcHandlers.hlsOpen = async ({ id }) => {
+  const f = localIndex().byFile.get(id);
+  if (!f || !FFMPEG) return { error: '找不到文件' };
+  const dir = path.join(TRANS, id), done = path.join(dir, '.done');
+  if (fs.existsSync(done)) { const now = new Date(); fsp.utimes(done, now, now).catch(() => {}); return { ok: true }; }
+  const fail = hlsFail.get(id);
+  if (!hlsJobs.has(id) && fail && Date.now() - fail.at < 10 * 60e3) return { error: 'ffmpeg 转换失败：' + fail.error };
+  const j = hlsJobs.get(id) || startHls(f);
+  j.last = Date.now();
+  await j.ready;
+  if (fs.existsSync(path.join(dir, 'index.m3u8'))) return { ok: true };
+  return { error: 'ffmpeg 转换失败：' + (j.error.trim() || '没有输出') };
+};
+if (IS_MEDIA) {
+  // Unfinished output from an earlier run can't be resumed.
+  for (const d of fs.readdirSync(TRANS)) if (!fs.existsSync(path.join(TRANS, d, '.done'))) fs.rmSync(path.join(TRANS, d), { recursive: true, force: true });
+  setInterval(async () => {
+    for (const j of [...hlsJobs.values()]) if (Date.now() - j.last > HLS_IDLE) j.stop();
+    for (const d of await fsp.readdir(TRANS).catch(() => [])) {
+      const st = await fsp.stat(path.join(TRANS, d, '.done')).catch(() => null);
+      if (st && Date.now() - st.mtimeMs > 86400e3) fsp.rm(path.join(TRANS, d), { recursive: true, force: true }).catch(() => {});
+    }
+  }, 60e3).unref();
+}
+
+// /media/p/<item>  poster · /media/f/<file>.<ext>  original file · /media/h/<file>/index.m3u8  HLS for browsers
+async function serveMedia(rest, req, res) {
+  const [kind, raw = '', file = ''] = rest.split('/');
+  const snap = localIndex();
+  const visible = it => it && localCfg.enabled && localCatOk(snap.catById.get(it.cat));
+  if (kind === 'p') {
+    const it = snap.byItem.get(raw);
+    if (!visible(it)) return send(res, 404, 'not found', 'text/plain');
+    const cacheH = { 'Cache-Control': 'max-age=86400' };
+    if (it.pic) return sendFile(req, res, it.pic, MIME[path.extname(it.pic).toLowerCase()] || 'image/jpeg', cacheH);
+    const thumb = await rpc('localThumb', { id: it.id }, 90000).catch(() => null);
+    return thumb ? sendFile(req, res, thumb, 'image/jpeg', cacheH) : send(res, 404, 'no poster', 'text/plain');
+  }
+  const f = snap.byFile.get(raw.replace(/\.\w+$/, ''));
+  if (!f || !visible(f.item)) return send(res, 404, 'not found', 'text/plain');
+  if (kind === 'f') return sendFile(req, res, f.path, MIME['.' + f.ext] || 'application/octet-stream');
+  if (kind === 'h' && file === 'index.m3u8') {
+    const r = await rpc('hlsOpen', { id: f.id }, 90000);
+    if (r.error) return send(res, 500, r.error, 'text/plain; charset=utf-8');
+    const text = await fsp.readFile(path.join(TRANS, f.id, 'index.m3u8'), 'utf8');
+    res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' });
+    return res.end(text);
+  }
+  if (kind === 'h' && /^\d{5}\.ts$/.test(file)) return sendFile(req, res, path.join(TRANS, f.id, file), 'video/mp2t');
+  send(res, 404, 'not found', 'text/plain');
 }
 
 // ======================= HTTP =======================
@@ -981,6 +1445,19 @@ async function api(route, q, res, req) {
   if (route === 'recognize' && write) return send(res, 200, await recognize((await readBody(req)).text));
   if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ffmpeg: !!FFMPEG });
 
+  // ---- 本地媒体: folders, scan, and the CMS API for TVBox / FongMi ----
+  if (route === 'local') {
+    if (!write) return send(res, 200, { cfg: localCfg, status: await rpc('localStatus'), exts: [...MEDIA_EXT], ffmpeg: !!FFMPEG,
+      urls: lanIps().map(ip => `http://${ip}:${PORT}/api/local/vod`) });
+    if (!pinOk(req)) return needPin(res);
+    return send(res, 200, await rpc('localSave', await readBody(req)));
+  }
+  if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
+  if (route === 'local/vod') {
+    const host = /^([\w-]+\.)*[\w-]+(:\d+)?$|^\[[\da-f:]+\](:\d+)?$/i.test(req.headers.host || '') ? req.headers.host : `${lanIps()[0] || '127.0.0.1'}:${PORT}`;
+    return send(res, 200, localCms(Object.fromEntries(q), `http://${host}`));
+  }
+
   // ---- live: speed test, raw text editing, covers ----
   if (route === 'checklive') return send(res, 200, await checkLive(q.get('url') || '', q.get('name') || ''));
   if (route === 'live/raw') {
@@ -1009,7 +1486,7 @@ async function api(route, q, res, req) {
 
   // ---- 豆瓣 ----
   if (route === 'douban/rating') return send(res, 200, await rpc('dbRating', { name: q.get('name') || '', year: q.get('year') || '' }));
-  if (route === 'douban/hot') return send(res, 200, safety.level === 'kids' ? { list: [] } : await rpc('dbHot', { type: q.get('type') === 'movie' ? 'movie' : 'tv' }));
+  if (route === 'douban/hot') return send(res, 200, safety.level === 'kids' ? { list: [] } : await rpc('dbHot', { type: ['movie', 'show', 'anime'].includes(q.get('type')) ? q.get('type') : 'tv' }));
   if (route === 'douban/charts') {
     if (safety.level === 'kids') return send(res, 200, { off: true });
     return send(res, 200, { ...CHARTS, genres: CHARTS.genres.filter(g => !g.adult || safety.level === 'all'), years: chartYears() });
@@ -1084,7 +1561,7 @@ async function api(route, q, res, req) {
     const it = item(site, d);
     if (!itemOk(site, it)) return send(res, 403, { error: '当前安全级别下不可看' });
     return send(res, 200, { ...it, blurb: clean(d.vod_content), actor: str(d.vod_actor), director: str(d.vod_director),
-      actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: lines(d) });
+      actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: lines(d), ...(site.local ? { local: true } : {}) });
   }
   send(res, 404, { error: 'unknown api' });
 }
@@ -1293,6 +1770,7 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/hls') return await relay(u.searchParams.get('u') || '', res, req);
     if (u.pathname === '/img') return await imageProxy(u.searchParams.get('u') || '', res);
     if (u.pathname.startsWith('/dl/')) return await serveDownload(u.pathname.slice(4), req, res);
+    if (u.pathname.startsWith('/media/')) return await serveMedia(u.pathname.slice(7), req, res);
     return await serveStatic(decodeURIComponent(u.pathname), req, res);
   } catch (e) {
     if (res.destroyed) return;            // the browser already gave up (page switched)
@@ -1302,7 +1780,7 @@ const server = http.createServer(async (req, res) => {
 });
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
-server.listen(PORT, HOST, () => {
+if (!MEDIA_ONLY) server.listen(PORT, HOST, () => {
   if (!cluster.isWorker) banner(1, !!FFMPEG, DL);
   if (IS_LEADER) {
     pump();

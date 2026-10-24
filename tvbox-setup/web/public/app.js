@@ -5,9 +5,33 @@ const view = $('#view');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // 豆瓣's image CDN refuses requests without its Referer → go through the server's /img relay.
 const img = u => /^https?:\/\/[^/]*doubanio\.com\//.test(u || '') ? '/img?u=' + encodeURIComponent(u) : (u || '');
-const bg = url => url ? `background-image:url('${esc(img(url)).replace(/'/g, '%27')}')` : '';
+const cssUrl = u => `url('${esc(img(u)).replace(/'/g, '%27')}')`;
+const bg = url => url ? `background-image:${cssUrl(url)}` : '';
+// 豆瓣 serves every poster at s (270px) / m (540px) / l (1080px) wide, whatever size its API handed us.
+const DB_POSTER = /^(https?:\/\/[^/]*doubanio\.com\/view\/photo\/)(?:[sml]_ratio_poster|[sml])\//;
+const dbSize = (u, s) => DB_POSTER.test(u || '') ? u.replace(DB_POSTER, `$1${s}_ratio_poster/`) : '';
+// Big posters: the sharp layer paints over the small one (already cached from the card) once it arrives.
+const bgHi = (url, s = 'l') => !url ? '' : dbSize(url, s) ? `background-image:${cssUrl(dbSize(url, s))},${cssUrl(dbSize(url, 's'))}` : bg(url);
+// Card <img>: small first; once it is on screen, fade the sharp size in over it.
+const posterImg = (u, sharp = 'm') => {
+  const hi = sharp && dbSize(u, sharp);
+  return `<img src="${esc(img(dbSize(u, 's') || u))}"${hi ? ` data-hi="${esc(img(hi))}"` : ''} loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="sharpen(this)" onerror="this.parentNode.classList.add('noimg');this.remove()">`;
+};
+function sharpen(el) {
+  el.classList.add('ok');
+  const hi = el.dataset.hi; if (!hi) return;
+  delete el.dataset.hi;
+  const h = document.createElement('img');
+  h.decoding = 'async'; h.referrerPolicy = 'no-referrer'; h.alt = '';
+  h.onload = () => h.classList.add('ok');
+  h.onerror = () => h.remove();
+  h.src = hi;
+  el.after(h);
+}
 const ROWS = ['国产剧', '韩剧|韩国剧', '欧美剧', '动作片', '喜剧片', '科幻片', '日剧|日本剧', '国产动漫', '日韩动漫', '大陆综艺', '爱情片', '纪录片|记录片'];
 const LEVELS = { kids: '儿童', standard: '标准', all: '全部' };
+const DB_ROWS = [['tv', '豆瓣热门剧集'], ['movie', '豆瓣热门电影'], ['show', '豆瓣热门综艺'], ['anime', '豆瓣热门动漫']];
+const dbRows = () => { try { return { tv: true, movie: true, show: true, anime: true, ...JSON.parse(localStorage.dbRows || '{}') }; } catch { return { tv: true, movie: true, show: true, anime: true }; } };
 
 const state = { sites: [], lives: [], level: 'standard', site: localStorage.site || '', cats: [], downloads: [] };
 
@@ -34,9 +58,11 @@ async function req(method, path, body, retried, signal) {
 // signal: omitted → current page; null → never aborted (app-level reads); or a specific controller's signal.
 const get = (path, signal) => req('GET', path, undefined, false, signal === undefined ? pageCtl.signal : signal || undefined);
 const api = (route, params = {}, signal) => get(`/api/${route}?` + new URLSearchParams(params), signal);
-function toast(msg) {
+function toast(msg, sticky) {
   const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
-  document.body.append(t); setTimeout(() => t.remove(), 2600);
+  document.body.append(t);
+  if (!sticky) setTimeout(() => t.remove(), 2600);
+  return t; // sticky: stays until the caller removes it
 }
 const spinner = '<div class="spinner"></div>';
 const fmtSize = b => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : b > 1e7 ? (b / 1e6).toFixed(0) + ' MB' : (b / 1e6).toFixed(1) + ' MB';
@@ -215,9 +241,9 @@ function card(it, opts = {}) {
   const href = it.douban ? `#/find/${encodeURIComponent(it.name)}` : vodHref(it.site, it.id);
   const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"`;
   const rate = it.douban ? (it.rate ? `<span class="db">${esc(it.rate)}</span>` : '')
-    : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
+    : it.site === 'local' ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
   return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
-    <div class="img">${it.pic ? `<img src="${esc(img(it.pic))}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="this.classList.add('ok')" onerror="this.remove()">` : ''}${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${rate}
+    <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${rate}
       ${pct ? `<div class="prog" style="width:${pct}%"></div>` : ''}</div>
     <div class="name">${esc(it.name)}</div>${opts.sub ? `<div class="sub">${esc(opts.sub)}</div>` : ''}</a>`;
 }
@@ -237,11 +263,53 @@ document.addEventListener('click', e => {
   if (c.dataset.db !== undefined) return openByName(c.dataset.db);
   openDetail(c.dataset.site, c.dataset.id);
 });
+// 豆瓣 card → the same title in our sources. Hits are kept in an LRU (30 min), and identical lookups already
+// in flight share one request. The "finding…" toast stays until it is found, failed, timed out (20 s),
+// or the page was left.
+const FIND_MAX = 100, FIND_TTL = 30 * 60e3, FIND_TIMEOUT = 20e3;
+const findLru = new Map(), findBusy = new Map();
+const findGet = k => {
+  const e = findLru.get(k);
+  if (!e) return null;
+  findLru.delete(k);
+  if (Date.now() - e.at > FIND_TTL || !state.sites.some(s => s.key === e.hit.site)) return null;
+  findLru.set(k, e); // most recently used goes last
+  return e.hit;
+};
+const findPut = (k, hit) => { findLru.delete(k); findLru.set(k, { hit, at: Date.now() }); if (findLru.size > FIND_MAX) findLru.delete(findLru.keys().next().value); };
+async function findTitle(name, signal) {
+  const k = normName(name);
+  const cached = findGet(k);
+  if (cached) return cached;
+  if (!findBusy.has(k)) {
+    const p = api('search', { wd: name }, null).then(j => {
+      const hit = j.results.find(r => r.name === name) || j.results.find(r => normName(r.name) === k) || null;
+      if (hit) findPut(k, { site: hit.site, id: hit.id });
+      return hit;
+    }).finally(() => findBusy.delete(k));
+    findBusy.set(k, p);
+  }
+  // The shared request itself isn't cancelled; each caller just stops waiting.
+  return Promise.race([findBusy.get(k), new Promise((_, bad) => signal.addEventListener('abort', () => bad(signal.reason || new DOMException('aborted', 'AbortError')), { once: true }))]);
+}
 async function openByName(name) {
-  toast(`在所有源里找「${name}」…`);
-  const j = await api('search', { wd: name }).catch(() => ({ results: [] }));
-  const hit = j.results.find(r => r.name === name) || j.results.find(r => normName(r.name) === normName(name));
-  if (hit) openDetail(hit.site, hit.id); else location.hash = '#/search/' + encodeURIComponent(name);
+  const t = toast(`在所有源里找「${name}」…`, true);
+  const ctl = new AbortController(), page = pageCtl.signal;
+  const timer = setTimeout(() => ctl.abort(new DOMException('timeout', 'TimeoutError')), FIND_TIMEOUT);
+  const onLeave = () => ctl.abort(new DOMException('left', 'AbortError'));
+  page.addEventListener('abort', onLeave, { once: true });
+  try {
+    const hit = await findTitle(name, ctl.signal);
+    t.remove();
+    if (hit) openDetail(hit.site, hit.id); else { toast(`没找到「${name}」，已转到搜索`); location.hash = '#/search/' + encodeURIComponent(name); }
+  } catch (e) {
+    t.remove();
+    if (e?.name === 'TimeoutError') toast(`找「${name}」超时了，可以稍后再点一次`);
+    else if (e?.name !== 'AbortError') toast(`找「${name}」失败：${e.message}`);
+  } finally {
+    clearTimeout(timer);
+    page.removeEventListener('abort', onLeave);
+  }
 }
 const normName = s => String(s || '').replace(/[\s·:：\-—!！,，.。]/g, '').toLowerCase();
 function row(title, items, href, sub, opts = {}) {
@@ -267,6 +335,7 @@ async function renderHome() {
   const cont = hist.all().filter(h => state.sites.some(s => s.key === h.site)).slice(0, 20);
   const favList = favs.all().filter(f => state.sites.some(s => s.key === f.site)).slice(0, 30);
   const kids = state.level === 'kids';
+  const own = site === 'local'; // 本地媒体: its own folders only, no 豆瓣
   view.innerHTML = `
     <div class="hero" id="hero"></div>
     <div class="rows">
@@ -280,15 +349,16 @@ async function renderHome() {
     </div>`;
   hero(latest.list.slice(0, 6));
   observeRatings(view);
-  if (!kids) {
-    Promise.all(['tv', 'movie'].map(t => api('douban/hot', { type: t }).catch(() => ({ list: [] })))).then(([tv, mv]) => {
+  if (!kids && !own) {
+    // Which 豆瓣 rows to show is a per-browser setting (设置 → 首页豆瓣分类); only the enabled ones are fetched.
+    const on = dbRows(), kinds = DB_ROWS.filter(([k]) => on[k]);
+    Promise.all(kinds.map(([k]) => api('douban/hot', { type: k }).catch(() => ({ list: [] })))).then(res => {
       if (sig.aborted || !$('#dbRows')) return;
-      $('#dbRows').innerHTML = (tv.list.length ? row('豆瓣热门剧集', tv.list.map(x => ({ ...x, douban: 1 })), '#/charts') : '')
-        + (mv.list.length ? row('豆瓣热门电影', mv.list.map(x => ({ ...x, douban: 1 })), '#/charts') : '');
+      $('#dbRows').innerHTML = kinds.map(([, title], i) => res[i].list.length ? row(title, res[i].list.map(x => ({ ...x, douban: 1 })), '#/charts') : '').join('');
     });
   }
-  const isWhitelisted = kids || state.cats.length <= 8;
-  const wanted = isWhitelisted ? state.cats.slice(0, 8) : ROWS.map(w => state.cats.find(c => w.split('|').includes(c.name))).filter(Boolean);
+  const isWhitelisted = kids || own || state.cats.length <= 8;
+  const wanted = isWhitelisted ? state.cats.slice(0, own ? 20 : 8) : ROWS.map(w => state.cats.find(c => w.split('|').includes(c.name))).filter(Boolean);
   const lists = await Promise.all(wanted.map(c => api('list', { site, t: c.id }).catch(() => ({ list: [] }))));
   if (sig.aborted || site !== state.site || !$('#more')) return;
   $('#more').innerHTML = wanted.map((c, i) => lists[i].list.length ? row(c.name, lists[i].list, `#/cat/${c.id}/${encodeURIComponent(c.name)}`) : '').join('');
@@ -300,7 +370,7 @@ function hero(items) {
   let i = 0;
   const show = () => {
     const it = items[i];
-    el.innerHTML = `<div class="bg" style="${bg(it.pic)}"></div><div class="poster" style="${bg(it.pic)}"></div>
+    el.innerHTML = `<div class="bg" style="${bg(dbSize(it.pic, 's') || it.pic)}"></div><div class="poster" style="${bgHi(it.pic)}"></div>
       <div class="info"><h1>${esc(it.name)}</h1>
         <div class="meta"><span class="dbtag" hidden></span>${esc([it.year, it.area, it.type, it.remarks].filter(x => x && x !== '0').join('  ·  '))}</div>
         <p>${esc(it.blurb)}</p>
@@ -309,7 +379,7 @@ function hero(items) {
     el.querySelector('.play').onclick = () => openDetail(it.site, it.id, true);
     el.querySelector('.more').onclick = () => openDetail(it.site, it.id);
     $$('.dots i', el).forEach(d => d.onclick = () => { i = +d.dataset.k; show(); });
-    dbRate(it.name, it.year).then(r => { const t = el.querySelector('.dbtag'); if (t && r.rate) { t.textContent = '豆瓣 ' + r.rate; t.hidden = false; } });
+    if (it.site !== 'local') dbRate(it.name, it.year).then(r => { const t = el.querySelector('.dbtag'); if (t && r.rate) { t.textContent = '豆瓣 ' + r.rate; t.hidden = false; } });
   };
   show();
   heroTimer = setInterval(() => { if (!document.hidden && $('#player').hidden && !$('#modal')) { i = (i + 1) % items.length; show(); } }, 8000);
@@ -417,7 +487,7 @@ const pianName = n => /片$|电影$|剧$/.test(n) ? n : n + '片';
 function rankRow(it, n) {
   return `<div class="rk"><a class="rmain" href="#/find/${encodeURIComponent(it.name)}" data-db="${esc(it.name)}" title="在所有源里找「${esc(it.name)}」">
       <span class="no ${n <= 3 ? 'hi' : ''}">${n}</span>
-      <div class="rimg">${it.pic ? `<img src="${esc(img(it.pic))}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="this.classList.add('ok')" onerror="this.remove()">` : ''}</div>
+      <div class="rimg">${it.pic ? posterImg(it.pic, '') : ''}</div>
       <div class="rinfo"><div class="rt">${esc(it.name)}${it.year ? `<span>${esc(it.year)}</span>` : ''}</div>
         <div class="rs">${it.rate ? `<i class="stars" style="--v:${Number(it.rate)}"></i><b>${esc(it.rate)}</b>` : '<span>暂无评分</span>'}${it.votes ? `<span>${fmtVotes(it.votes)}人评价</span>` : ''}${it.remarks ? `<span>${esc(it.remarks)}</span>` : ''}</div>
         <div class="rsub">${esc(it.sub)}</div>${it.desc ? `<div class="rq">“${esc(it.desc)}”</div>` : ''}</div></a>
@@ -609,11 +679,11 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     const eps = d.lines[line]?.episodes || [];
     const resumeIdx = h && h.line === line && eps[h.ep] ? h.ep : 0;
     m.firstChild.innerHTML = `
-      <div class="top"><div class="bg" style="${bg(d.pic)}"></div><div class="poster" style="${bg(d.pic)}"></div>
+      <div class="top"><div class="bg" style="${bg(dbSize(d.pic, 's') || d.pic)}"></div><div class="poster" style="${bgHi(d.pic, 'm')}"></div>
         <button class="close">✕</button>
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
           ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
-            <button class="btn more dlbtn" id="dlToggle">⬇ 下载</button>` : ''}
+            ${d.local ? '' : '<button class="btn more dlbtn" id="dlToggle">⬇ 下载</button>'}` : ''}
           ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
         </div></div></div>
       <div class="body">
@@ -658,7 +728,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
-    dbRate(d.name, d.year).then(r => {
+    if (!d.local) dbRate(d.name, d.year).then(r => {
       const t = $('#dbtag', m); if (!t || !r.id) return;
       t.textContent = r.rate ? '豆瓣 ' + r.rate : '豆瓣 暂无评分'; t.href = `https://movie.douban.com/subject/${r.id}/`; t.hidden = false;
     });
@@ -804,20 +874,22 @@ function openPlayer(startAt) {
   const local = cur.kind === 'vod' ? dlFor(cur.d.site, cur.d.id, e.url) : null;
   const useLocal = cur.kind === 'local' || local?.status === 'done';
   $('.local').hidden = !useLocal;
-  load(local?.status === 'done' ? local.play : e.url, startAt, false, useLocal);
+  load(local?.status === 'done' ? local.play : e.url, startAt, false, useLocal || e.url.startsWith('/media/'));
   poke();
 }
 function msg(t) { $('.pmsg').textContent = t || ''; }
 function load(url, startAt, viaProxy, isLocal) {
   if (hls) { hls.destroy(); hls = null; }
   const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : url;
-  playingSrc = { src, hls: !/\.mp4(\?|$)/i.test(url) };
+  // 本地媒体 originals (/media/f/…) play natively; /media/h/… is a growing HLS playlist, start at its beginning.
+  const direct = /\.mp4(\?|$)/i.test(url) || url.startsWith('/media/f/');
+  playingSrc = { src, hls: !direct };
   pvReset();
   msg('加载中…');
   const seek = () => { if (startAt) video.currentTime = startAt; video.play().catch(() => msg('点一下播放')); };
   const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集/换个源试试'); };
-  if (window.Hls && Hls.isSupported() && !/\.mp4(\?|$)/i.test(url)) {
-    hls = new Hls({ maxBufferLength: 30, enableWorker: true });
+  if (window.Hls && Hls.isSupported() && !direct) {
+    hls = new Hls({ maxBufferLength: 30, enableWorker: true, ...(url.startsWith('/media/h/') ? { startPosition: startAt || 0 } : {}) });
     hls.on(Hls.Events.MANIFEST_PARSED, seek);
     hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) retry(data.details); });
     hls.loadSource(src); hls.attachMedia(video);
@@ -1138,9 +1210,12 @@ async function renderSettings() {
     <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。${safety.hasPin ? '已设家长 PIN。' : '可设家长 PIN，防止孩子自己改回来。'}</p>
       <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}">${v}</button>`).join('')}</div>
       <div class="actions"><button class="small" id="setPin">${safety.hasPin ? '修改 / 清除 PIN' : '设置 PIN'}</button></div></section>
+    ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
+      <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
     <section><h2>点播源</h2><p class="hint">苹果CMS 接口（<code>…/api.php/provide/vod</code>，返回 JSON）。需要 spider jar / 解析的 type 3 源浏览器跑不了，导入时会自动跳过。</p>
       <div id="sites">${rowsHtml(cfg.sites, 'site')}</div>
       <div class="actions"><button class="small" id="addSite">+ 添加点播源</button><button class="small" id="testAll">全部测速</button></div></section>
+    <section id="localSec"><h2>本地媒体 <span class="tagl">内置源</span></h2><p class="lan">加载中…</p></section>
     <section><h2>直播源</h2><p class="hint">支持 m3u / m3u8 频道列表、TVBox txt（<code>频道名,地址</code> + <code>分组,#genre#</code>），或者单条 .m3u8 播放地址。内置文件直接写文件名。「编辑文本」可以直接改频道列表。</p>
       <div id="lives">${rowsHtml(cfg.lives, 'live')}</div>
       <div class="actions"><button class="small" id="addLive">+ 添加直播源</button><button class="small" id="testLives">全部测速</button></div></section>
@@ -1228,8 +1303,9 @@ async function renderSettings() {
     if (op === 'down' && i < list.length - 1) [list[i + 1], list[i]] = [list[i], list[i + 1]];
     redraw(c);
   };
-  view.oninput = e => { if (e.target.closest('.srow')) dirty(); };
-  view.onchange = e => { if (e.target.closest('.srow')) dirty(); };
+  $$('[data-dbrow]').forEach(c => c.onchange = () => { localStorage.dbRows = JSON.stringify({ ...dbRows(), [c.dataset.dbrow]: c.checked }); toast('已保存'); });
+  view.oninput = e => { if (e.target.closest('.srow:not(.lrow)')) dirty(); };
+  view.onchange = e => { if (e.target.closest('.srow:not(.lrow)')) dirty(); };
   $('#setPin').onclick = async () => {
     const newPin = prompt(safety.hasPin ? '新 PIN（留空 = 清除 PIN）' : '设置家长 PIN（4 位以上数字）');
     if (newPin === null) return;
@@ -1260,6 +1336,77 @@ async function renderSettings() {
     } catch (err) { toast('导入失败：' + err.message); $('#imp').disabled = false; $('#imp').textContent = '导入'; }
   };
   if (cfg.sites.length) $('#testAll').click();
+  localSettings().catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
+}
+
+// ---------- settings: 本地媒体 (built-in source from local folders) ----------
+async function localSettings() {
+  const j = await get('/api/local');
+  const box = $('#localSec'); if (!box) return;
+  const c = j.cfg;
+  const flag = (cls, on, label, title) => `<label class="flag" title="${title}"><input type="checkbox" class="${cls}" ${on ? 'checked' : ''}>${label}</label>`;
+  const dirRow = (d, i, st) => `<div class="srow lrow" data-i="${i}">
+      <span class="lan">${i + 1}</span>
+      <input class="nm" value="${esc(d.name || '')}" placeholder="分类名（默认文件夹名）">
+      <input class="url" value="${esc(d.path || '')}" placeholder="${navigator.platform.startsWith('Win') ? 'D:\\Movies' : '/Volumes/NAS/电影'}">
+      <span class="ops">${flag('sub', d.sub, '子目录分类', '它下面每个一级子文件夹各是一个分类')}${flag('flat', d.flat, '逐个文件', '不合并成剧集：每个文件单独一部')}${flag('kids', d.kids, '少儿', '儿童模式下可见')}${flag('adult', d.adult, '成人', '只在安全级别「全部」时可见')}
+        <span class="status ${st ? (st.error ? 'bad' : 'ok') : ''}" title="${esc(st?.error || '')}">${st ? (st.error ? esc(st.error) : `${st.items}部 · ${st.files}个文件`) : ''}</span>
+        <button data-lop="del">删除</button></span></div>`;
+  const statusText = s => s.running ? `扫描中… 已找到 ${s.dirs.reduce((n, d) => n + d.items, 0)} 部`
+    : s.at ? `上次扫描 ${new Date(s.at).toLocaleString()}，${s.items} 部 / ${s.files} 个文件，用时 ${(s.ms / 1000).toFixed(1)} 秒${s.error ? ' · 出错：' + s.error : ''}` : '还没扫描过';
+  const draw = (cfg, status) => {
+    const stOf = d => status.dirs.find(x => x.path === d.path);
+    box.innerHTML = `<h2>本地媒体 <span class="tagl">内置源</span></h2>
+      <p class="hint">扫描这台电脑上（或挂载的 NAS 里）的文件夹，合成一个点播源。每个目录是一个分类，勾「子目录分类」后它下面的每个一级子文件夹各是一个分类。同一文件夹里带集数的视频合成一部剧，其他文件各算一部。封面优先用同目录的 poster / folder / 同名图片，没有就用 ffmpeg 截一帧；有 .nfo 会读片名、简介和演员。勾了「成人」的目录只在安全级别为「全部」时显示。
+      ${j.ffmpeg ? '浏览器放不了的格式（mkv / avi / rmvb 等）会由 ffmpeg 转成 HLS 边转边播，转好的缓存保留一天。' : '<b>没找到 ffmpeg</b>：mkv / avi 等格式在浏览器里可能放不了，电视端不受影响。'}</p>
+      <div class="field"><label class="lan"><input type="checkbox" id="lcOn" ${cfg.enabled ? 'checked' : ''}> 启用</label>
+        <input id="lcName" value="${esc(cfg.name)}" placeholder="源名称" style="flex:0 1 160px;min-width:120px">
+        <label class="lan">每 <input id="lcRescan" type="number" min="0" max="1440" value="${cfg.rescan}" style="width:70px;min-width:0;flex:none"> 分钟自动重扫（0 = 不自动）</label></div>
+      <div class="field" style="margin-top:8px"><span class="lan">后缀</span><input id="lcExts" value="${esc(cfg.exts.join(', '))}" title="可选：${esc(j.exts.join(' '))}"></div>
+      <div id="lcDirs" style="margin-top:10px">${cfg.dirs.map((d, i) => dirRow(d, i, stOf(d))).join('') || '<p class="lan">还没有目录。</p>'}</div>
+      <div class="actions"><button class="small" id="lcAdd">+ 添加目录</button><button class="btn red" id="lcSave">保存并扫描</button>
+        <button class="small" id="lcScan">重新扫描</button><span class="lan" id="lcStatus">${esc(statusText(status))}</span></div>
+      ${j.urls.length ? `<p class="hint" style="margin-top:12px">电视上的 TVBox / FongMi 也能直接用：添加点播源，类型 1（苹果CMS JSON），地址 ${j.urls.map(u => `<code>${esc(u)}</code>`).join(' 或 ')}。电视端直接播原文件。</p>` : ''}`;
+  };
+  const collect = () => ({
+    enabled: $('#lcOn').checked, name: $('#lcName').value.trim(), rescan: Number($('#lcRescan').value) || 0,
+    exts: $('#lcExts').value.split(/[\s,，;；]+/).filter(Boolean),
+    dirs: $$('.lrow', box).map(r => ({ path: $('.url', r).value.trim(), name: $('.nm', r).value.trim(),
+      sub: +$('.sub', r).checked, flat: +$('.flat', r).checked, kids: +$('.kids', r).checked, adult: +$('.adult', r).checked })).filter(d => d.path),
+  });
+  let cfg = c, status = j.status, timer = 0;
+  // While a scan runs, refresh the counts every second.
+  const poll = () => {
+    clearTimeout(timer);
+    if (!status.running) return;
+    timer = setTimeout(async () => {
+      if (!box.isConnected) return;
+      try { status = (await get('/api/local')).status; } catch { return; }
+      if (!box.isConnected) return;
+      if (status.running) { $('#lcStatus').textContent = statusText(status); return poll(); }
+      cfg = collect(); draw(cfg, status); bind();
+      state.cats = []; await loadSites();
+    }, 1000);
+  };
+  const bind = () => {
+    $('#lcAdd').onclick = () => { cfg = collect(); cfg.dirs.push({ path: '', name: '' }); draw(cfg, status); bind(); $('#lcDirs .lrow:last-child .url').focus(); };
+    $('#lcDirs').onclick = e => { if (e.target.dataset.lop !== 'del') return; cfg = collect(); cfg.dirs.splice(+e.target.closest('.lrow').dataset.i, 1); draw(cfg, status); bind(); };
+    $('#lcSave').onclick = async () => {
+      const bad = collect().dirs.find(d => !/^(\/|~|[a-z]:[\\/]|\\\\)/i.test(d.path));
+      if (bad) return toast('要写完整路径：' + bad.path);
+      try {
+        const r = await req('PUT', '/api/local', collect());
+        cfg = r.cfg; status = r.status; draw(cfg, status); bind(); poll();
+        toast(cfg.enabled ? '已保存，开始扫描' : '已保存（已停用）');
+        if (!cfg.enabled) { state.cats = []; await loadSites(); }
+      } catch (err) { toast(err.message); }
+    };
+    $('#lcScan').onclick = async () => {
+      try { status = await req('POST', '/api/local/scan', {}); $('#lcStatus').textContent = statusText(status); poll(); }
+      catch (err) { toast(err.message); }
+    };
+  };
+  draw(cfg, status); bind(); poll();
 }
 
 // ---------- clipboard → sources ----------

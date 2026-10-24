@@ -1,0 +1,12 @@
+{
+  "name": "tvbox-setup",
+  "private": true,
+  "scripts": {
+    "web": "node web/server.js",
+    "ios": "bash ios/install.sh",
+    "ios:renew": "bash ios/install.sh --auto",
+    "ios:schedule": "bash ios/schedule.sh",
+    "ios:status": "bash ios/schedule.sh --status",
+    "ios:unschedule": "bash ios/schedule.sh --remove"
+  }
+}

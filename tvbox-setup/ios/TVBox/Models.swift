@@ -87,6 +87,7 @@ struct DoubanItem: Identifiable, Hashable {
 struct DoubanRating: Codable, Hashable {
     var id = ""
     var rate = ""
+    var at: Date? = nil   // when fetched; ratings are refreshed after 7 days (1 day when 豆瓣 had no score yet)
 }
 
 /// 安全级别: kids = only 少儿 sites + kid categories; standard = no adult sites/categories; all = everything.

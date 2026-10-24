@@ -216,7 +216,7 @@ struct FeaturedCharts: View {
                                 Image(systemName: "chevron.right").font(.caption.weight(.bold)).foregroundStyle(.secondary)
                                 Text(c.desc).font(.caption2).foregroundStyle(.secondary)
                             }.foregroundStyle(.white)
-                        }.padding(.horizontal)
+                        }.buttonStyle(.press).padding(.horizontal)
                         ScrollView(.horizontal, showsIndicators: false) {
                             LazyHStack(spacing: 4) {
                                 if let items = rows[c.id] {

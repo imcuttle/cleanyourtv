@@ -95,6 +95,10 @@ nav a:hover { color: #b3b3b3; }
 .card .img img.ok { opacity: 1; }
 .card .img { background: linear-gradient(110deg, #202020 30%, #2c2c2c 50%, #202020 70%) 0 0 / 300% 100%; animation: shimmer 1.4s linear infinite; }
 .card .img:has(img.ok) { animation: none; }
+/* No cover (none given, or it failed to load): stop shimmering and show the title instead. */
+.card .img .ph { display: none; }
+.card .img.noimg { animation: none; background: linear-gradient(160deg, #2a2a2e, #1b1b1e); }
+.card .img.noimg .ph { display: flex; position: absolute; inset: 0; align-items: center; justify-content: center; padding: 10px; text-align: center; font-size: 14px; font-weight: 600; line-height: 1.3; color: #ffffffb0; overflow: hidden; word-break: break-all; }
 @keyframes shimmer { to { background-position: -150% 0; } }
 .card .badge, .card .db, .card .prog { z-index: 1; }
 .card .badge { position: absolute; top: 6px; left: 6px; background: var(--red); font-size: 11px; font-weight: 700; padding: 1px 5px; border-radius: 2px; max-width: 85%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -182,6 +186,7 @@ a.btn { text-decoration: none; cursor: pointer; }
 .actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
 .field { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .field input { flex: 1; min-width: 240px; }
+.field input[type=checkbox] { flex: none; min-width: 0; height: auto; }
 .field textarea { width: 100%; min-height: 260px; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
 .toast { position: fixed; z-index: 60; left: 50%; bottom: 30px; transform: translateX(-50%); background: #fff; color: #000; padding: 10px 18px; border-radius: 4px; font-weight: 600; box-shadow: 0 6px 20px #0008; }
 .lan { color: var(--muted); font-size: 13px; }

@@ -6,6 +6,10 @@ struct SettingsView: View {
     @ObservedObject private var cfg = Config.shared
     @AppStorage("safety.level") private var level = "standard"
     @AppStorage("safety.pin") private var pin = ""
+    @AppStorage("douban.tv") private var dbTv = true
+    @AppStorage("douban.movie") private var dbMovie = true
+    @AppStorage("douban.show") private var dbShow = true
+    @AppStorage("douban.anime") private var dbAnime = true
     @State private var unlocked = false
     @State private var askUnlock = false
     @State private var askNewPin = false
@@ -34,6 +38,17 @@ struct SettingsView: View {
                 }
             } header: { Text("安全级别") } footer: {
                 Text("儿童：只显示标记「少儿」的源，关闭直播和豆瓣热门。标准：隐藏「成人」源和伦理/写真等分类。全部：不过滤。设了 PIN 后，改级别和改源都要先解锁。")
+            }
+
+            if level != "kids" {
+                Section {
+                    Toggle("热门剧集", isOn: $dbTv)
+                    Toggle("热门电影", isOn: $dbMovie)
+                    Toggle("热门综艺", isOn: $dbShow)
+                    Toggle("热门动漫", isOn: $dbAnime)
+                } header: { Text("首页豆瓣分类") } footer: {
+                    Text("在点播首页显示豆瓣热门榜单。儿童模式下不显示。")
+                }
             }
 
             Section {
