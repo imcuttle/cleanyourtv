@@ -1789,8 +1789,8 @@ const needPin = res => send(res, 403, { error: '需要家长 PIN', pin: true });
 
 // ---- batch support ----
 const BATCH_MAX = 60, BATCH_PAR = 6;
-// Read-only routes the client may bundle. (search / person / detail are slow and one-off: left out on purpose.)
-const BATCHABLE = /^(list|categories|probe|javdb|douban\/(rating|hot|chart|charts))$/;
+// Read-only GET routes the client may bundle. Slow ones (search / detail / javdb) don't hold up fast ones: results stream back as each finishes.
+const BATCHABLE = /^(list|categories|detail|search|person|sites|info|live|probe|javdb|douban\/(rating|hot|chart|charts))$/;
 // Runs api() as a GET against an in-memory response and returns {status, body}.
 async function captureApi(route, params, req) {
   const cap = { destroyed: false, headersSent: false, req: { headers: {} }, code: 200, out: '',

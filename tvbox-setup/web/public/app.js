@@ -148,7 +148,7 @@ class DataLoader {
   }
 }
 // The server runs these as GETs inside POST /api/batch and streams back one NDJSON line per request, as it finishes.
-const BATCHABLE = /^(list|categories|probe|javdb|douban\/(rating|hot|chart|charts))$/;
+const BATCHABLE = /^(list|categories|detail|search|person|sites|info|live|probe|javdb|douban\/(rating|hot|chart|charts))$/;
 async function fetchBatch(keys, settle) {
   const requests = keys.map(k => { const q = k.indexOf('?'); return { route: k.slice(0, q), q: Object.fromEntries(new URLSearchParams(k.slice(q + 1))) }; });
   const headers = { 'Content-Type': 'application/json' };
