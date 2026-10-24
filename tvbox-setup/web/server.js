@@ -327,10 +327,68 @@ async function cmsGet(site, params, fresh = false, ms = 15000) {
   });
 }
 
+// ---- 清晰度 ----
+// Read off text that is already in hand (remarks / 版本 / title / episode names / url) — no extra requests.
+// Exact resolution of what is about to play comes later from /api/probe, after the page is already shown.
+const Q_RANK = { '抢先': 0, '标清': 1, '720P': 2, 'HD': 2, '超清': 3, '1080P': 4, '蓝光': 4, '4K': 5 };
+const Q_RES = /(?<![0-9a-z])(2160|1080|720|576|480|360)[pi]?(?![0-9a-z])/i;
+function qualityOf(...texts) {
+  const t = texts.map(str).join(' ');
+  if (!t.trim()) return '';
+  if (/枪版|抢先|抢鲜|(?<![a-z])(hd)?(tc|cam|hdcam|hc)(?![a-z])/i.test(t)) return '抢先';
+  if (/(?<![0-9a-z])4k(?![0-9a-z])|uhd|超高清|(?<![0-9a-z])2160/i.test(t)) return '4K';
+  const m = Q_RES.exec(t);
+  if (m) return { 2160: '4K', 1080: '1080P', 720: '720P' }[m[1]] || '标清';
+  if (/蓝光|(?<![a-z])(bd|blu-?ray)(?![a-z])|全高清|fhd/i.test(t)) return '蓝光';
+  if (/超清/.test(t)) return '超清';
+  if (/(?<![a-z])hd(?![a-z])|高清/i.test(t)) return 'HD';
+  if (/标清|(?<![a-z])sd(?![a-z])/i.test(t)) return '标清';
+  return '';
+}
+const bestQuality = list => list.filter(Boolean).sort((a, b) => (Q_RANK[b] ?? -1) - (Q_RANK[a] ?? -1))[0] || '';
+// Letterboxed films are wide but short, so judge by width as well as height.
+const sizeQuality = (w, h) => (w >= 3000 || h >= 1900) ? '4K' : (w >= 1800 || h >= 1000) ? '1080P' : (w >= 1200 || h >= 700) ? '720P' : (w > 0 || h > 0) ? '标清' : '';
+
+// ---- /api/probe?u=: real resolution of the stream about to play (called after the detail page is up) ----
+// HLS master playlists list RESOLUTION per variant; media playlists don't say, so those stay unknown.
+// Local files go to the media process (ffmpeg -i). Results are cached for a day; identical probes share one request.
+const probeCache = new Map(), probeBusy = new Map();
+let probeRunning = 0; const probeWait = [];
+async function probeStream(u) {
+  const hit = probeCache.get(u);
+  if (hit && Date.now() - hit.at < 86400e3) return hit.v;
+  if (probeBusy.has(u)) return probeBusy.get(u);
+  const run = (async () => {
+    if (probeRunning >= 6) await new Promise(ok => probeWait.push(ok));
+    probeRunning++;
+    try {
+      let v = {};
+      if (u.startsWith('/media/')) {
+        const id = (/^\/media\/[fh]\/([0-9a-f]+)/.exec(u) || [])[1] || '';
+        const f = localIndex().byFile.get(id);
+        if (f && localCfg.enabled && localCatOk(localIndex().catById.get(f.item.cat))) v = await rpc('localProbe', { id }, 30000);
+      } else if (/^https?:\/\//.test(u) && /\.m3u8(\?|$)/i.test(u)) {
+        const r = await fetch(u, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(4000) });
+        const text = r.ok ? (await r.text()).slice(0, 262144) : '';
+        let w = 0, h = 0;
+        for (const m of text.matchAll(/#EXT-X-STREAM-INF:[^\n]*RESOLUTION=(\d+)x(\d+)/gi)) if (+m[2] > h) { w = +m[1]; h = +m[2]; }
+        if (h) v = { width: w, height: h };
+      }
+      const out = { ...v, quality: sizeQuality(v.width || 0, v.height || 0) };
+      probeCache.set(u, { at: Date.now(), v: out });
+      if (probeCache.size > 800) probeCache.delete(probeCache.keys().next().value);
+      return out;
+    } catch { return { quality: '' }; } // not cached: try again next time
+    finally { probeRunning--; probeWait.shift()?.(); probeBusy.delete(u); }
+  })();
+  probeBusy.set(u, run);
+  return run;
+}
+
 function item(site, d) {
   return { site: site.key, siteName: site.name, id: str(d.vod_id), name: str(d.vod_name), pic: str(d.vod_pic),
     remarks: str(d.vod_remarks), type: str(d.type_name), typeId: str(d.type_id), year: str(d.vod_year), area: str(d.vod_area),
-    blurb: clean(d.vod_content).slice(0, 300) };
+    quality: qualityOf(d.vod_remarks, d.vod_version, d.vod_name), blurb: clean(d.vod_content).slice(0, 300) };
 }
 const itemOk = (site, it) => !it.type || catAllowed(site, it.type);
 
@@ -344,7 +402,11 @@ function lines(d) {
       const url = (b === undefined ? a : b || '').trim();
       return { name: b === undefined ? '播放' : a, url };
     }).filter(e => (/^https?:\/\//.test(e.url) && /\.(m3u8|mp4)(\?|$)/i.test(e.url)) || e.url.startsWith('/media/')),
-  })).filter(l => l.episodes.length);
+  })).filter(l => l.episodes.length).map(l => {
+    // Line label ("hd" / "1080" / "蓝光" lines) and the file names are the best hints a source gives.
+    const q = bestQuality([qualityOf(l.name), ...l.episodes.slice(0, 3).map(e => qualityOf(e.name, e.url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*/, '')))]);
+    return q ? { ...l, quality: q } : l;
+  });
 }
 
 async function categories(site) {
@@ -569,11 +631,11 @@ rpcHandlers.dbHot = ({ type }) => doubanHot(type);
 const dbMem = new Map();
 let dbChain = Promise.resolve();
 // Serialize requests to 豆瓣 with a small gap so we don't get rate-limited.
-function dbJson(url, ttl) {
+function dbJson(url, ttl, headers) {
   const hit = dbMem.get(url);
   if (hit && Date.now() - hit.at < ttl) return Promise.resolve(hit.body);
   const run = dbChain.then(async () => {
-    const r = await fetch(url, { headers: { 'User-Agent': DB_UA, Referer: 'https://movie.douban.com/' }, signal: AbortSignal.timeout(10000) });
+    const r = await fetch(url, { headers: headers || { 'User-Agent': DB_UA, Referer: 'https://movie.douban.com/' }, signal: AbortSignal.timeout(10000) });
     if (!r.ok) throw new Error(`豆瓣 HTTP ${r.status}`);
     const body = await r.json();
     dbMem.set(url, { at: Date.now(), body });
@@ -586,20 +648,27 @@ function dbJson(url, ttl) {
 }
 const normTitle = t => str(t).replace(/\s+|[·:：\-—!！,，.。]/g, '').replace(/第[一二三四五六七八九十\d]+季$/, '').toLowerCase();
 
+// Title → 豆瓣 subject (id, score, year, poster). m.douban.com's subject search answers where the old
+// movie.douban.com/j/subject_suggest now returns an empty list. `pic` is the poster at 豆瓣's small size;
+// clients ask the /img relay for the sharp ones (see dbSize in app.js).
+const DB_M = { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148', Referer: 'https://m.douban.com/movie/' };
 async function doubanRating(name, year) {
   name = name.trim();
   if (!name) return { found: false };
   const key = name + '|' + year;
   const c = dbRatings[key];
-  if (c && Date.now() - c.at < (c.rate ? 7 : 1) * 86400e3) return c.id ? { found: true, ...c } : { found: false };
+  // Entries from before posters were kept are looked up again once.
+  if (c && c.v === 2 && Date.now() - c.at < (c.rate ? 7 : 1) * 86400e3) return c.id ? { found: true, ...c } : { found: false };
   try {
-    const list = await dbJson('https://movie.douban.com/j/subject_suggest?q=' + encodeURIComponent(name), 86400e3);
-    const exact = list.filter(x => x.title === name || normTitle(x.title) === normTitle(name));
-    const pick = exact.find(x => year && x.year === String(year)) || exact[0];
-    let out = { id: '', rate: '', at: Date.now() };
+    const j = await dbJson('https://m.douban.com/rexxar/api/v2/search/subjects?count=8&q=' + encodeURIComponent(name), 86400e3, DB_M);
+    const subs = (j?.subjects?.items || []).map(x => x.target).filter(t => t && t.id && t.title);
+    const exact = subs.filter(t => t.title === name || normTitle(t.title) === normTitle(name));
+    const pick = exact.find(t => year && str(t.year) === String(year)) || exact[0];
+    let out = { id: '', rate: '', v: 2, at: Date.now() };
     if (pick) {
-      const abs = await dbJson('https://movie.douban.com/j/subject_abstract?subject_id=' + pick.id, 86400e3);
-      out = { id: pick.id, rate: abs?.subject?.rate || '', year: pick.year, at: Date.now() };
+      const pid = (/\/(p\d+)\./.exec(str(pick.cover_url)) || [])[1];
+      out = { id: str(pick.id), rate: fmtRate(pick.rating?.value), year: str(pick.year), v: 2, at: Date.now(),
+        pic: pid ? `https://img3.doubanio.com/view/photo/s_ratio_poster/public/${pid}.jpg` : '' };
     }
     dbRatings[key] = out; dbDirty = true;
     return out.id ? { found: true, ...out } : { found: false };
@@ -1044,7 +1113,7 @@ function localVod(it, type, base) {
   const size = it.files.reduce((n, f) => n + f.size, 0);
   return { vod_id: it.id, vod_name: it.name, vod_pic: (it.pic || FFMPEG) ? `${base}/media/p/${it.id}` : '', type_id: it.cat, type_name: type,
     vod_year: it.year || '', vod_actor: it.actor || '', vod_director: it.director || '',
-    vod_remarks: it.files.length > 1 ? `${it.files.length}集` : fmtBytes(size),
+    vod_remarks: it.files.length > 1 ? `${it.files.length}集` : fmtBytes(size), vod_version: it.quality || '',
     vod_content: it.plot || `${it.files.length} 个文件 · ${fmtBytes(size)}`,
     vod_time: new Date(it.mtime).toISOString().replace('T', ' ').slice(0, 19),
     vod_play_from: '本地', vod_play_url: it.files.map(f => `${f.name}$${url(f)}`).join('#') };
@@ -1107,7 +1176,7 @@ function titleOf(raw) {
   const m = /^(.+)[\s(\[（]+((?:19|20)\d{2})(?=$|[\s)\]）])/.exec(s);
   if (m && m[1].trim()) { s = m[1]; year = m[2]; }
   s = s.replace(RELEASE, '').replace(/[\s(\[（-]+$/, '').trim();
-  return { name: noDelim(s) || noDelim(raw), year };
+  return { name: noDelim(s) || noDelim(raw), year, quality: qualityOf(raw) };
 }
 function commonAffix(bases) {
   let pre = bases[0], suf = bases[0];
@@ -1174,7 +1243,7 @@ async function groupItems(g, root, cat, flat) {
   const rec = (x, name) => ({ id: hashId('f|' + path.join(g.dir, x.f), 16), path: path.join(g.dir, x.f),
     ext: path.extname(x.f).slice(1).toLowerCase(), size: x.st.size, name });
   const nfoFor = base => { const n = g.nfos.find(n => n.toLowerCase() === base.toLowerCase() + '.nfo'); return n ? readNfo(path.join(g.dir, n)) : null; };
-  const make = (key, t, nfo, files, pic, mtime) => ({ id: hashId('i|' + key, 12), name: nfo?.title || t.name, year: nfo?.year || t.year, cat,
+  const make = (key, t, nfo, files, pic, mtime) => ({ id: hashId('i|' + key, 12), name: nfo?.title || t.name, year: nfo?.year || t.year, cat, quality: t.quality || qualityOf(path.basename(files[0].path)),
     pic: pic ? path.join(g.dir, pic) : '', plot: nfo?.plot || '', actor: nfo?.actor || '', director: nfo?.director || '', mtime, files });
   // Files lying directly in a category folder are always titles of their own.
   if (g.dir !== root && !flat && (entries.length === 1 || isSeries(bases))) {
@@ -1342,6 +1411,29 @@ function startHls(f) {
   })();
   return j;
 }
+// Resolution of a local file for the detail page: one `ffmpeg -i` (header only), remembered in memory.
+const sizeCache = new Map();
+rpcHandlers.localProbe = ({ id }) => {
+  const f = localIndex().byFile.get(id);
+  if (!f || !FFMPEG) return {};
+  if (sizeCache.has(id)) return sizeCache.get(id);
+  return new Promise(ok => {
+    let err = '';
+    const p = spawn(FFMPEG, ['-hide_banner', '-i', f.path], { stdio: ['ignore', 'ignore', 'pipe'] });
+    try { os.setPriority(p.pid, 10); } catch {}
+    const t = setTimeout(() => p.kill('SIGKILL'), 15000);
+    p.stderr.on('data', d => { if (err.length < 64e3) err += d; });
+    p.on('error', () => { clearTimeout(t); ok({}); });
+    p.on('close', () => {
+      clearTimeout(t);
+      const line = err.split('\n').find(l => /Stream #.*Video:/.test(l) && !/attached pic/.test(l)) || '';
+      const m = /[\s,](\d{2,5})x(\d{2,5})[\s,\[]/.exec(line);
+      const v = m ? { width: +m[1], height: +m[2] } : {};
+      if (m) { sizeCache.set(id, v); if (sizeCache.size > 2000) sizeCache.delete(sizeCache.keys().next().value); }
+      ok(v);
+    });
+  });
+};
 rpcHandlers.hlsOpen = async ({ id }) => {
   const f = localIndex().byFile.get(id);
   if (!f || !FFMPEG) return { error: '找不到文件' };
@@ -1452,6 +1544,7 @@ async function api(route, q, res, req) {
     if (!pinOk(req)) return needPin(res);
     return send(res, 200, await rpc('localSave', await readBody(req)));
   }
+  if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
   if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
   if (route === 'local/vod') {
     const host = /^([\w-]+\.)*[\w-]+(:\d+)?$|^\[[\da-f:]+\](:\d+)?$/i.test(req.headers.host || '') ? req.headers.host : `${lanIps()[0] || '127.0.0.1'}:${PORT}`;
@@ -1560,8 +1653,9 @@ async function api(route, q, res, req) {
     if (!d) return send(res, 404, { error: '没有这部' });
     const it = item(site, d);
     if (!itemOk(site, it)) return send(res, 403, { error: '当前安全级别下不可看' });
-    return send(res, 200, { ...it, blurb: clean(d.vod_content), actor: str(d.vod_actor), director: str(d.vod_director),
-      actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: lines(d), ...(site.local ? { local: true } : {}) });
+    const ls = lines(d);
+    return send(res, 200, { ...it, quality: it.quality || bestQuality(ls.map(l => l.quality)), blurb: clean(d.vod_content), actor: str(d.vod_actor), director: str(d.vod_director),
+      actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: ls, ...(site.local ? { local: true } : {}) });
   }
   send(res, 404, { error: 'unknown api' });
 }

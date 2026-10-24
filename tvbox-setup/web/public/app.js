@@ -12,6 +12,14 @@ const DB_POSTER = /^(https?:\/\/[^/]*doubanio\.com\/view\/photo\/)(?:[sml]_ratio
 const dbSize = (u, s) => DB_POSTER.test(u || '') ? u.replace(DB_POSTER, `$1${s}_ratio_poster/`) : '';
 // Big posters: the sharp layer paints over the small one (already cached from the card) once it arrives.
 const bgHi = (url, s = 'l') => !url ? '' : dbSize(url, s) ? `background-image:${cssUrl(dbSize(url, s))},${cssUrl(dbSize(url, 's'))}` : bg(url);
+// Big poster from a source is often a thumbnail. Once 豆瓣 has the title, its poster goes on top of it as
+// layers — sharp (l/m) over small (s) over the source's own — so the sharpest one that has loaded shows,
+// and nothing goes blank while the bigger one is on its way.
+const bgLayers = (pic, dbpic, size = 'l') => {
+  const hi = dbpic && dbSize(dbpic, size), lo = dbpic && dbSize(dbpic, 's');
+  const layers = [hi, lo, pic].filter(Boolean).map(cssUrl);
+  return layers.length ? `background-image:${layers.join(',')}` : '';
+};
 // Card <img>: small first; once it is on screen, fade the sharp size in over it.
 const posterImg = (u, sharp = 'm') => {
   const hi = sharp && dbSize(u, sharp);
@@ -30,6 +38,29 @@ function sharpen(el) {
 }
 const ROWS = ['国产剧', '韩剧|韩国剧', '欧美剧', '动作片', '喜剧片', '科幻片', '日剧|日本剧', '国产动漫', '日韩动漫', '大陆综艺', '爱情片', '纪录片|记录片'];
 const LEVELS = { kids: '儿童', standard: '标准', all: '全部' };
+// 清晰度 chip: 4K / 1080P 蓝光 / 720P HD / 标清 / 抢先 (cam).
+const Q_CLASS = { '4K': 'q4k', '1080P': 'q1080', '蓝光': 'q1080', '超清': 'q720', '720P': 'q720', 'HD': 'q720', '标清': 'qsd', '抢先': 'qcam' };
+const qChip = (q, cls = '') => q ? `<span class="q ${Q_CLASS[q] || ''} ${cls}">${esc(q)}</span>` : '';
+// What /api/probe learned (real resolution of a title / a stream) is kept in localStorage for 3 days, so
+// cards show it right away on later visits and a title is never probed twice. Capped, oldest dropped first.
+const qc = (() => {
+  const KEY = 'qinfo', MAX = 600, TTL = 3 * 86400e3;
+  let m; try { m = JSON.parse(localStorage[KEY] || '{}'); } catch { m = {}; }
+  let timer = 0;
+  const save = () => { clearTimeout(timer); timer = setTimeout(() => { try { localStorage[KEY] = JSON.stringify(m); } catch { m = {}; } }, 1500); };
+  return {
+    get(k) { const e = m[k]; if (!e) return ''; if (Date.now() - e.at > TTL) { delete m[k]; return ''; } return e.q; },
+    set(k, q) {
+      if (!q) return;
+      delete m[k]; m[k] = { q, at: Date.now() }; // re-insert → newest last
+      const ks = Object.keys(m); if (ks.length > MAX) for (const x of ks.slice(0, ks.length - MAX)) delete m[x];
+      save();
+    },
+  };
+})();
+const Q_RANK = { '抢先': 0, '标清': 1, '720P': 2, 'HD': 2, '超清': 3, '1080P': 4, '蓝光': 4, '4K': 5 };
+const bestQ = qs => qs.filter(Boolean).sort((a, b) => (Q_RANK[b] ?? -1) - (Q_RANK[a] ?? -1))[0] || '';
+const vodQ = it => (it.site && it.id && qc.get(`v|${it.site}|${it.id}`)) || it.quality || '';
 const DB_ROWS = [['tv', '豆瓣热门剧集'], ['movie', '豆瓣热门电影'], ['show', '豆瓣热门综艺'], ['anime', '豆瓣热门动漫']];
 const dbRows = () => { try { return { tv: true, movie: true, show: true, anime: true, ...JSON.parse(localStorage.dbRows || '{}') }; } catch { return { tv: true, movie: true, show: true, anime: true }; } };
 
@@ -89,8 +120,8 @@ const favs = {
   has: (site, id) => favs.all().some(f => f.site === site && f.id === id),
   toggle(d) {
     if (favs.has(d.site, d.id)) { favs.del(d.site, d.id); return false; }
-    const { site, siteName, id, name, pic, remarks, year, type } = d;
-    localStorage.favs = JSON.stringify([{ site, siteName, id, name, pic, remarks, year, type, at: Date.now() }, ...favs.all()].slice(0, 500));
+    const { site, siteName, id, name, pic, remarks, year, type, quality } = d;
+    localStorage.favs = JSON.stringify([{ site, siteName, id, name, pic, remarks, year, type, quality, at: Date.now() }, ...favs.all()].slice(0, 500));
     return true;
   },
   del(site, id) { localStorage.favs = JSON.stringify(favs.all().filter(f => !(f.site === site && f.id === id))); },
@@ -113,7 +144,7 @@ const dbQueue = []; let dbActive = 0;
 function dbRate(name, year) {
   const k = name + '|' + (year || '');
   const c = dbCache[k];
-  if (c && Date.now() - c.at < 3 * 86400e3) return Promise.resolve(c);
+  if (c && c.v === 2 && Date.now() - c.at < 3 * 86400e3) return Promise.resolve(c);
   return new Promise(ok => { dbQueue.push({ name, year, k, ok }); dbPump(); });
 }
 function dbPump() {
@@ -121,7 +152,7 @@ function dbPump() {
     const { name, year, k, ok } = dbQueue.shift();
     dbActive++;
     api('douban/rating', { name, year: year || '' }).catch(() => ({ found: false, error: 1 })).then(r => {
-      const v = { rate: r.rate || '', id: r.id || '', at: Date.now() };
+      const v = { rate: r.rate || '', id: r.id || '', pic: r.pic || '', v: 2, at: Date.now() };
       if (!r.error) { dbCache[k] = v; localStorage.douban = JSON.stringify(dbCache); }
       ok(v);
     }).finally(() => { dbActive--; dbPump(); });
@@ -243,7 +274,7 @@ function card(it, opts = {}) {
   const rate = it.douban ? (it.rate ? `<span class="db">${esc(it.rate)}</span>` : '')
     : it.site === 'local' ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
   return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
-    <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${rate}
+    <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${qChip(vodQ(it))}${rate}
       ${pct ? `<div class="prog" style="width:${pct}%"></div>` : ''}</div>
     <div class="name">${esc(it.name)}</div>${opts.sub ? `<div class="sub">${esc(opts.sub)}</div>` : ''}</a>`;
 }
@@ -379,7 +410,11 @@ function hero(items) {
     el.querySelector('.play').onclick = () => openDetail(it.site, it.id, true);
     el.querySelector('.more').onclick = () => openDetail(it.site, it.id);
     $$('.dots i', el).forEach(d => d.onclick = () => { i = +d.dataset.k; show(); });
-    if (it.site !== 'local') dbRate(it.name, it.year).then(r => { const t = el.querySelector('.dbtag'); if (t && r.rate) { t.textContent = '豆瓣 ' + r.rate; t.hidden = false; } });
+    if (it.site !== 'local') dbRate(it.name, it.year).then(r => {
+      if (items[i] !== it) return; // the slide has moved on
+      const t = el.querySelector('.dbtag'); if (t && r.rate) { t.textContent = '豆瓣 ' + r.rate; t.hidden = false; }
+      const p = el.querySelector('.poster'); if (p && r.pic) p.style.cssText = bgLayers(it.pic, r.pic, 'l');
+    });
   };
   show();
   heroTimer = setInterval(() => { if (!document.hidden && $('#player').hidden && !$('#modal')) { i = (i + 1) % items.length; show(); } }, 8000);
@@ -673,13 +708,13 @@ async function openDetail(site, id, autoplay = false, replace = false) {
   try { [d] = await Promise.all([api('detail', { site, id }, m.ctl.signal), refreshDownloads(m.ctl.signal)]); }
   catch (e) { if (isAbort(e)) return; m.firstChild.innerHTML = `<button class="close">✕</button><div class="body"><div class="err">详情加载失败：${esc(e.message)}</div></div>`; m.querySelector('.close').onclick = () => history.back(); return; }
   const h0 = hist.get(site, id);
-  let line = h0 && d.lines[h0.line] ? h0.line : 0, dlMode = false, alts = null;
+  let line = h0 && d.lines[h0.line] ? h0.line : 0, dlMode = false, alts = null, dbPic = '';
   const render = () => {
     const h = hist.get(site, id);
     const eps = d.lines[line]?.episodes || [];
     const resumeIdx = h && h.line === line && eps[h.ep] ? h.ep : 0;
     m.firstChild.innerHTML = `
-      <div class="top"><div class="bg" style="${bg(dbSize(d.pic, 's') || d.pic)}"></div><div class="poster" style="${bgHi(d.pic, 'm')}"></div>
+      <div class="top"><div class="bg" style="${bg(dbSize(d.pic, 's') || d.pic)}"></div><div class="poster" style="${dbPic ? bgLayers(d.pic, dbPic, 'l') : bgHi(d.pic, 'm')}"></div>
         <button class="close">✕</button>
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
           ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
@@ -687,14 +722,14 @@ async function openDetail(site, id, autoplay = false, replace = false) {
           ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
         </div></div></div>
       <div class="body">
-        <div class="metaRow"><a class="dbtag" id="dbtag" hidden target="_blank" rel="noreferrer"></a>
+        <div class="metaRow"><span id="qtag">${qChip(vodQ(d), 'big')}</span><a class="dbtag" id="dbtag" hidden target="_blank" rel="noreferrer"></a>
           <a class="tag" data-nav href="#/site/${encodeURIComponent(site)}" title="切换到这个源">${esc(d.siteName)}</a>
           ${d.type ? `<a class="tag cat" data-nav href="#/cat/${encodeURIComponent(d.typeId || '')}/${encodeURIComponent(d.type)}/${encodeURIComponent(site)}" title="看这个分类">${esc(d.type)} ›</a>` : ''}
           ${esc([d.year, d.area, d.lang, d.remarks].filter(x => x && x !== '0').join('  ·  '))}</div>
         ${d.blurb ? `<p class="desc">${esc(d.blurb)}</p>` : ''}
         ${people('导演', 'director', d.directors)}
         ${people('演员', 'actor', d.actors, 16)}
-        ${d.lines.length ? `<h3>剧集 <span class="lines">${d.lines.map((l, i) => `<button data-line="${i}" class="${i === line ? 'on' : ''}">${esc(l.name)} (${l.episodes.length})</button>`).join('')}</span>
+        ${d.lines.length ? `<h3>剧集 <span class="lines">${d.lines.map((l, i) => `<button data-line="${i}" class="${i === line ? 'on' : ''}">${esc(l.name)} (${l.episodes.length})${qChip(l.quality, 'sm')}</button>`).join('')}</span>
             ${dlMode ? `<span class="dlhint">点选要下载的集，再点一下暂停/继续 <button class="small" id="dlAll">全部下载</button>
               ${state.downloads.some(j => j.site === site && j.vid === id && ACTIVE.includes(j.status)) ? '<button class="small" id="dlAllPause">全部暂停</button>' : ''}</span>` : ''}</h3>
           <div class="eps ${dlMode ? 'dlmode' : ''}">${eps.map((e, i) => {
@@ -729,10 +764,34 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
     if (!d.local) dbRate(d.name, d.year).then(r => {
+      if (r.pic && !dbPic) { dbPic = r.pic; const p = $('.top .poster', m); if (p) p.style.cssText = bgLayers(d.pic, dbPic, 'l'); }
       const t = $('#dbtag', m); if (!t || !r.id) return;
       t.textContent = r.rate ? '豆瓣 ' + r.rate : '豆瓣 暂无评分'; t.href = `https://movie.douban.com/subject/${r.id}/`; t.hidden = false;
     });
     paintAlts();
+    probeLine();
+  };
+  // Real resolution of the current line's first stream — asked for only after the sheet is on screen,
+  // answered from the local cache when possible, never blocks playback.
+  const probed = new Set();
+  const paintQ = () => {
+    const t = $('#qtag', m); if (t) t.innerHTML = qChip(vodQ(d), 'big');
+    $$('[data-line]', m).forEach(b => { b.querySelector('.q')?.remove(); b.insertAdjacentHTML('beforeend', qChip(d.lines[+b.dataset.line]?.quality, 'sm')); });
+  };
+  const probeLine = async () => {
+    const l = d.lines[line], u = l?.episodes[0]?.url;
+    if (!u || probed.has(line) || !(/\.m3u8(\?|$)/i.test(u) || u.startsWith('/media/'))) return;
+    probed.add(line);
+    let q = qc.get('u|' + u);
+    if (!q) {
+      try { q = (await api('probe', { u }, m.ctl.signal)).quality; } catch { return; }
+      if (!q) return;
+      qc.set('u|' + u, q);
+    }
+    if (!m.isConnected) return;
+    l.quality = q;
+    qc.set(`v|${site}|${id}`, bestQ([q, ...d.lines.map(x => x.quality)]));
+    paintQ();
   };
   const paintAlts = () => {
     const box = $('#alts', m); if (!box || !alts) return;

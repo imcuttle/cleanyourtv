@@ -308,10 +308,10 @@ enum API {
         return r
     }()
 
-    private static func douban(_ url: URL) async -> Any? {
+    private static func douban(_ url: URL, referer: String = "https://movie.douban.com/") async -> Any? {
         await gate.wait()
         if Task.isCancelled { return nil }
-        guard let d = try? await fetch(url, referer: "https://movie.douban.com/", timeout: 10) else { return nil }
+        guard let d = try? await fetch(url, referer: referer, timeout: 10) else { return nil }
         return try? JSONSerialization.jsonObject(with: d)
     }
 
@@ -324,17 +324,21 @@ enum API {
     static func doubanRating(name: String, year: String) async -> DoubanRating {
         let key = name + "|" + year
         lock.lock(); let hit = ratings[key]; lock.unlock()
-        if let hit, let at = hit.at, Date().timeIntervalSince(at) < (hit.rate.isEmpty ? 86400 : 7 * 86400) { return hit }
-        var c = URLComponents(string: "https://movie.douban.com/j/subject_suggest")!
-        c.queryItems = [URLQueryItem(name: "q", value: name)]
-        guard let list = await douban(c.url!) as? [[String: Any]], !Task.isCancelled else { return hit ?? DoubanRating() }
+        if let hit, hit.v == 2, let at = hit.at, Date().timeIntervalSince(at) < (hit.rate.isEmpty ? 86400 : 7 * 86400) { return hit }
+        // m.douban.com's subject search: id, score, year and poster in one request (the old subject_suggest now answers []).
+        var c = URLComponents(string: "https://m.douban.com/rexxar/api/v2/search/subjects")!
+        c.queryItems = [URLQueryItem(name: "q", value: name), URLQueryItem(name: "count", value: "8")]
+        guard let obj = await douban(c.url!, referer: "https://m.douban.com/movie/") as? [String: Any], !Task.isCancelled else { return hit ?? DoubanRating() }
+        let subs = ((obj["subjects"] as? [String: Any])?["items"] as? [[String: Any]] ?? []).compactMap { $0["target"] as? [String: Any] }
         let norm: (String) -> String = { $0.replacingOccurrences(of: "[\\s·:：\\-—!！,，.。]", with: "", options: .regularExpression).lowercased() }
-        let exact = list.filter { str($0["title"]) == name || norm(str($0["title"])) == norm(name) }
-        var out = DoubanRating(at: Date())
+        let exact = subs.filter { str($0["title"]) == name || norm(str($0["title"])) == norm(name) }
+        var out = DoubanRating(at: Date(), v: 2)
         if let pick = exact.first(where: { !year.isEmpty && str($0["year"]) == year }) ?? exact.first {
             out.id = str(pick["id"])
-            if let o = await douban(URL(string: "https://movie.douban.com/j/subject_abstract?subject_id=\(out.id)")!) as? [String: Any] {
-                out.rate = str((o["subject"] as? [String: Any])?["rate"])
+            if let v = (pick["rating"] as? [String: Any])?["value"] as? Double, v > 0 { out.rate = String(format: "%.1f", v) }
+            if let r = str(pick["cover_url"]).range(of: #"/(p\d+)\."#, options: .regularExpression) {
+                let pid = String(str(pick["cover_url"])[r]).dropFirst().dropLast()
+                out.pic = "https://img3.doubanio.com/view/photo/s_ratio_poster/public/\(pid).jpg"
             }
         }
         lock.lock()

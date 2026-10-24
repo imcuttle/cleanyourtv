@@ -296,6 +296,7 @@ struct Hero: View {
     let items: [VodItem]
     @State private var index = 0
     @State private var rates: [String: String] = [:]
+    @State private var pics: [String: String] = [:]   // 豆瓣 poster per item, drawn over the source's own
     private let timer = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -307,14 +308,18 @@ struct Hero: View {
         .onReceive(timer) { _ in withAnimation { index = (index + 1) % max(items.count, 1) } }
         .task(id: items.map(\.id)) {
             for it in items where rates[it.id] == nil {
-                rates[it.id] = await API.doubanRating(name: it.name, year: it.year).rate
+                let r = await API.doubanRating(name: it.name, year: it.year)
+                rates[it.id] = r.rate
+                if !r.pic.isEmpty { withAnimation(.easeInOut(duration: 0.4)) { pics[it.id] = r.pic } }
             }
         }
     }
 
     private func slide(_ item: VodItem) -> some View {
         ZStack(alignment: .bottom) {
-            Color.clear.overlay(Poster(url: item.pic, px: 1000)).clipped()
+            Color.clear.overlay(Poster(url: item.pic, px: 1000))
+                .overlay { if let p = pics[item.id] { Poster(url: p, px: 1000, placeholder: false) } }
+                .clipped()
             LinearGradient(colors: [.black.opacity(0.55), .clear, .clear, .black.opacity(0.7), .black],
                            startPoint: .top, endPoint: .bottom)
             VStack(spacing: 10) {
@@ -434,7 +439,9 @@ struct VodDetailView: View {
                 .overlay(Poster(url: item.pic, px: 200).blur(radius: 30).opacity(0.6)).clipped()
             LinearGradient(colors: [.clear, .black], startPoint: .center, endPoint: .bottom)
             Color.clear.frame(width: 170, height: 255)
-                .overlay(Poster(url: item.pic, px: 600)).clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(Poster(url: item.pic, px: 600))
+                .overlay { if !douban.pic.isEmpty { Poster(url: douban.pic, px: 600, placeholder: false) } }
+                .clipShape(RoundedRectangle(cornerRadius: 8))
                 .shadow(color: .black.opacity(0.7), radius: 20, y: 10)
                 .padding(.bottom, 10)
         }

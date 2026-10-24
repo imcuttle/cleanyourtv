@@ -90,13 +90,16 @@ struct Poster: View {
     static let defaultPx: CGFloat = 540  // longest side: a 112pt-wide 2:3 cell is ~500px tall at 3x
     let url: String
     var px: CGFloat
+    /// false: draws nothing until an image is ready, so it can sit on top of another Poster and fade in over it.
+    var placeholder = true
     @State private var low: UIImage?
     @State private var image: UIImage?
     @State private var shimmer = false
 
-    init(url: String, px: CGFloat = Poster.defaultPx) {
+    init(url: String, px: CGFloat = Poster.defaultPx, placeholder: Bool = true) {
         self.url = url
         self.px = px
+        self.placeholder = placeholder
         let v = ImagePipeline.variants(url, px)
         let hi = ImagePipeline.shared.cached(v.high, px)
         _image = State(initialValue: hi)
@@ -107,7 +110,7 @@ struct Poster: View {
         ZStack {
             if let low { Image(uiImage: low).resizable().scaledToFill().transition(.opacity) }
             if let image { Image(uiImage: image).resizable().scaledToFill().transition(.opacity) }
-            if low == nil && image == nil {
+            if placeholder && low == nil && image == nil {
                 Rectangle().fill(Color.card)
                     .overlay(LinearGradient(colors: [.clear, .white.opacity(0.06), .clear], startPoint: .leading, endPoint: .trailing)
                         .offset(x: shimmer ? 200 : -200))

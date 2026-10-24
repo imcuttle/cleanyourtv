@@ -88,6 +88,8 @@ struct DoubanRating: Codable, Hashable {
     var id = ""
     var rate = ""
     var at: Date? = nil   // when fetched; ratings are refreshed after 7 days (1 day when 豆瓣 had no score yet)
+    var pic = ""          // 豆瓣's poster for the title (small size url; Poster picks the sharp size)
+    var v: Int? = nil     // 2 = looked up through m.douban.com (has pic); older entries are fetched again
 }
 
 /// 安全级别: kids = only 少儿 sites + kid categories; standard = no adult sites/categories; all = everything.
