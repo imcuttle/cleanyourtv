@@ -135,7 +135,9 @@ a.dbtag:hover { filter: brightness(1.15); }
 .lines button.on { color: #fff; border-color: var(--red); }
 .eps { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; }
 .eps button { background: #2a2a2a; color: #ddd; border: 0; border-radius: 4px; padding: 9px 4px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.eps button:hover { background: #3a3a3a; } .eps button.seen { box-shadow: inset 0 -3px var(--red); }
+.eps button:hover, .eps a:hover { background: #3a3a3a; } .eps button.seen, .eps a.seen { box-shadow: inset 0 -3px var(--red); }
+.eps a { display: block; text-align: center; background: #2a2a2a; color: #ddd; border-radius: 4px; padding: 9px 4px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+a.btn { text-decoration: none; cursor: pointer; }
 .eps button em { font-style: normal; font-size: 11px; margin-right: 4px; color: #46d369; }
 .eps button em.queued, .eps button em.downloading, .eps button em.paused { color: #f5a623; }
 .eps.dlmode button { outline: 1px dashed #ffffff40; }

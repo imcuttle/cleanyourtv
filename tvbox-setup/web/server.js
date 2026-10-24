@@ -493,7 +493,8 @@ async function recognize(input) {
 // ======================= people =======================
 // 苹果CMS has no actor filter, but some sites' `wd` also matches vod_actor / vod_director. Search every
 // visible site (two pages), keep titles whose credits really contain the name, one per title+year.
-const splitPeople = v => str(v).split(/[,，、/|;；]+|\s{2,}/).map(x => x.trim()).filter(Boolean);
+const NO_PERSON = /^(暂无|未知|内详|无|不详|佚名|其他|n\/?a|none|unknown|-+)$/i;
+const splitPeople = v => str(v).split(/[,，、/|;；]+|\s{2,}/).map(x => x.trim()).filter(x => x && !NO_PERSON.test(x));
 async function person(name, role, sites) {
   const field = role === 'director' ? 'vod_director' : 'vod_actor';
   const pages = await Promise.all(sites.flatMap(s => [1, 2].map(pg => cmsGet(s, { ac: 'detail', wd: name, pg: String(pg) }, false, 8000)

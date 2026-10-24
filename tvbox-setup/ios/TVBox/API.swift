@@ -113,7 +113,8 @@ enum API {
     static func splitPeople(_ v: String) -> [String] {
         v.components(separatedBy: CharacterSet(charactersIn: ",，、/|;；"))
             .flatMap { $0.components(separatedBy: "  ") }
-            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !["暂无", "未知", "内详", "无", "不详", "佚名", "其他", "N/A", "none", "unknown"].contains($0) }
     }
 
     /// 苹果CMS has no actor filter, but some sites' `wd` also matches credits. Search every site (two pages),

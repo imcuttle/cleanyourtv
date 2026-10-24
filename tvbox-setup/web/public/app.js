@@ -147,6 +147,12 @@ async function route() {
   let [, page, a, b, c] = location.hash.split('/');
   // Deep links (what a card's href points at, e.g. after ⌘-click into a new tab): show the page
   // underneath, then the detail / player on top.
+  if (page === 'play') {
+    const [line, ep] = location.hash.split('/').slice(4).map(Number);
+    history.replaceState(null, '', '#/');
+    route();
+    return openDetail(decodeURIComponent(a || ''), decodeURIComponent(b || ''), { line: line || 0, ep: ep || 0 });
+  }
   if (page === 'v' || page === 'find') {
     history.replaceState(null, '', '#/');
     const [site, id, name] = [decodeURIComponent(a || ''), decodeURIComponent(b || ''), decodeURIComponent(a || '')];
@@ -194,6 +200,7 @@ function renderNoSites() {
 
 // ---------- cards & rows ----------
 const vodHref = (site, id) => `#/v/${encodeURIComponent(site)}/${encodeURIComponent(id)}`;
+const playHref = (site, id, line, ep) => `#/play/${encodeURIComponent(site)}/${encodeURIComponent(id)}/${line}/${ep}`;
 // Plain clicks are handled in-page; ⌘/Ctrl/Shift/Alt/middle click fall through to the browser (new tab / window).
 const plainClick = e => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
 function card(it, opts = {}) {
@@ -451,7 +458,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
       <div class="top"><div class="bg" style="${bg(d.pic)}"></div><div class="poster" style="${bg(d.pic)}"></div>
         <button class="close">✕</button>
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
-          ${eps.length ? `<button class="btn play" data-ep="${resumeIdx}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</button>
+          ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
             <button class="btn more" id="dlToggle">${dlMode ? '✓ 完成' : '⬇ 下载'}</button>` : ''}
           ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
         </div></div></div>
@@ -467,14 +474,17 @@ async function openDetail(site, id, autoplay = false, replace = false) {
             ${dlMode ? `<span class="dlhint">点选要下载的集 <button class="small" id="dlAll">全部下载</button></span>` : ''}</h3>
           <div class="eps ${dlMode ? 'dlmode' : ''}">${eps.map((e, i) => {
             const dj = dlFor(site, id, e.url);
-            return `<button data-${dlMode ? 'dl' : 'ep'}="${i}" class="${h && h.line === line && i <= h.ep ? 'seen' : ''}" title="${esc(e.name)}">${dj ? `<em class="${dj.status}">${dj.status === 'done' ? '✓' : '⬇'}</em>` : ''}${esc(e.name)}</button>`;
+            const inner = `${dj ? `<em class="${dj.status}">${dj.status === 'done' ? '✓' : '⬇'}</em>` : ''}${esc(e.name)}`;
+            const cls = h && h.line === line && i <= h.ep ? 'seen' : '';
+            return dlMode ? `<button data-dl="${i}" class="${cls}" title="${esc(e.name)}">${inner}</button>`
+              : `<a data-ep="${i}" class="${cls}" title="${esc(e.name)}" href="${esc(playHref(site, id, line, i))}">${inner}</a>`;
           }).join('')}</div>`
           : '<p class="err">这个源没有可直接播放的地址，看看下面的其他源。</p>'}
         <h3>其他源</h3><div class="alts" id="alts"><span class="lan">在所有源里搜索中…</span></div>
       </div>`;
     m.querySelector('.close').onclick = () => history.back();
     $$('[data-line]', m).forEach(b => b.onclick = () => { line = +b.dataset.line; render(); });
-    $$('[data-ep]', m).forEach(b => b.onclick = () => play(d, line, +b.dataset.ep));
+    $$('[data-ep]', m).forEach(b => b.onclick = e => { if (!plainClick(e)) return; e.preventDefault(); play(d, line, +b.dataset.ep); });
     $$('[data-dl]', m).forEach(b => b.onclick = () => enqueue(d, line, [+b.dataset.dl]).then(render, e => toast(e.message)));
     if ($('#dlToggle', m)) $('#dlToggle', m).onclick = () => { dlMode = !dlMode; render(); };
     if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
@@ -498,7 +508,9 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     alts = j.results.filter(r => r.name === d.name && !(r.site === site && r.id === id));
     paintAlts();
   });
-  if (autoplay && d.lines.length) play(d, line, h0 && h0.line === line ? h0.ep : 0);
+  if (autoplay && typeof autoplay === 'object' && d.lines[autoplay.line]?.episodes[autoplay.ep]) {
+    line = autoplay.line; render(); play(d, line, autoplay.ep);
+  } else if (autoplay && d.lines.length) play(d, line, h0 && h0.line === line ? h0.ep : 0);
 }
 function people(label, role, list, max = 99) {
   if (!list?.length) return '';
