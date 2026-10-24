@@ -73,7 +73,7 @@ function profile() {
   if (!P) {
     P = {};
     const add = (list, w) => list.slice(0, 30).forEach(it => tagsOf(it).forEach(([k, m]) => { P[k] = (P[k] || 0) + w * m; }));
-    add(favs.all(), 2); add(hist.list(), 1);
+    add(favs.list(), 2); add(hist.list(), 1);
   }
   return P;
 }
@@ -368,10 +368,10 @@ async function moreCands(gen) {
   if (F.once) return [];
   F.once = true;
   const ok = it => state.sites.some(s => s.key === it.site);
-  if (m === 'fav') return fresh(favs.all().filter(ok));
+  if (m === 'fav') return fresh(favs.list().filter(ok));
   if (m === 'hist') return fresh(hist.list().filter(ok));
   if (m === 'search') {
-    const j = await api('search', { wd: F.extra.q }, null), nq = normName(F.extra.q);
+    const j = await api('search', { wd: F.extra.q, ...(F.extra.scope ? { site: F.extra.scope } : {}) }, null), nq = normName(F.extra.q);
     const rank = it => it.name === F.extra.q ? 0 : normName(it.name).includes(nq) ? 1 : 2;
     return fresh(j.results.sort((a, b) => rank(a) - rank(b)));
   }
@@ -728,7 +728,7 @@ document.addEventListener('click', e => {
   const b = e.target.closest('[data-feed]'); if (!b) return;
   e.preventDefault();
   const d = b.dataset;
-  openFeed({ mode: d.feed, t: d.t || '', name: d.name || '', site: d.site || state.site, q: d.q || '' });
+  openFeed({ mode: d.feed, t: d.t || '', name: d.name || '', site: d.site || state.site, q: d.q || '', scope: d.scope || '' });
 });
 window.openFeed = openFeed;
 })();

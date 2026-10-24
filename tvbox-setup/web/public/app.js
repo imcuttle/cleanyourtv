@@ -242,11 +242,19 @@ const hist = {
   },
   del(site, id) { localStorage.history = JSON.stringify(hist.all().filter(h => !(h.site === site && h.id === id))); },
   clear() { localStorage.history = '[]'; },
-  // 成人 local titles are private to the 本地媒体 source: never listed under other sources (legacy local entries
-  // without the flag count as private too); the local source itself lists only its own history.
-  visible: (h, site = state.site) => site === 'local' ? h.site === 'local' : !(h.site === 'local' && h.adult !== 0),
+  // The local source lists only its own history; 成人 titles follow showEntry (see below).
+  visible: (h, site = state.site) => (site === 'local' ? h.site === 'local' : true) && showEntry(h, site),
   list: () => hist.all().filter(h => hist.visible(h)),
 };
+
+// 成人 entries (history / favorites): a title is 成人 when it was saved with the flag, its source is a 成人 source, or it is
+// a local title that is not explicitly flagged clean (legacy entries). They appear nowhere in 儿童 / 标准 mode, and in
+// 全部 mode only while the current source is itself a 成人 source (or the local one) — never on an ordinary source's home.
+const entryAdult = e => !!e.adult || (e.site === 'local' ? e.adult !== 0 : !!state.sites.find(s => s.key === e.site)?.adult);
+const adultCtx = site => site === 'local' || !!state.sites.find(s => s.key === site)?.adult;
+// (Outside 全部 mode a 成人 source is not in state.sites at all, so an entry from an unknown source can't be told apart: hidden.)
+const showEntry = (e, site = state.site) => state.level === 'all' ? !entryAdult(e) || adultCtx(site)
+  : !entryAdult(e) && (e.site === 'local' || state.sites.some(s => s.key === e.site));
 
 // ---------- favorites (hidden in 儿童 mode) ----------
 const favs = {
@@ -255,9 +263,10 @@ const favs = {
   toggle(d) {
     if (favs.has(d.site, d.id)) { favs.del(d.site, d.id); return false; }
     const { site, siteName, id, name, pic, remarks, year, type, quality } = d;
-    localStorage.favs = JSON.stringify([{ site, siteName, id, name, pic, remarks, year, type, quality, at: Date.now() }, ...favs.all()].slice(0, 500));
+    localStorage.favs = JSON.stringify([{ site, siteName, id, name, pic, remarks, year, type, quality, ...(d.adult ? { adult: 1 } : {}), at: Date.now() }, ...favs.all()].slice(0, 500));
     return true;
   },
+  list: () => favs.all().filter(f => showEntry(f)),
   del(site, id) { localStorage.favs = JSON.stringify(favs.all().filter(f => !(f.site === site && f.id === id))); },
   clear() { localStorage.favs = '[]'; },
 };
@@ -360,11 +369,21 @@ const saveHealth = () => { clearTimeout(healthSave); healthSave = setTimeout(() 
 const healthFresh = t => t && (t.ok || Date.now() - t.at < FAIL_TTL);
 const healthCell = (s, busy) => busy ? '<b class="hs">测速中…</b>' : s.group ? `<b class="hs">聚合 ${s.group}</b>` : !s.api || s.local ? ''
   : !siteHealth.get(s.api) ? '<b class="hs">…</b>' : siteHealth.get(s.api).ok ? `<b class="hs ok">${siteHealth.get(s.api).ms}ms</b>` : '<b class="hs bad">不通</b>';
+let menuQ = '';
+function filterMenu() {
+  const q = menuQ.toLowerCase(), rows = $$('#siteMenu button[data-k]');
+  let n = 0;
+  rows.forEach(b => { const hit = !q || (b.dataset.n || '').includes(q); b.classList.toggle('mhid', !hit); if (hit) n++; });
+  const c = $('#siteMenu .mcount'); if (c) c.textContent = q ? `${n} / ${rows.length}` : rows.length;
+  const e = $('#siteMenu .mempty'); if (e) e.hidden = n > 0;
+  if (!$('#siteMenu').hidden) requestAnimationFrame(() => pingMenu());
+}
 function renderMenu() {
   const h = s => siteHealth.get(s.api);
-  $('#siteMenu').innerHTML = `<div class="mhead">点播源 · ${state.sites.filter(s => !s.inGroup).length}<span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + state.sites.filter(s => !s.inGroup).map(s =>
-    `<button data-k="${esc(s.key)}" class="${s.key === state.site ? 'on' : ''}${h(s) && !h(s).ok ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, healthBusy.has(s.api))}${s.key === 'local' || s.local ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('');
-  watchMenu();
+  $('#siteMenu').innerHTML = `<div class="msearch"><input id="menuQ" class="find" type="search" placeholder="搜点播源" autocomplete="off" value="${esc(menuQ)}"></div><div class="mhead">点播源 · <span class="mcount"></span><span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + state.sites.filter(s => !s.inGroup).map(s =>
+    `<button data-k="${esc(s.key)}" data-n="${esc((s.name + ' ' + s.key).toLowerCase())}" class="${s.key === state.site ? 'on' : ''}${h(s) && !h(s).ok ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, healthBusy.has(s.api))}${s.key === 'local' || s.local || state.level !== 'all' ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('')
+    + `<div class="mempty" hidden>没有匹配的点播源</div><div class="mfoot"><span>封面</span><div class="mseg"><button type="button" data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版</button><button type="button" data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div></div>`;
+  filterMenu();
 }
 function watchMenu() {
   if (menuIO) menuIO.disconnect();
@@ -438,6 +457,7 @@ async function loadSites() {
   if (!state.sites.some(s => s.key === state.site)) state.site = state.sites.find(s => !s.inGroup)?.key || '';
   const cur = state.sites.find(s => s.key === state.site);
   $('#siteName').textContent = cur ? cur.name : '无源';
+  syncScope();
   $('.picker').hidden = !state.sites.length;
   $('#levelTag').hidden = j.level === 'standard';
   $('[data-nav=favorites]').hidden = j.level === 'kids';
@@ -448,8 +468,16 @@ async function loadSites() {
   renderMenu();
   autoPing();
 }
-$('#siteBtn').onclick = e => { e.stopPropagation(); $('#siteMenu').hidden = !$('#siteMenu').hidden; $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) requestAnimationFrame(() => pingMenu()); };
+$('#siteBtn').onclick = e => { e.stopPropagation(); closeScope(); $('#siteMenu').hidden = !$('#siteMenu').hidden; $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) { requestAnimationFrame(() => pingMenu()); if (matchMedia('(hover:hover)').matches) $('#menuQ')?.focus(); $('#siteMenu button.on')?.scrollIntoView({ block: 'nearest' }); } };
+$('#siteMenu').oninput = e => { if (e.target.id === 'menuQ') { menuQ = e.target.value.trim(); filterMenu(); } };
+$('#siteMenu').onkeydown = e => {
+  if (e.target.id !== 'menuQ') return;
+  if (e.key === 'Enter') { e.preventDefault(); $('#siteMenu button[data-k]:not(.mhid)')?.click(); }
+  else if (e.key === 'Escape') { if (menuQ) { e.target.value = menuQ = ''; filterMenu(); } else closeMenu(); }
+};
 $('#siteMenu').onclick = async e => {
+  const cm = e.target.closest('[data-cardmode]');
+  if (cm) { e.stopPropagation(); setCardMode(cm.dataset.cardmode); return; }
   if (e.target.closest('[data-re]')) { e.stopPropagation(); return pingMenu(true); }
   const del = e.target.closest('[data-del]');
   if (del) {
@@ -469,12 +497,43 @@ $('#siteMenu').onclick = async e => {
   }
   const b = e.target.closest('button[data-k]'); if (!b) return;
   state.site = localStorage.site = b.dataset.k; state.cats = [];
-  closeMenu();
+  closeMenu(); syncScope(); menuQ = '';
   loadSites(); if (location.hash && location.hash !== '#/') location.hash = '#/'; else route();
 };
 const closeMenu = () => { $('#siteMenu').hidden = true; $('#siteBtn').classList.remove('open'); };
 document.addEventListener('click', e => { if (!e.composedPath().some(n => n.classList?.contains('picker'))) closeMenu(); });
-$('#searchForm').onsubmit = e => { e.preventDefault(); const q = $('#q').value.trim(); if (q) location.hash = '#/search/' + encodeURIComponent(q); };
+// ---------- search box: scope (全部源 / 仅当前源) ----------
+const searchScope = { get: () => localStorage.searchScope === 'site' ? 'site' : 'all', set(v) { localStorage.searchScope = v; syncScope(); } };
+const personHash = (role, name, scope = searchScope.get()) => '#/person/' + role + '/' + encodeURIComponent(name) + (scope === 'site' && state.site ? '/' + encodeURIComponent(state.site) : '');
+const searchHash = (q, scope = searchScope.get()) => '#/search/' + encodeURIComponent(q) + (scope === 'site' && state.site ? '/' + encodeURIComponent(state.site) : '');
+const searchableCount = () => state.sites.filter(s => !s.group).length;
+function syncScope() {
+  const sc = searchScope.get(), cur = state.sites.find(s => s.key === state.site), site = sc === 'site' && !!cur;
+  $('#scopeLabel').textContent = site ? '当前源' : '全部源';
+  $('#scopeBtn').classList.toggle('on', site);
+  $('#scopeBtn').title = site ? `只在「${cur.name}」里搜` : `在全部 ${searchableCount()} 个源里搜`;
+  $('#scopeAllHint').textContent = `同时搜索全部 ${searchableCount()} 个源，结果自动合并`;
+  $('#scopeSiteHint').textContent = cur ? cur.name : '没有可用的源';
+  $$('#scopeMenu [data-scope]').forEach(b => b.classList.toggle('on', b.dataset.scope === (site ? 'site' : 'all')));
+  $('#q').placeholder = site ? `在「${cur.name}」里搜` : '搜片名 / 演员 / 导演';
+}
+const closeScope = () => { $('#scopeMenu').hidden = true; $('#scopeBtn').classList.remove('open'); $('#scopeBtn').setAttribute('aria-expanded', 'false'); };
+$('#scopeBtn').onclick = e => {
+  e.stopPropagation(); closeMenu();
+  const open = $('#scopeMenu').hidden;
+  $('#scopeMenu').hidden = !open; $('#scopeBtn').classList.toggle('open', open); $('#scopeBtn').setAttribute('aria-expanded', String(open));
+};
+$('#scopeMenu').onclick = e => {
+  const b = e.target.closest('[data-scope]'); if (!b) return;
+  searchScope.set(b.dataset.scope); closeScope(); $('#q').focus();
+  // Already looking at results: re-run them in the new scope.
+  const q = $('#q').value.trim();
+  if (location.hash.startsWith('#/search/') && q) location.hash = searchHash(q);
+};
+document.addEventListener('click', e => { if (!e.target.closest('#searchForm')) closeScope(); });
+addEventListener('keydown', e => { if (e.key === 'Escape') closeScope(); });
+$('#searchForm').onsubmit = e => { e.preventDefault(); const q = $('#q').value.trim(); if (q) { closeScope(); location.hash = searchHash(q); } };
+syncScope();
 addEventListener('scroll', () => $('#top').classList.toggle('solid', scrollY > 30));
 addEventListener('hashchange', () => route({ nav: true }));
 
@@ -592,14 +651,14 @@ async function route(opts = {}) {
     if (!state.sites.length) return renderNoSites();
     if (page === 'history') return renderHistory();
     if (page === 'favorites') return renderFavorites();
-    if (page === 'person') return await renderPerson(a, decodeURIComponent(b || ''));
+    if (page === 'person') return await renderPerson(a, decodeURIComponent(b || ''), decodeURIComponent(c || ''));
     if (page === 'site') {
       const k = decodeURIComponent(a || '');
       if (state.sites.some(x => x.key === k)) { state.site = localStorage.site = k; state.cats = []; await loadSites(); }
       history.replaceState(null, '', '#/');
       return await renderHome();
     }
-    if (page === 'search') return await renderSearch(decodeURIComponent(a || ''));
+    if (page === 'search') return await renderSearch(decodeURIComponent(a || ''), decodeURIComponent(b || ''));
     if (page === 'cat') return await renderCategory(decodeURIComponent(a || ''), decodeURIComponent(b || ''), decodeURIComponent(c || ''));
     return await renderHome();
   } catch (e) {
@@ -634,7 +693,7 @@ function card(it, opts = {}) {
     : it.adult ? `<span class="db" hidden data-javfb data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`
     : it.site === 'local' ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
   return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}${pv}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
-    <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${qChip(vodQ(it))}${rate}
+    <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${qChip(vodQ(it))}${rate}${opts.dup > 1 ? `<span class="dup" title="${esc(opts.dupTitle || '')}">${opts.dup} 源</span>` : ''}
       ${pct ? `<div class="prog" style="width:${pct}%"></div>` : ''}</div>
     <div class="name">${esc(it.name)}</div>${opts.sub ? `<div class="sub">${esc(opts.sub)}</div>` : ''}</a>`;
 }
@@ -738,14 +797,14 @@ document.addEventListener('click', e => {
 
 // ---------- home ----------
 async function renderHome() {
-  if (!keepView) view.innerHTML = spinner;
+  if (!keepView) view.innerHTML = `<div class="page pageload">${spinner}</div>`;
   const site = state.site;
   const [latest, cats] = await Promise.all([api('list', { site }),
     state.cats.length ? { categories: state.cats } : api('categories', { site }).catch(() => ({ categories: [] }))]);
   state.cats = cats.categories;
   const sig = pageCtl.signal;
   const cont = hist.list().filter(h => state.sites.some(s => s.key === h.site)).slice(0, 20);
-  const favList = favs.all().filter(f => state.sites.some(s => s.key === f.site)).slice(0, 30);
+  const favList = favs.list().filter(f => state.sites.some(s => s.key === f.site)).slice(0, 30);
   const kids = state.level === 'kids';
   const own = site === 'local'; // 本地媒体: its own folders only, no 豆瓣
   const adultSite = !!state.sites.find(x => x.key === site)?.adult; // 成人源: no 豆瓣 rows either
@@ -827,7 +886,7 @@ function renderHistory() {
 }
 function renderFavorites() {
   if (kidsMode()) { view.innerHTML = '<div class="page"><h1>我的收藏</h1><p class="empty">儿童模式下收藏不可见。</p></div>'; return; }
-  const list = favs.all();
+  const list = favs.list();
   view.innerHTML = `<div class="page"><div class="pagehead"><h1>我的收藏</h1>
       ${list.length ? '<button class="small feedgo" data-feed="fav">▶ 沉浸观看</button><button class="small" data-clear="fav">清空全部</button>' : ''}</div>
     <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有收藏。打开影片，点「＋ 收藏」。</p>
@@ -845,14 +904,42 @@ document.addEventListener('click', e => {
 });
 
 // ---------- people (演员 / 导演) ----------
-async function renderPerson(role, name) {
+async function renderPerson(role, name, scopeKey = '') {
   const label = role === 'director' ? '导演' : '演员';
-  view.innerHTML = `<div class="page"><h1>${esc(name)} <span class="role">${label}</span></h1><p class="lan">在 ${state.sites.length} 个源里找作品…</p>${spinner}</div>`;
-  const j = await api('person', { name, role });
-  view.innerHTML = `<div class="page"><h1>${esc(name)} <span class="role">${label}</span></h1>
-    <p class="lan">${j.list.length ? `${j.list.length} 部作品，按年份排序（只列出各源里能搜到、且演职员表里确实有这个名字的）` : ''}</p>
-    ${j.list.length ? `<div class="grid">${j.list.map(it => card(it, { sub: [it.year, it.type, it.siteName].filter(x => x && x !== '0').join(' · ') })).join('')}</div>`
-      : '<p class="empty">各源都没搜到。部分源的搜索只按片名匹配，不认演员。</p>'}</div>`;
+  const scoped = scopeKey ? state.sites.find(s => s.key === scopeKey) : null;
+  const head = `<h1>${esc(name)} <span class="role">${label}</span></h1>`;
+  view.innerHTML = `<div class="page">${head}<p class="lan">在 ${scoped ? `「${esc(scoped.name)}」` : `${searchableCount()} 个源`}里找作品…</p>${spinner}</div>`;
+  const j = await api('person', { name, role, ...(scoped ? { site: scoped.key } : {}) });
+  const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
+  const curName = names[scoped ? scoped.key : state.site] || '当前源';
+  const cards = () => {
+    const groups = searchMerge.on() ? mergeDupes(j.list) : j.list.map(it => ({ main: it, srcs: [it] }));
+    const html = groups.map(g => {
+      const srcs = [...new Set(g.srcs.map(x => x.site))];
+      return card(g.main, { sub: [g.main.year, g.main.type, srcs.length > 1 ? `${names[srcs[0]] || g.main.siteName} 等 ${srcs.length} 个源` : g.main.siteName].filter(x => x && x !== '0').join(' · '),
+        dup: srcs.length, dupTitle: srcs.map(k => names[k] || k).join(' / ') });
+    }).join('');
+    return { html, shown: groups.length };
+  };
+  const status = shown => j.list.length ? `${scoped ? `仅「${esc(scoped.name)}」` : '全部源'}，${shown} 部作品${shown < j.list.length ? `（合并了 ${j.list.length - shown} 条重复）` : ''}，按年份排序；只列出演职员表里确实有这个名字的` : '';
+  const first = cards();
+  view.innerHTML = `<div class="page">${head}
+    <div class="stool">
+      <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>仅 ${esc(curName)}</span></button></div>
+      <label class="swt" title="同名同年的影片只显示一张，点开后在「其他源」里切换"><input type="checkbox" id="sMerge" ${searchMerge.on() ? 'checked' : ''}><i></i><span>合并同名资源</span></label>
+      <span class="lan" id="sStatus">${status(first.shown)}</span>
+    </div>
+    ${j.list.length ? `<div class="grid" id="sGrid">${first.html}</div>`
+      : `<p class="empty">${scoped ? `「${esc(scoped.name)}」里没找到。` : '各源都没搜到。'}部分源的搜索只按片名匹配，不认演员。${scoped ? ' <a href="#" id="sAll"><u>改成在全部源里找</u></a>' : ''}</p>`}</div>`;
+  const go = sc => { searchScope.set(sc); location.hash = personHash(role, name, sc); };
+  $$('.sseg [data-sc]', view).forEach(b => b.onclick = () => { if ((b.dataset.sc === 'site') !== !!scoped) go(b.dataset.sc); });
+  const all = $('#sAll', view); if (all) all.onclick = e => { e.preventDefault(); go('all'); };
+  $('#sMerge', view).onchange = e => {
+    searchMerge.set(e.target.checked);
+    const c = cards(); const g = $('#sGrid', view); if (g) g.innerHTML = c.html;
+    $('#sStatus', view).innerHTML = status(c.shown);
+    observeRatings(view);
+  };
   observeRatings(view);
 }
 
@@ -918,10 +1005,27 @@ async function renderCategory(t, name, siteKey) {
 // ---------- search (all sources) ----------
 // Every title that matched (by name, or because a site's search also matched its 演员/导演), then the
 // matching people as name tags that open their filmography.
-async function renderSearch(q) {
+const searchMerge = { on: () => localStorage.searchMerge !== '0', set(v) { localStorage.searchMerge = v ? '1' : '0'; } };
+// Same title on several sources → one result. Same name (ignoring spaces / punctuation) and compatible year (equal, or one
+// side unknown). The first one in ranking order is the face of the group; it borrows a cover / remarks / year if it lacks them.
+function mergeDupes(list) {
+  const byName = new Map(), out = [];
+  for (const it of list) {
+    const k = normName(it.name) || it.name;
+    if (!byName.has(k)) byName.set(k, []);
+    const g = byName.get(k).find(g => !g.main.year || !it.year || g.main.year === it.year);
+    if (!g) { const n = { main: { ...it }, srcs: [it] }; byName.get(k).push(n); out.push(n); continue; }
+    g.srcs.push(it);
+    for (const f of ['pic', 'remarks', 'year', 'quality']) if (!g.main[f] && it[f]) g.main[f] = it[f];
+  }
+  return out;
+}
+async function renderSearch(q, scopeKey = '') {
   $('#q').value = q;
-  view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1><p class="lan">正在搜索全部 ${state.sites.length} 个源（片名 / 演员 / 导演）…</p>${spinner}</div>`;
-  const j = await api('search', { wd: q });
+  const scoped = scopeKey ? state.sites.find(s => s.key === scopeKey) : null;
+  const nSrc = scoped ? (scoped.members?.length || 1) : searchableCount();
+  view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1><p class="lan">${scoped ? `正在「${esc(scoped.name)}」里搜索` : `正在搜索全部 ${nSrc} 个源`}（片名 / 演员 / 导演）…</p>${spinner}</div>`;
+  const j = await api('search', { wd: q, ...(scoped ? { site: scoped.key } : {}) });
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
   const order = Object.fromEntries(state.sites.map((s, i) => [s.key, i]));
   const nq = normName(q);
@@ -929,11 +1033,41 @@ async function renderSearch(q) {
   const res = j.results.sort((a, b) => rank(a) - rank(b) || order[a.site] - order[b.site]);
   const people = [...(j.actor || []).map(p => ({ ...p, role: 'actor', label: '演员' })), ...(j.director || []).map(p => ({ ...p, role: 'director', label: '导演' }))]
     .sort((a, b) => (b.name === q) - (a.name === q) || (b.count ?? b.list?.length ?? 0) - (a.count ?? a.list?.length ?? 0));
-  view.innerHTML = `<div class="page"><div class="pagehead"><h1>“${esc(q)}”</h1>${res.length ? `<button class="small feedgo" data-feed="search" data-q="${esc(q)}">▶ 沉浸观看</button>` : ''}</div>
-    <p class="lan">${state.sites.length} 个源，${res.length} 部影片${people.length ? `，${people.length} 位演职员` : ''}${j.failed.length ? `；${esc(j.failed.join(' / '))} 未响应` : ''}</p>
-    ${res.length ? `<div class="grid">${res.map(it => card(it, { sub: names[it.site] || it.siteName })).join('')}</div>` : '<div class="empty">没有影片匹配，换个关键词（片名、演员或导演）</div>'}
+  const curName = names[scoped ? scoped.key : state.site] || '当前源';
+  const sub = g => {
+    const sites = [...new Set(g.srcs.map(x => names[x.site] || x.siteName))];
+    return sites.length > 1 ? `${sites[0]} 等 ${sites.length} 个源` : sites[0];
+  };
+  const cards = () => {
+    const groups = searchMerge.on() ? mergeDupes(res) : res.map(it => ({ main: it, srcs: [it] }));
+    const html = groups.map(g => {
+      const n = new Set(g.srcs.map(x => x.site)).size;
+      return card(g.main, { sub: sub(g), dup: n, dupTitle: [...new Set(g.srcs.map(x => names[x.site] || x.siteName))].join(' / ') });
+    }).join('');
+    return { html, shown: groups.length };
+  };
+  const status = shown => `${scoped ? `仅「${esc(scoped.name)}」` : `${nSrc} 个源`}，${shown} 部影片${shown < res.length ? `（合并了 ${res.length - shown} 条重复）` : ''}${people.length ? `，${people.length} 位演职员` : ''}${j.failed.length ? `；${esc(j.failed.join(' / '))} 未响应` : ''}`;
+  const first = cards();
+  view.innerHTML = `<div class="page"><div class="pagehead"><h1>“${esc(q)}”</h1>${res.length ? `<button class="small feedgo" data-feed="search" data-q="${esc(q)}" data-scope="${esc(scoped ? scoped.key : '')}">▶ 沉浸观看</button>` : ''}</div>
+    <div class="stool">
+      <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>仅 ${esc(curName)}</span></button></div>
+      <label class="swt" title="同名同年的影片只显示一张，点开后在「其他源」里切换"><input type="checkbox" id="sMerge" ${searchMerge.on() ? 'checked' : ''}><i></i><span>合并同名资源</span></label>
+      <span class="lan" id="sStatus">${status(first.shown)}</span>
+    </div>
+    ${res.length ? `<div class="grid" id="sGrid">${first.html}</div>` : `<div class="empty">${scoped ? `「${esc(scoped.name)}」里没有匹配的影片。` : '没有影片匹配，换个关键词（片名、演员或导演）。'}${scoped ? ' <a href="#" id="sAll"><u>改成在全部源里搜</u></a>' : ''}</div>`}
     ${people.length ? `<h2 class="rtitle">演员 / 导演</h2><div class="ptags">${people.map(p =>
-      `<a class="ptag" href="#/person/${p.role}/${encodeURIComponent(p.name)}"><b>${esc(p.name)}</b><span>${p.label} · ${p.count ?? p.list?.length ?? 0} 部</span></a>`).join('')}</div>` : ''}</div>`;
+      `<a class="ptag" href="${personHash(p.role, p.name, scoped ? 'site' : 'all')}"><b>${esc(p.name)}</b><span>${p.label} · ${p.count ?? p.list?.length ?? 0} 部</span></a>`).join('')}</div>` : ''}</div>`;
+  $$('.sseg [data-sc]', view).forEach(b => b.onclick = () => {
+    const sc = b.dataset.sc; if ((sc === 'site') === !!scoped) return;
+    searchScope.set(sc); location.hash = searchHash(q, sc);
+  });
+  const all = $('#sAll', view); if (all) all.onclick = e => { e.preventDefault(); searchScope.set('all'); location.hash = searchHash(q, 'all'); };
+  $('#sMerge', view).onchange = e => {
+    searchMerge.set(e.target.checked);
+    const c = cards(); const g = $('#sGrid', view); if (g) g.innerHTML = c.html;
+    $('#sStatus', view).innerHTML = status(c.shown);
+    observeRatings(view); observeJav(view);
+  };
   observeRatings(view);
   observeJav(view);
 }
@@ -1073,7 +1207,7 @@ async function refreshDownloads(signal) {
 }
 const dlFor = (site, id, url) => (state.downloads || []).find(j => j.site === site && j.vid === id && j.url === url);
 async function enqueue(d, line, eps) {
-  await req('POST', '/api/downloads', { items: eps.map(i => ({ site: d.site, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, line, ep: i, epName: d.lines[line].episodes[i].name, url: d.lines[line].episodes[i].url })) });
+  await req('POST', '/api/downloads', { items: eps.map(i => ({ site: d.site, siteName: d.siteName, adult: d.adult ? 1 : 0, id: d.id, name: d.name, pic: d.pic, line, ep: i, epName: d.lines[line].episodes[i].name, url: d.lines[line].episodes[i].url })) });
   await refreshDownloads();
   toast(eps.length > 1 ? `已加入下载：${eps.length} 集` : '已加入下载');
   $('#modal')?.pollDl?.();
@@ -1320,7 +1454,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
 function people(label, role, list, max = 99) {
   if (!list?.length) return '';
   return `<div class="people ${list.length > max ? '' : 'all'}"><span class="plabel">${label}</span>${list.map((n, i) =>
-    `<a class="pchip ${i >= max ? 'extra' : ''}" data-nav href="#/person/${role}/${encodeURIComponent(n)}">${esc(n)}</a>`).join('')}
+    `<a class="pchip ${i >= max ? 'extra' : ''}" data-nav href="${personHash(role, n)}">${esc(n)}</a>`).join('')}
     ${list.length > max ? `<button class="pchip more" data-more-people>+${list.length - max}</button>` : ''}</div>`;
 }
 // Links inside the detail sheet: a plain click leaves the sheet and goes there (replacing the sheet's
@@ -1666,9 +1800,9 @@ const thumbIO = new IntersectionObserver(es => es.forEach(e => {
   thumbPump();
 }), { rootMargin: '300px' });
 
-// ---- 直播源 picker: one fixed-size button + a popover (desktop) / bottom sheet (phone). Search, tick rows, bulk delete. ----
+// ---- 直播源 picker: one fixed-size button + a popover (desktop) / bottom sheet (phone). Search, click to switch, × to delete — same feel as the 点播源 menu. ----
 const liveHealth = new Map();           // url -> { ok, text, at } | 'busy'
-const lm = { cfg: [], sel: new Set(), q: '', busy: false };
+const lm = { cfg: [], q: '' };
 const liveUrlOf = key => lm.cfg[Number(key)]?.url || '';
 async function lmRefresh() { lm.cfg = (await get('/api/config', null)).lives || []; }
 const lmVisible = () => { const q = lm.q.toLowerCase(); return state.lives.filter(l => !q || l.name.toLowerCase().includes(q)); };
@@ -1685,21 +1819,12 @@ function lmRender() {
   const rows = lmVisible();
   box.innerHTML = rows.map(l => {
     const s = lmStatus(l.key), h = liveHealth.get(liveUrlOf(l.key));
-    return `<div class="lpr ${l.key === cur ? 'on' : ''} ${h && h !== 'busy' && !h.ok ? 'dead' : ''} ${lm.sel.has(l.key) ? 'sel' : ''}" data-k="${esc(l.key)}">
-      <label class="lck"><input type="checkbox" class="lsel" ${lm.sel.has(l.key) ? 'checked' : ''}></label><span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${s ? `<b class="hs ${s.cls}">${esc(s.text)}</b>` : ''}
-      <em class="x" data-del="${esc(l.key)}" title="删除这个直播源">×</em></div>`;
+    return `<div class="lpr ${l.key === cur ? 'on' : ''} ${h && h !== 'busy' && !h.ok ? 'dead' : ''} " data-k="${esc(l.key)}">
+      <span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${s ? `<b class="hs ${s.cls}">${esc(s.text)}</b>` : ''}
+      ${state.level === 'all' ? `<em class="x" data-del="${esc(l.key)}" title="删除这个直播源">×</em>` : ''}</div>`;
   }).join('') || '<div class="lan" style="padding:10px">没有匹配的直播源</div>';
-  lmSelUI();
-  lmWatch();
-}
-// Ticking a row only touches the checkbox and the action bar (no re-render, the list never jumps).
-function lmSelUI() {
-  const n = lm.sel.size;
   $('#lmCount').textContent = `${state.lives.length} 个直播源`;
-  $('#lmBar').hidden = !n;
-  $('#lmSelN').textContent = `已选 ${n}`;
-  const vis = lmVisible();
-  $('#lmBar [data-lm=all]').textContent = vis.length && vis.every(l => lm.sel.has(l.key)) ? '取消全选' : '全选';
+  lmWatch();
 }
 async function lmSave(mutate) {
   const curUrl = liveUrlOf(localStorage.live);
@@ -1708,7 +1833,6 @@ async function lmSave(mutate) {
   await Promise.all([loadSites(), lmRefresh()]);
   const i = lm.cfg.findIndex(l => l.url === curUrl);
   localStorage.live = String(i >= 0 ? i : 0);
-  lm.sel.clear();
   $('#lmName').textContent = state.lives.find(l => l.key === localStorage.live)?.name || '无直播源';
   lmRender();
   if (i < 0 && location.hash.startsWith('#/live')) loadLiveBody();
@@ -1758,24 +1882,6 @@ function lmWatch() {
   lmIO = new IntersectionObserver(es => es.forEach(en => en.isIntersecting ? lmQueue(en.target.dataset.k) : lmUnqueue(en.target.dataset.k)), { root: $('#llist') });
   $$('#llist .lpr').forEach(r => lmIO.observe(r));
 }
-async function lmOp(op) {
-  if (op === 'clear') { lm.sel.clear(); $$('#llist .lpr.sel').forEach(r => { r.classList.remove('sel'); $('.lsel', r).checked = false; }); return lmSelUI(); }
-  if (op === 'all') {
-    const vis = lmVisible(), all = vis.every(l => lm.sel.has(l.key));
-    vis.forEach(l => all ? lm.sel.delete(l.key) : lm.sel.add(l.key));
-    $$('#llist .lpr').forEach(r => { const on = lm.sel.has(r.dataset.k); r.classList.toggle('sel', on); $('.lsel', r).checked = on; });
-    return lmSelUI();
-  }
-  if (op !== 'delsel' || lm.busy || !lm.sel.size) return;
-  const drop = new Set([...lm.sel].map(Number)), n = drop.size;
-  if (!confirm(`删除选中的 ${n} 个直播源？`)) return;
-  try {
-    lm.busy = true;
-    await lmSave(lives => lives.filter((_, i) => !drop.has(i)));
-    toast(`已删除 ${n} 个`);
-  } catch (e) { toast(e.message); }
-  finally { lm.busy = false; }
-}
 document.addEventListener('click', e => {
   const m = $('#liveMenu'); if (!m || m.hidden) return;
   // composedPath: a row that was re-rendered during the click is already detached, closest() would miss it
@@ -1796,8 +1902,6 @@ async function renderLive() {
       <div class="lpick"><button id="liveBtn" class="sitebtn lbtn" type="button"><span id="lmName"></span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <div id="liveMenu" class="menu lmenu" hidden>
           <div class="lm-top"><input id="lmq" class="find" type="search" placeholder="搜直播源" autocomplete="off"></div>
-          <div class="lm-bar" id="lmBar" hidden><span id="lmSelN"></span><i></i>
-            <button class="small" data-lm="all">全选</button><button class="small dng" data-lm="delsel">删除</button><button class="small" data-lm="clear">取消</button></div>
           <div class="lm-list" id="llist"></div>
           <div class="lm-foot"><span id="lmCount" class="lan"></span><a href="#/settings" class="lan"><u>在设置里管理</u></a></div>
         </div></div>
@@ -1808,8 +1912,7 @@ async function renderLive() {
       const m = $('#liveMenu'); m.hidden = !m.hidden; $('#liveBtn').classList.toggle('open', !m.hidden);
       if (!m.hidden) { lmRender(); await lmRefresh().catch(() => {}); lmRender(); $('.lpr.on', m)?.scrollIntoView({ block: 'nearest' }); }
     };
-    $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lm.sel.clear(); lmRender(); };
-    $('#lmBar').onclick = e => { const b = e.target.closest('[data-lm]'); if (b) lmOp(b.dataset.lm); };
+    $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lmRender(); };
     $('#liveMenu').onclick = e => {
       const del = e.target.closest('[data-del]');
       if (del) {
@@ -1819,13 +1922,6 @@ async function renderLive() {
         return;
       }
       const row = e.target.closest('.lpr'); if (!row) return;
-      if (e.target.closest('.lck')) {                 // the tick box: select only, never switches source
-        const k = row.dataset.k, on = e.target.closest('.lck').querySelector('input');
-        if (e.target !== on) return;                  // the label forwards its click to the input: handle it once
-        on.checked ? lm.sel.add(k) : lm.sel.delete(k);
-        row.classList.toggle('sel', on.checked);
-        return lmSelUI();
-      }
       localStorage.live = row.dataset.k;
       $('#liveMenu').hidden = true; $('#liveBtn').classList.remove('open');
       $('#lmName').textContent = l2name(); newPage(); loadLiveBody();
@@ -2051,6 +2147,7 @@ async function renderSettings() {
   const localP = get('/api/local'); // sent together with the rest, so it never queues behind speed tests
   localP.catch(() => {});
   const [cfg, info, safety] = await Promise.all([get('/api/config'), get('/api/info').catch(() => ({ urls: [] })), get('/api/safety')]);
+  const locked = safety.level !== 'all'; // source settings are read-only outside 全部 (the server refuses the writes as well)
   const flags = x => `<label class="flag"><input type="checkbox" class="kids" ${x.kids ? 'checked' : ''}>少儿</label><label class="flag"><input type="checkbox" class="adult" ${x.adult ? 'checked' : ''}>成人</label>`;
   const cacheOf = x => testCache.get(String(x.api || x.url || '').trim());
   const stOf = x => { const t = cacheOf(x); return t ? `<span class="${t.cls}" title="${esc(t.title)}">${esc(t.text)}</span>` : '<span class="status"></span>'; };
@@ -2064,7 +2161,7 @@ async function renderSettings() {
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="${esc(kind === 'site' ? x.api : x.url)}" placeholder="${kind === 'site' ? 'https://example.com/api.php/provide/vod' : 'https://…/live.m3u / .m3u8 / .txt'}">
-      <span class="ops">${kind === 'site' ? `${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
+      <span class="ops">${kind === 'site' ? `${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
         <button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`;
   const rowsHtml = (list, kind) => list.map((x, i) => rowHtml(x, kind, i)).join('');
   // 点播源 list: a 聚合源 row carries its members right under it (collapsed); they are not listed on their own any more.
@@ -2093,24 +2190,28 @@ async function renderSettings() {
   };
   const bulk = kind => `<div class="actions bulk" data-kind="${kind}"><label class="flag"><input type="checkbox" data-bulk="all">全选</label>
       <button class="small" data-bulk="invert">反选</button><button class="small" data-bulk="delsel">删除选中</button>
-      <button class="small" data-bulk="delbad">删除不通的</button>${kind === 'site' ? '<button class="small" data-bulk="delempty" title="删除能连上、但一部片都没有的点播源">删除 0 部的</button>' : ''}<button class="small" data-bulk="retry">重测不通的</button><button class="small" data-bulk="export">导出选中</button>
+      <button class="small" data-bulk="delbad">删除不通的</button>${kind === 'site' ? '<button class="small" data-bulk="delempty" title="删除能连上、但一部片都没有的点播源">删除 0 部的</button>' : ''}<button class="small" data-bulk="retry">重测不通的</button>${kind === 'site' ? '<button class="small" data-bulk="classify" title="按分类名自动判断：80% 以上分类是色情词 → 成人，80% 以上是少儿词 → 少儿，否则标准（不勾选）。只处理还没勾少儿 / 成人的源；勾选了源就只看选中的，否则看全部">自动分类</button>' : ''}<button class="small" data-bulk="export">导出选中</button>
       <button class="small" data-bulk="merge" title="${kind === 'live' ? '把选中的直播源合成一个频道列表（同分组归并、相同地址去重）' : '把选中的点播源聚合成一个入口：搜索/浏览/播放线路同时覆盖所有成员，同名影片合并'}">${kind === 'live' ? '合并选中' : '聚合选中'}</button><span class="lan" data-bulk="count"></span></div>`;
   view.innerHTML = `<div class="page set"><h1>设置</h1>
     <p class="lan">修改保存在服务端，局域网里所有浏览器共享。${info.urls.length ? '其他设备打开：' + info.urls.map(u => `<code>${esc(u)}</code>`).join(' ') : ''}</p>
     ${installSection()}
-    <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。${safety.hasPin ? '已设家长 PIN。' : '可设家长 PIN，防止孩子自己改回来。'}</p>
+    <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。${safety.hasPin ? '已设家长 PIN。' : '设了 PIN 后，别人想从儿童 / 标准切到更宽松的级别就必须输入 PIN。'}</p>
       <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}">${v}</button>`).join('')}</div>
+      <div class="actions"><button class="small" id="setPin">${safety.hasPin ? '修改 / 清除 PIN' : '设置家长 PIN'}</button>${safety.hasPin ? '<span class="lan">切到更宽松的级别、改 PIN 都要输入 PIN；切到更严的级别不用；只有在「全部」下才能清除 PIN。</span>' : ''}</div>
     </section>
+    <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。</p>
+      <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button></div></section>
     <section><h2>封面卡片</h2><p class="hint">竖版：2:3 海报；宽卡：16:9，一屏能放更多标题，详情页和首页大图同步变成宽版。也可以点右上角的卡片图标快速切换。</p>
-      <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版海报</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div>
-      <div class="actions"><button class="small" id="setPin">${safety.hasPin ? '修改 / 清除 PIN' : '设置 PIN'}</button></div></section>
+      <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版海报</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div></section>
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
+    ${locked ? `<section class="locklote"><h2>源设置已锁定</h2><p class="hint">当前安全级别是「${LEVELS[safety.level]}」。点播源、直播源、少儿 / 成人分类、导入和本地媒体文件夹只能在「全部」下修改，免得误改成人分类。想改的话，先在上面把安全级别切到「全部」${safety.hasPin ? '（需要家长 PIN）' : ''}。</p></section>` : ''}
+    <div id="srcWrap" ${locked ? 'hidden' : ''}>
     <section><h2>点播源</h2><p class="hint">苹果CMS 接口（<code>…/api.php/provide/vod</code>，返回 JSON）。需要 spider jar / 解析的 type 3 源浏览器跑不了，导入时会自动跳过。</p>
       ${fold('site', cfg.sites.length)}<div class="foldbox" data-fold="site" ${cfg.sites.length > FOLD_AT && !foldOpen.site ? 'hidden' : ''}>${bulk('site')}<div id="sites">${siteRowsHtml()}</div></div>
       <div class="actions"><button class="small" id="addSite">+ 添加点播源</button><button class="small" id="testAll">全部测速</button><button class="small" id="stopTest">停止测速</button></div></section>
     <section id="localSec"><h2>本地媒体 <span class="tagl">内置源</span></h2><p class="lan">加载中…</p></section>
-    <section><h2>直播源</h2><p class="hint">支持 m3u / m3u8 频道列表、TVBox txt（<code>频道名,地址</code> + <code>分组,#genre#</code>），或者单条 .m3u8 播放地址。内置文件直接写文件名。「编辑文本」可以直接改频道列表。</p>
+    <section><h2>直播源</h2><p class="hint">支持 m3u / m3u8 频道列表、TVBox txt（<code>频道名,地址</code> + <code>分组,#genre#</code>），或者单条 .m3u8 播放地址。内置文件直接写文件名。「编辑文本」可以直接改频道列表。勾上「少儿 / 成人」标记整个直播源；没标记的也会按分组、频道名自动识别：标准模式隐藏成人分组，儿童模式只留少儿分组。</p>
       ${fold('live', cfg.lives.length)}<div class="foldbox" data-fold="live" ${cfg.lives.length > FOLD_AT && !foldOpen.live ? 'hidden' : ''}>${bulk('live')}<div id="lives">${rowsHtml(cfg.lives, 'live')}</div></div>
       <div class="actions"><button class="small" id="addLive">+ 添加直播源</button><button class="small" id="testLives">全部测速</button></div></section>
     <div class="actions savebar"><button class="btn red" id="save">保存</button><span class="lan" id="dirty"></span></div>
@@ -2121,12 +2222,13 @@ async function renderSettings() {
       <div class="field"><input id="impUrl" placeholder="https://…/config.json"><label class="lan"><input type="checkbox" id="impReplace"> 替换现有</label><button class="small" id="imp">导入</button></div></section>
     <section><h2>高级：直接编辑 JSON</h2><p class="hint">格式 <code>{"sites":[{"key","name","api","kids","adult","categories"}],"lives":[{"name","url"}]}</code>，可整份复制到别的设备。</p>
       <div class="field"><textarea id="raw" spellcheck="false">${esc(JSON.stringify(cfg, null, 2))}</textarea></div>
-      <div class="actions"><button class="small" id="saveRaw">保存 JSON</button><button class="small" id="reset">恢复默认</button></div></section></div>`;
+      <div class="actions"><button class="small" id="saveRaw">保存 JSON</button><button class="small" id="reset">恢复默认</button></div></section>
+    </div></div>`;
 
   const collect = (box, kind) => $$('.srow', box).map(r => {
     const name = $('.nm', r).value.trim(), url = $('.url', r).value.trim();
     if (r.dataset.members) return { key: r.dataset.key, name: name || r.dataset.key, type: 1, members: JSON.parse(r.dataset.members), api: 'group', ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}) };
-    if (kind !== 'site') return { name: name || url, url, ...(r.dataset.from ? { from: r.dataset.from } : {}) };
+    if (kind !== 'site') return { name: name || url, url, ...(r.dataset.from ? { from: r.dataset.from } : {}), ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}) };
     const s = { key: r.dataset.key || name || url, name: name || url, type: 1, api: url };
     if ($('.kids', r).checked) s.kids = 1;
     if ($('.adult', r).checked) s.adult = 1;
@@ -2290,7 +2392,11 @@ async function renderSettings() {
     if (cm) return setCardMode(cm);
     const lv = e.target.dataset.level;
     if (lv) {
-      try { await req('POST', '/api/safety', { level: lv, pin: sessionStorage.pin || '' }); state.cats = []; await loadSites(); toast('安全级别：' + LEVELS[lv]); renderSettings(); }
+      try {
+        const looser = ({ kids: 0, standard: 1, all: 2 })[lv] > ({ kids: 0, standard: 1, all: 2 })[safety.level];
+        await req('POST', '/api/safety', { level: lv, pin: sessionStorage.pin || '' });
+        if (safety.hasPin && !looser) delete sessionStorage.pin;   // locking again: the PIN is asked for next time
+        state.cats = []; await loadSites(); toast('安全级别：' + LEVELS[lv]); renderSettings(); }
       catch (err) { toast(err.message); }
       return;
     }
@@ -2333,12 +2439,12 @@ async function renderSettings() {
       }).filter(s => s.api);
       const lives = [];
       for (const r of liveRows) {
-        const l = { name: $('.nm', r).value.trim(), url: $('.url', r).value.trim() };
+        const l = { name: $('.nm', r).value.trim(), url: $('.url', r).value.trim(), ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}) };
         if (!l.url) continue;
         if (!/^https?:\/\//.test(l.url)) {
           const j = await api('live/raw', { url: l.url });
           if (!j.text) continue;
-          lives.push({ name: l.name, text: j.text });
+          lives.push({ name: l.name, text: j.text, ...(l.kids ? { kids: 1 } : {}), ...(l.adult ? { adult: 1 } : {}) });
         } else lives.push(l);
       }
       sites.push(...groups);
@@ -2361,6 +2467,26 @@ async function renderSettings() {
     if (op === 'export') {
       if (!sel.length) return toast('先勾选要导出的源');
       return exportSources(kind === 'site' ? sel : [], kind === 'live' ? sel : []);
+    }
+    if (op === 'classify') {
+      // Only sources that carry no 少儿 / 成人 mark yet: a classification someone already made is never overwritten.
+      const targets = (sel.length ? sel : rows).filter(r => !r.dataset.members && !$('.kids', r).checked && !$('.adult', r).checked && /^https?:\/\//.test($('.url', r).value.trim()));
+      if (!targets.length) return toast('没有未分类的点播源（已勾少儿 / 成人的不会改）');
+      const label = btn.textContent; btn.disabled = true; btn.textContent = `分类中 ${targets.length}…`;
+      try {
+        const j = await req('POST', '/api/classify', { apis: targets.map(r => $('.url', r).value.trim()) });
+        const n = { adult: 0, kids: 0, none: 0, fail: 0 };
+        targets.forEach((r, i) => {
+          const x = j.results[i];
+          if (!x) { n.fail++; return; }
+          $('.adult', r).checked = x.kind === 'adult'; $('.kids', r).checked = x.kind === 'kids'; n[x.kind]++;
+          const lab = $('.flag', r)?.parentElement; if (lab) lab.title = `${x.total} 个分类：成人词 ${x.adult}，少儿词 ${x.kids}`;
+        });
+        dirty();
+        toast(`成人 ${n.adult} · 少儿 ${n.kids} · 标准 ${n.none}${n.fail ? ` · ${n.fail} 个连不上（没改）` : ''}，点「保存」后生效`);
+      } catch (err) { toast('自动分类失败：' + err.message); }
+      finally { btn.disabled = false; btn.textContent = label; }
+      return;
     }
     if (op === 'retry') {
       const bad = rows.filter(r => r.dataset.ok === '0');
@@ -2430,9 +2556,10 @@ async function renderSettings() {
   view.oninput = e => { if (e.target.closest('.srow:not(.lrow)')) dirty(); };
   view.onchange = e => { if (e.target.closest('.srow:not(.lrow)')) dirty(); };
   $('#setPin').onclick = async () => {
-    const newPin = prompt(safety.hasPin ? '新 PIN（留空 = 清除 PIN）' : '设置家长 PIN（4 位以上数字）');
+    const newPin = prompt(!safety.hasPin ? '设置家长 PIN（4 位以上数字）' : safety.level === 'all' ? '新 PIN（留空 = 清除 PIN）' : '新 PIN（儿童 / 标准模式下不能清除，只能改）');
     if (newPin === null) return;
-    try { await req('POST', '/api/safety', { pin: sessionStorage.pin || '', newPin }); sessionStorage.pin = newPin; toast(newPin ? 'PIN 已设置' : 'PIN 已清除'); renderSettings(); }
+    if (safety.hasPin && safety.level !== 'all' && !newPin.trim()) return toast('儿童 / 标准模式下不能清除 PIN');
+    try { await req('POST', '/api/safety', { pin: sessionStorage.pin || '', newPin }); delete sessionStorage.pin; toast(newPin ? 'PIN 已设置，之后放宽级别需要输入它' : 'PIN 已清除'); renderSettings(); }
     catch (err) { toast(err.message); }
   };
   if ($('#installBtn')) $('#installBtn').onclick = async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; $('#installBtn').hidden = true; };
@@ -2500,7 +2627,7 @@ async function renderSettings() {
     $('#imp').disabled = true; $('#imp').textContent = '导入中…';
     try {
       const j = await req('POST', '/api/config/import', { url, replace: $('#impReplace').checked });
-      await loadSites(); toast(`导入 ${j.imported.sites} 个点播源、${j.imported.lives} 个直播源${j.imported.skippedEmpty ? `（跳过 ${j.imported.skippedEmpty} 个 0 部内容的）` : ''}`); renderSettings();
+      await loadSites(); toast(`导入 ${j.imported.sites} 个点播源（自动分类：成人 ${j.imported.adult || 0}、少儿 ${j.imported.kids || 0}）、${j.imported.lives} 个直播源${j.imported.skippedEmpty ? `（跳过 ${j.imported.skippedEmpty} 个 0 部内容的）` : ''}`); renderSettings();
     } catch (err) { toast('导入失败：' + err.message); $('#imp').disabled = false; $('#imp').textContent = '导入'; }
   };
   localSettings(localP).catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
@@ -2644,7 +2771,7 @@ async function recognizeFlow(text, quiet) {
     try {
       const j = await req('POST', '/api/config/add', { sites: pick.filter(x => x.kind === 'site'), lives: pick.filter(x => x.kind === 'live') });
       close(); await loadSites();
-      toast(`已添加 ${j.added.sites} 个点播源、${j.added.lives} 个直播源${j.added.skippedEmpty ? `（跳过 ${j.added.skippedEmpty} 个 0 部内容的）` : ''}`);
+      toast(`已添加 ${j.added.sites} 个点播源（自动分类：成人 ${j.added.adult || 0}、少儿 ${j.added.kids || 0}）、${j.added.lives} 个直播源${j.added.skippedEmpty ? `（跳过 ${j.added.skippedEmpty} 个 0 部内容的）` : ''}`);
       if (location.hash.startsWith('#/settings')) renderSettings();
     } catch (e) { toast(e.message); }
   };
@@ -2652,7 +2779,6 @@ async function recognizeFlow(text, quiet) {
 
 loadSites().then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
 
-$('#cardBtn').onclick = () => setCardMode(cardMode() === 'wide' ? 'poster' : 'wide');
 applyCardMode();
 
 setInterval(() => { if (cur?.kind === 'vod' && !player.hidden && state.downloads.some(j => ACTIVE.includes(j.status))) refreshDownloads().then(paintVodActs); }, 2000);

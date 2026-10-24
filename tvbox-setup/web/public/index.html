@@ -34,9 +34,16 @@
     <a href="#/settings" data-nav="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.7 1.7 1L11 21h4l.4-2.9c.6-.3 1.2-.6 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg><span>设置</span></a>
   </nav>
   <div class="right">
-    <button id="feedBtn" class="feedbtn" type="button" data-feed="rec" title="沉浸式看片：上下滑动切换，像刷短视频一样看片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm1.5 5v8l6-4z"/></svg><span>沉浸</span></button>
-    <button id="cardBtn" class="feedbtn cardbtn" type="button" aria-label="切换宽卡 / 竖版封面"><svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-wide" d="M3 6h18v5H3zM3 13h18v5H3z"/><path class="i-tall" d="M4 3h7v18H4zM13 3h7v18h-7z"/></svg></button>
-    <form id="searchForm" class="search"><input id="q" type="search" placeholder="片名 / 演员 / 导演，所有源一起搜" autocomplete="off"></form>
+    <form id="searchForm" class="search" role="search">
+      <svg class="s-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      <input id="q" type="search" placeholder="搜片名 / 演员 / 导演" autocomplete="off" enterkeyhint="search">
+      <button id="scopeBtn" class="scope" type="button" aria-haspopup="true" aria-expanded="false" title="搜索范围"><span id="scopeLabel">全部源</span><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div id="scopeMenu" class="menu smenu" hidden>
+        <div class="mhead">搜索范围</div>
+        <button type="button" data-scope="all"><span class="so-ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></span><span class="so-t"><b>全部源</b><small id="scopeAllHint">同时搜索所有源</small></span><span class="so-ck">✓</span></button>
+        <button type="button" data-scope="site"><span class="so-ic"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></svg></span><span class="so-t"><b>仅当前源</b><small id="scopeSiteHint">—</small></span><span class="so-ck">✓</span></button>
+      </div>
+    </form>
     <div class="picker">
       <button id="siteBtn" class="sitebtn" type="button"><span id="siteName">选择源</span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       <div id="siteMenu" class="menu" hidden></div>

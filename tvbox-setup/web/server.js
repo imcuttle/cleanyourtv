@@ -194,7 +194,7 @@ function normalize(cfg) {
   }
   const liveSeen = new Set();
   const lives = (cfg.lives || []).filter(l => l && typeof l.url === 'string' && l.url.trim())
-    .map(l => ({ name: str(l.name || l.url).trim(), url: l.url.trim(), ...(l.from ? { from: str(l.from) } : {}) }))
+    .map(l => ({ name: str(l.name || l.url).trim(), url: l.url.trim(), ...(l.from ? { from: str(l.from) } : {}), ...(Number(l.kids) ? { kids: 1 } : {}), ...(Number(l.adult) ? { adult: 1 } : {}) }))
     .filter(l => { const k = /^https?:\/\//.test(l.url) ? normUrl(l.url) : l.url; return !liveSeen.has(k) && liveSeen.add(k); });
   return { sites, lives };
 }
@@ -209,6 +209,18 @@ const SAFETY = path.join(DATA, 'safety.json');
 let safety = readJson(SAFETY, { level: 'standard', pin: '' });
 const ADULT = /伦理|理论|三级|福利|写真|里番|两性|擦边|成人|情色|激情|无码|有码|性感|午夜|黄色|av|porn/i;
 const KIDS_CATS = /动漫|动画|儿童|少儿|卡通|亲子|早教|绘本/;
+// 直播: a source can be flagged 少儿 / 成人 like a 点播源; on top of that every group / channel is classified by its name.
+//   全部: everything · 标准: no 成人 source, no 成人 group / channel · 儿童: no 成人 either, and from a source that is not flagged
+//   少儿 only the groups / channels that look like kids content.
+const LIVE_ADULT = /伦理|三级|福利|写真|里番|成人|情色|激情|无码|有码|午夜|黄色|性感|限制级|18\+|porn|xxx|\badult\b/i;
+const LIVE_KIDS = /少儿|儿童|卡通|动画|动漫|亲子|早教|幼儿|宝宝|童话|kids|cartoon|disney/i;
+const liveSrcOk = l => safety.level === 'all' || !l.adult;
+function liveFilter(groups, src) {
+  if (safety.level === 'all') return groups;
+  const kids = safety.level === 'kids' && !src.kids;
+  return groups.map(g => ({ ...g, channels: g.channels.filter(c => { const t = g.name + ' ' + c.name; return !LIVE_ADULT.test(t) && (!kids || LIVE_KIDS.test(t)); }) }))
+    .filter(g => g.channels.length);
+}
 
 function visibleSites() {
   const ok = s => safety.level === 'kids' ? s.kids : safety.level === 'standard' ? !s.adult : true;
@@ -425,7 +437,8 @@ function item(site, d) {
     quality: qualityOf(d.vod_remarks, d.vod_version, d.vod_name), blurb: clean(d.vod_content).slice(0, 300),
     ...(adult ? { adult } : {}) };
 }
-const itemOk = (site, it) => !it.type || catAllowed(site, it.type);
+// 成人 titles (flagged source / category / local folder) never leave the server outside 安全级别「全部」.
+const itemOk = (site, it) => (safety.level === 'all' || !it.adult) && (!it.type || catAllowed(site, it.type));
 
 function lines(d) {
   const froms = str(d.vod_play_from).split('$$$');
@@ -557,6 +570,42 @@ async function dropEmptySites(sites) {
     }
   }));
   return { sites: sites.filter(s => !empty.has(s)), dropped: empty.size };
+}
+
+// ======================= 自动分类: 成人 / 少儿 / 标准 =======================
+// A 点播源 is judged by its category names: when 80 % or more of its (leaf) categories are 色情 words it is 成人, when 80 % or
+// more are kids words it is 少儿, otherwise it stays 标准 (no flag). 成人 is checked first.
+const CLS_ADULT = /伦理|三级|福利|写真|里番|两性|擦边|成人|情色|色情|激情|无码|有码|性感|午夜|黄色|偷拍|自拍|制服|丝袜|人妻|熟女|乱伦|萝莉|巨乳|口交|中出|强奸|调教|露出|诱惑|情欲|一本道|步兵|骑兵|porn|(^|[^a-z])av([^a-z]|$)/i;
+const CLS_KIDS = /少儿|儿童|卡通|动画|动漫|亲子|早教|幼儿|宝宝|绘本|童话|儿歌|益智|启蒙/;
+const CLS_RATIO = 0.8;
+function classifyNames(names) {
+  names = names.map(str).filter(Boolean);
+  if (!names.length) return null;
+  const adult = names.filter(n => CLS_ADULT.test(n)).length, kids = names.filter(n => CLS_KIDS.test(n)).length, n = names.length;
+  return { total: n, adult, kids, kind: adult / n >= CLS_RATIO ? 'adult' : kids / n >= CLS_RATIO ? 'kids' : 'none' };
+}
+async function classifyApi(api) {
+  const b = await cmsGet({ name: '', api }, { ac: 'list' }, true, 10000);
+  const all = b.class || [], parents = new Set(all.map(c => str(c.type_pid)));
+  const leaves = all.filter(c => !parents.has(str(c.type_id)));
+  return classifyNames((leaves.length ? leaves : all).map(c => c.type_name));
+}
+// Classify many links, 8 at a time. Returns one result (or null: unreachable / no categories) per link.
+async function classifyApis(apis) {
+  const out = new Array(apis.length).fill(null);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(8, apis.length) }, async () => {
+    while (next < apis.length) { const i = next++; try { out[i] = await classifyApi(apis[i]); } catch {} }
+  }));
+  return out;
+}
+// New sources arrive without flags: give them one (a source that already carries 少儿 / 成人 is left alone).
+async function classifyNew(sites) {
+  const todo = sites.filter(s => s.api && !s.members && !s.kids && !s.adult && !s.categories);
+  const res = await classifyApis(todo.map(s => s.api));
+  const n = { adult: 0, kids: 0 };
+  todo.forEach((s, i) => { const k = res[i]?.kind; if (k === 'adult' || k === 'kids') { s[k] = 1; n[k]++; } });
+  return n;
 }
 
 // ======================= clipboard recognition =======================
@@ -703,7 +752,7 @@ async function person(name, role, sites) {
     if (/解说|预告/.test(str(d.vod_name)) || /解说|预告/.test(str(d.type_name))) continue;
     const it = item(s, d);
     if (!itemOk(s, it)) continue;
-    const k = it.name.replace(/\s+/g, '') + '|' + it.year;
+    const k = s.key + '|' + it.name.replace(/\s+/g, '') + '|' + it.year;   // one per source: the client merges same-title ones (or not)
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(it);
@@ -1927,6 +1976,10 @@ async function captureApi(route, params, req) {
 async function api(route, q, res, req) {
   const SITES = visibleSites();
   const write = req.method !== 'GET';
+  // Source settings (点播源 / 直播源 / 导入 / 本地媒体 folders) can only be changed at 安全级别「全部」: they carry the 成人 flags
+  // that the other levels rely on. Safety level itself is changed through /api/safety (with the PIN, if one is set).
+  if (write && safety.level !== 'all' && /^(config(\/.*)?|live\/(raw|edit|merge)|recognize|classify|local)$/.test(route))
+    return send(res, 403, { error: '源设置只能在安全级别「全部」下修改', locked: true });
 
   const leader = async (op, args) => { const r = await rpc(op, args); return send(res, r.code || 200, r.body); };
 
@@ -1967,7 +2020,13 @@ async function api(route, q, res, req) {
     return leader('safety', await readBody(req));
   }
   if (route.startsWith('config')) {
-    if (!write) return send(res, 200, config);
+    if (!write) {
+      if (safety.level === 'all') return send(res, 200, config);
+      // Outside 全部 the 成人 sources are not even listed (live sources keep their index: a key is a position).
+      const keys = new Set(SITES.flatMap(s => [s.key, ...(s.memberSites || []).map(m => m.key)]));
+      return send(res, 200, { sites: config.sites.filter(s => keys.has(s.key)).map(s => s.members ? { ...s, members: s.members.filter(k => keys.has(k)) } : s),
+        lives: config.lives.map(l => liveSrcOk(l) ? l : { name: '', url: '', hidden: 1 }) });
+    }
     if (!pinOk(req)) return needPin(res);
     const op = { config: 'put', 'config/reset': 'reset', 'config/add': 'add', 'config/import': 'import' }[route];
     if (!op || (op === 'put' && req.method !== 'PUT')) return send(res, 404, { error: 'unknown api' });
@@ -1979,6 +2038,11 @@ async function api(route, q, res, req) {
       const b = await cmsGet({ name: '', api: q.get('api') }, { ac: 'list' }, true);
       return send(res, 200, { ok: true, ms: Date.now() - t, total: Number(b.total) || 0 });
     } catch (e) { return send(res, 200, { ok: false, error: e.message }); }
+  }
+  if (route === 'classify' && write) {
+    const b = await readBody(req);
+    const apis = (Array.isArray(b.apis) ? b.apis : []).map(str).filter(u => /^https?:\/\//.test(u)).slice(0, 200);
+    return send(res, 200, { results: await classifyApis(apis), ratio: CLS_RATIO });
   }
   if (route === 'recognize' && write) return send(res, 200, await recognize((await readBody(req)).text));
   if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ffmpeg: !!FFMPEG, loopback: isLoopback(req) });
@@ -2057,7 +2121,7 @@ async function api(route, q, res, req) {
 
   // ---- javdb (成人元数据，仅在非儿童级别开放) ----
   if (route === 'javdb') {
-    if (safety.level === 'kids') return send(res, 200, { found: false });
+    if (safety.level !== 'all') return send(res, 200, { found: false });
     return send(res, 200, await rpc('javdb', { code: q.get('code') || '' }));
   }
 
@@ -2084,24 +2148,28 @@ async function api(route, q, res, req) {
   if (route === 'sites') {
     const inGroup = new Map();
     for (const g of SITES) for (const m of g.memberSites || []) if (!inGroup.has(m.key)) inGroup.set(m.key, g.key);
-    return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: safety.level === 'kids' ? [] : config.lives.map((l, i) => ({ key: String(i), name: l.name })) });
+    return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: config.lives.map((l, i) => ({ key: String(i), name: l.name, kids: !!l.kids, adult: !!l.adult })).filter(l => safety.level === 'all' || !l.adult) });
   }
   if (route === 'live') {
-    if (safety.level === 'kids') return send(res, 200, { groups: [] });
     const src = config.lives[Number(q.get('src')) || 0];
-    if (!src) return send(res, 200, { groups: [] });
-    return send(res, 200, parseLive(await liveText(src.url), src));
+    if (!src || !liveSrcOk(src)) return send(res, 200, { groups: [] });
+    const parsed = parseLive(await liveText(src.url), src);
+    return send(res, 200, { ...parsed, groups: liveFilter(parsed.groups, src) });
   }
 
   // ---- 点播 ----
   if (route === 'person') {
     const name = (q.get('name') || '').trim();
     if (!name) return send(res, 400, { error: '缺少名字' });
-    return send(res, 200, { list: await person(name, q.get('role'), SITES.filter(s => !s.memberSites)) });
+    const only = SITES.find(s => s.key === q.get('site'));   // same scope switch as search: one source (a 聚合源 → its members) or all
+    return send(res, 200, { list: await person(name, q.get('role'), only ? (only.memberSites || [only]) : SITES.filter(s => !s.memberSites)) });
   }
   if (route === 'search') {
     const wd = (q.get('wd') || '').trim();
-    const out = await Promise.all(SITES.filter(s => !s.memberSites).map(s => cmsGet(s, { ac: 'detail', wd }, false, 8000)
+    // `site` limits the search to one source (a 聚合源 → its members); without it every source is searched.
+    const only = SITES.find(s => s.key === q.get('site'));
+    const targets = only ? (only.memberSites || [only]) : SITES.filter(s => !s.memberSites);
+    const out = await Promise.all(targets.map(s => cmsGet(s, { ac: 'detail', wd }, false, 8000)
       .then(b => ({ site: s.key, list: (b.list || []).map(d => ({ d, it: item(s, d) })).filter(x => itemOk(s, x.it)) }))
       .catch(e => ({ site: s.name, error: e.message, list: [] }))));
     // Many sites' `wd` also matches vod_actor / vod_director. Any credited name containing the query counts;
@@ -2123,6 +2191,8 @@ async function api(route, q, res, req) {
       failed: out.filter(o => o.error).map(o => o.site) });
   }
 
+  // A source that is not visible at this 安全级别 (e.g. a 成人 one, typed into the URL) is refused, not swapped for another.
+  if (q.get('site') && !SITES.some(s => s.key === q.get('site'))) return send(res, 404, { error: '没有这个源（当前安全级别下不可用）' });
   const site = SITES.find(s => s.key === q.get('site')) || SITES[0];
   if (!site) return send(res, 404, { error: safety.level === 'kids' ? '儿童模式下没有少儿源，去「设置」添加' : '还没有点播源，去「设置」里添加' });
 
@@ -2160,8 +2230,16 @@ async function api(route, q, res, req) {
 }
 
 // ======================= leader-side handlers =======================
+const LEVEL_RANK = { kids: 0, standard: 1, all: 2 };
 rpcHandlers.safety = b => {
-  if (safety.pin && b.pin !== safety.pin) return { code: 403, body: { error: '需要家长 PIN', pin: true } };
+  // With a PIN set, going to a stricter level is free (locking never needs a key); loosening the level, or changing / clearing
+  // the PIN, needs the PIN.
+  const loosen = LEVEL_RANK[b.level] > LEVEL_RANK[safety.level];
+  const needs = typeof b.newPin === 'string' || loosen;
+  if (safety.pin && needs && b.pin !== safety.pin) return { code: 403, body: { error: loosen ? '切换到更宽松的级别需要家长 PIN' : '需要家长 PIN', pin: true } };
+  const after = ['kids', 'standard', 'all'].includes(b.level) ? b.level : safety.level;
+  // A PIN guards the stricter levels, so it can only be removed while the level is 「全部」. (Forgotten PIN: run reset-pin.js on the host.)
+  if (b.newPin === '' && safety.pin && after !== 'all') return { code: 403, body: { error: '儿童 / 标准模式下不能清除 PIN，先切到「全部」（需要 PIN）。忘记 PIN 的话，在运行服务的电脑上执行 node reset-pin.js' } };
   if (['kids', 'standard', 'all'].includes(b.level)) safety.level = b.level;
   if (typeof b.newPin === 'string') safety.pin = b.newPin.trim();
   writeJson(SAFETY, safety);
@@ -2210,9 +2288,10 @@ rpcHandlers.config = async ({ op, body: b }) => {
     const found = await importFrom(b.url);
     const kept = await dropEmptySites(found.sites);
     found.sites = kept.sites;
+    const cls = await classifyNew(found.sites);
     if (!found.sites.length && !found.lives.length) return { code: 422, body: { error: kept.dropped ? `找到的 ${kept.dropped} 个点播源都是 0 部内容，没有导入` : '没找到可直连的苹果CMS点播源或直播源' } };
     config = b.replace ? found : normalize({ sites: [...config.sites, ...found.sites], lives: [...config.lives, ...found.lives] });
-    extra = { imported: { sites: found.sites.length, lives: found.lives.length, skippedEmpty: kept.dropped } };
+    extra = { imported: { sites: found.sites.length, lives: found.lives.length, skippedEmpty: kept.dropped, adult: cls.adult, kids: cls.kids } };
   } else if (op === 'add') {
     // From clipboard recognition: append only what isn't there; pasted lists become local files.
     const lives = [];
@@ -2234,6 +2313,7 @@ rpcHandlers.config = async ({ op, body: b }) => {
     const apiOf = new Map(incoming.filter(s => !s.members).map(s => [str(s.key), s.api]));
     const fresh = incoming.filter(s => s.members || s.categories || !haveApi.has(normApi(s.api)));
     const { sites, dropped: skippedEmpty } = await dropEmptySites(fresh);
+    const cls = await classifyNew(sites);
     // A pasted group refers to its members by key; re-point them at whatever source has the same link here.
     for (const g of sites.filter(s => s.members)) {
       g.members = g.members.map(k => {
@@ -2243,7 +2323,7 @@ rpcHandlers.config = async ({ op, body: b }) => {
     }
     const before = { s: config.sites.length, l: config.lives.length };
     config = normalize({ sites: [...config.sites, ...sites], lives: [...config.lives, ...lives] });
-    extra = { added: { sites: config.sites.length - before.s, lives: config.lives.length - before.l, skippedEmpty } };
+    extra = { added: { sites: config.sites.length - before.s, lives: config.lives.length - before.l, skippedEmpty, adult: cls.adult, kids: cls.kids } };
   }
   saveConfig();
   broadcastReload();
@@ -2264,7 +2344,7 @@ rpcHandlers.downloads = async ({ method, id, action, body: b }) => {
       if (j) { if (j.status === 'error' || j.status === 'paused') { j.status = 'queued'; j.qat = nextQ(); } }
       else {
         j = { id: crypto.randomBytes(6).toString('hex'), key, site: str(e.site), siteName: str(e.siteName), vid: str(e.id), name: str(e.name),
-          pic: str(e.pic), line: Number(e.line) || 0, ep: Number(e.ep) || 0, epName: str(e.epName), url: e.url,
+          pic: str(e.pic), adult: e.adult ? 1 : 0, line: Number(e.line) || 0, ep: Number(e.ep) || 0, epName: str(e.epName), url: e.url,
           status: 'queued', done: 0, total: 0, bytes: 0, at: Date.now(), qat: nextQ() };
         jobs.unshift(j);
       }
@@ -2299,7 +2379,9 @@ rpcHandlers.downloads = async ({ method, id, action, body: b }) => {
   let free = null;
   try { const st = await fsp.statfs(DL); free = st.bavail * st.bsize; } catch {}
   const queue = jobs.filter(x => x.status === 'queued').sort((a, b) => (a.qat ?? a.at) - (b.qat ?? b.at)).map(x => x.id);
-  return { body: { jobs: jobs.map(j => ({ ...jobView(j), qpos: queue.indexOf(j.id) + 1 })), free, dir: DL, maxJobs: MAX_JOBS } };
+  // 成人 downloads (flagged, or from a source that is hidden at this level) are not listed outside 全部.
+  const shown = j => { if (safety.level === 'all') return true; if (j.adult) return false; if (j.site === 'local') return safety.level !== 'kids'; const s = config.sites.find(x => x.key === j.site); return !!s && !s.adult && (safety.level !== 'kids' || !!s.kids); };
+  return { body: { jobs: jobs.filter(shown).map(j => ({ ...jobView(j), qpos: queue.indexOf(j.id) + 1 })), free, dir: DL, maxJobs: MAX_JOBS } };
 };
 
 // True only for a browser on this very machine: the socket peer is loopback AND the request is addressed to
