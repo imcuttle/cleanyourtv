@@ -1,0 +1,14 @@
+# batch 2: background services, casting, voice, upgrade, Mi Video (owner chose to drop all)
+com.xiaomi.mitv.tvmanager
+com.xiaomi.mitv.upgrade
+com.xiaomi.gamecenter.sdk.service.mibox
+com.xiaomi.wakeupservice
+com.xiaomi.mico.mqtt.service.application.tv
+com.xiaomi.mitv.remotecontroller.service
+com.xiaomi.mitv.legal.webview
+com.android.printspooler
+com.duokan.airkan.tvbox
+com.duokan.videodaily
+com.xiaomi.wfdsinkhelperservice
+com.xiaomi.mi_connect_service
+com.mitv.mivideoplayer

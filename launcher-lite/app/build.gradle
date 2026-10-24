@@ -1,0 +1,38 @@
+plugins {
+    id 'com.android.application'
+}
+
+// A minimal home screen for Android 4.4 TVs (the main launcher needs Android 8.0).
+// No AndroidX, one Activity, so it stays small and light on 768 MB sets.
+android {
+    namespace 'com.ts.launcher'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.ts.launcher'
+        minSdk 19
+        //noinspection ExpiredTargetSdkVersion: sideloaded on an Android 4.4 TV only
+        targetSdk 19
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">简洁桌面</string>
+    <string name="settings">设置</string>
+    <string name="cannot_open">无法打开</string>
+
+    <!-- Apps shown first, in this order. Missing apps are skipped. -->
+    <string-array name="pinned_apps">
+        <item>com.xiaodianshi.tv.yst</item>
+        <item>tv.huan.aliyunpan</item>
+        <item>com.xiaomi.mitv.tvplayer</item>
+        <item>com.xiaomi.mitv.mediaexplorer</item>
+    </string-array>
+
+    <!-- Apps never shown as tiles. -->
+    <string-array name="hidden_apps">
+        <item>com.ts.launcher</item>
+        <item>com.mitv.tvhome</item>
+        <item>com.mitv.codec.update</item>
+        <item>com.duokan.factorytest</item>
+        <item>com.duokan.postsale</item>
+        <item>com.android.settings</item>
+        <item>com.xiaomi.mitv.settings</item>
+        <item>com.android.quicksearchbox</item>
+        <item>com.android.contacts</item>
+        <item>com.android.soundrecorder</item>
+        <item>com.android.providers.downloads.ui</item>
+        <item>com.android.documentsui</item>
+    </string-array>
+</resources>

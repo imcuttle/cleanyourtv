@@ -1,0 +1,25 @@
+# MiTV-ASTP0 (mulan) firmware 22.8.5.1321 @ 192.168.5.49 — batch 1: telemetry / push / ads
+com.miui.analytics
+com.miui.tv.analytics
+com.xiaomi.statistic
+com.xiaomi.tvqs
+com.mitv.cloudcontrol
+com.xiaomi.mitv.tvpush.tvpushservice
+com.android.smspush
+com.xm.webcontent
+com.mitv.shoplugin
+com.xiaomi.mitv.shop
+# batch 2: background services, casting, voice, upgrade, Mi Video (owner chose to drop all)
+com.xiaomi.mitv.tvmanager
+com.xiaomi.mitv.upgrade
+com.xiaomi.gamecenter.sdk.service.mibox
+com.xiaomi.wakeupservice
+com.xiaomi.mico.mqtt.service.application.tv
+com.xiaomi.mitv.remotecontroller.service
+com.xiaomi.mitv.legal.webview
+com.android.printspooler
+com.duokan.airkan.tvbox
+com.duokan.videodaily
+com.xiaomi.wfdsinkhelperservice
+com.xiaomi.mi_connect_service
+com.mitv.mivideoplayer

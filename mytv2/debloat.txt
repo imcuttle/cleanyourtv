@@ -1,0 +1,29 @@
+# Xiaomi MiTV3S-43 (hancock, Android 4.4.4, firmware 7.7.21.1653) @ 192.168.5.55
+# pm disable/disable-user are killed by this firmware; `pm block` (Android 4.4's hide) works and is undone by `pm unblock`.
+# batch 1: telemetry / ads / ACR tracking / push / shopping (same choices as the Redmi TV)
+com.miui.tv.analytics
+com.xiaomi.statistic
+com.xiaomi.mitv.osstatistic
+com.xiaomi.devicereport
+com.miui.systemAdSolution
+com.kuyun.common.androidtv
+com.xiaomi.mitv.kuyun.acr
+com.xiaomi.mitv.tvpush.tvpushservice
+com.xm.webcontent
+com.mitv.shoplugin
+com.xiaomi.mitv.shop
+com.cleanmaster.sdk
+# batch 2: background services and preloads (same choices as the Redmi TV)
+com.xiaomi.mitv.tvmanager
+com.xiaomi.mitv.upgrade
+com.xiaomi.tv.appupgrade
+com.xiaomi.gamecenter.sdk.service.mibox
+com.xiaomi.mitv.remotecontroller.service
+com.duokan.airkan.tvbox
+com.duokan.videodaily
+com.xiaomi.mitv.handbook
+com.xiaomi.mitv.handbook.zh.cn
+com.jiajia.yundonghui.mitv
+# batch 3: stock home (ad-filled, replaced by launcher-lite) and its ad screensaver
+com.mitv.tvhome
+com.xiaomi.tv.gallery

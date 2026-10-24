@@ -1,0 +1,11 @@
+# MiTV-ASTP0 (mulan) firmware 22.8.5.1321 @ 192.168.5.49 — batch 1: telemetry / push / ads
+com.miui.analytics
+com.miui.tv.analytics
+com.xiaomi.statistic
+com.xiaomi.tvqs
+com.mitv.cloudcontrol
+com.xiaomi.mitv.tvpush.tvpushservice
+com.android.smspush
+com.xm.webcontent
+com.mitv.shoplugin
+com.xiaomi.mitv.shop
