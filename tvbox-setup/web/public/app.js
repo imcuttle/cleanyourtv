@@ -73,6 +73,14 @@ const DB_ROWS = [['tv', '豆瓣热门剧集'], ['movie', '豆瓣热门电影'], 
 const dbRows = () => { try { return { tv: true, movie: true, show: true, anime: true, ...JSON.parse(localStorage.dbRows || '{}') }; } catch { return { tv: true, movie: true, show: true, anime: true }; } };
 
 const state = { sites: [], lives: [], level: 'standard', site: localStorage.site || '', cats: [], downloads: [] };
+// 封面卡片: 竖版 (poster, 2:3) or 宽版 (wide, 16:9). One class on <html> restyles every card, the home banner and the detail sheet.
+const cardMode = () => localStorage.cardMode === 'wide' ? 'wide' : 'poster';
+const applyCardMode = () => {
+  document.documentElement.classList.toggle('wide-cards', cardMode() === 'wide');
+  const b = $('#cardBtn'); if (b) { b.classList.toggle('on', cardMode() === 'wide'); b.title = cardMode() === 'wide' ? '当前：宽卡，点一下换竖版封面' : '当前：竖版，点一下换宽卡'; }
+};
+const setCardMode = m => { localStorage.cardMode = m; applyCardMode(); $$('[data-cardmode]').forEach(x => x.classList.toggle('on', x.dataset.cardmode === m)); };
+applyCardMode();
 
 // ---------- http ----------
 // Every read belongs to the current page: switching pages aborts what the old one still had in flight, so
@@ -2007,7 +2015,7 @@ async function renderSettings() {
   const cacheOf = x => testCache.get(String(x.api || x.url || '').trim());
   const stOf = x => { const t = cacheOf(x); return t ? `<span class="${t.cls}" title="${esc(t.title)}">${esc(t.text)}</span>` : '<span class="status"></span>'; };
   const dragH = '<span class="drag" title="按住拖动排序">⋮⋮</span>';
-  const rowHtml = (x, kind, i, parent) => x.members ? `<div class="srow grp" data-i="${i}" data-key="${esc(x.key)}" data-members="${esc(JSON.stringify(x.members))}">
+  const rowHtml = (x, kind, i, parent) => x.members ? `<div class="srow grp" data-i="${i}" ${x.keep ? 'data-keep="1"' : ''} data-key="${esc(x.key)}" data-members="${esc(JSON.stringify(x.members))}">
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="" readonly>
@@ -2016,7 +2024,7 @@ async function renderSettings() {
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="${esc(kind === 'site' ? x.api : x.url)}" placeholder="${kind === 'site' ? 'https://example.com/api.php/provide/vod' : 'https://…/live.m3u / .m3u8 / .txt'}">
-      <span class="ops">${kind === 'site' ? `${flags(x)}${stOf(x)}<button data-op="test">测速</button>${parent ? '<button data-op="release" title="移出聚合源，回到主列表">释放</button>' : ''}` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
+      <span class="ops">${kind === 'site' ? `${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
         <button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`;
   const rowsHtml = (list, kind) => list.map((x, i) => rowHtml(x, kind, i)).join('');
   // 点播源 list: a 聚合源 row carries its members right under it (collapsed); they are not listed on their own any more.
@@ -2052,6 +2060,9 @@ async function renderSettings() {
     ${installSection()}
     <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。${safety.hasPin ? '已设家长 PIN。' : '可设家长 PIN，防止孩子自己改回来。'}</p>
       <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}">${v}</button>`).join('')}</div>
+    </section>
+    <section><h2>封面卡片</h2><p class="hint">竖版：2:3 海报；宽卡：16:9，一屏能放更多标题，详情页和首页大图同步变成宽版。也可以点右上角的卡片图标快速切换。</p>
+      <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版海报</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div>
       <div class="actions"><button class="small" id="setPin">${safety.hasPin ? '修改 / 清除 PIN' : '设置 PIN'}</button></div></section>
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
@@ -2096,7 +2107,7 @@ async function renderSettings() {
   // Members, the summary text and the expand button of every 聚合源 row follow what is actually under it; an empty one goes away.
   const syncGroups = () => $$('#sites .srow.grp').forEach(g => {
     const mem = $$('#sites .srow.mem').filter(m => m.dataset.parent === g.dataset.key);
-    if (!mem.length) return g.remove();
+    if (!mem.length) return g.dataset.keep ? undefined : g.remove();
     g.dataset.members = JSON.stringify(mem.map(m => m.dataset.key));
     $('.url', g).value = `聚合 ${mem.length} 个源：` + mem.map(m => $('.nm', m).value.trim() || m.dataset.key).join('、');
     $('[data-op=toggle]', g).textContent = (g.dataset.open ? '收起 ' : '展开 ') + mem.length;
@@ -2235,6 +2246,8 @@ async function renderSettings() {
     };
   };
   view.onclick = async e => {
+    const cm = e.target.dataset.cardmode;
+    if (cm) return setCardMode(cm);
     const lv = e.target.dataset.level;
     if (lv) {
       try { await req('POST', '/api/safety', { level: lv, pin: sessionStorage.pin || '' }); state.cats = []; await loadSites(); toast('安全级别：' + LEVELS[lv]); renderSettings(); }
@@ -2342,7 +2355,7 @@ async function renderSettings() {
       if (!target) {
         nameFor = prompt(`把选中的 ${atoms.length} 个点播源聚合成一个入口（同名影片合并，播放线路汇总，成员不通会自动跳过）。\n成员会收进这个聚合源里，不再单独显示，需要时可「释放」。\n聚合源名称：`, '聚合源');
         if (!nameFor) return;
-        target = addRow('site', { key: 'group-' + Date.now().toString(36), name: nameFor, members: [] }, first);
+        target = addRow('site', { key: 'group-' + Date.now().toString(36), name: nameFor, members: [], keep: 1 }, first);
       } else if (first !== target) first.before(...blockOf(target));
       const add = top.flatMap(r => r === target ? [] : r.dataset.members ? blockOf(r).slice(1) : [r]);
       const others = groups.filter(g => g !== target);
@@ -2352,7 +2365,7 @@ async function renderSettings() {
         m.classList.add('mem'); m.dataset.parent = target.dataset.key; tail.after(m); tail = m;
       });
       others.forEach(g => g.remove());
-      target.dataset.open = '1';
+      delete target.dataset.keep; target.dataset.open = '1';
       renumber(); dirty(); refreshCount();
       toast(nameFor ? `已生成聚合源「${nameFor}」，成员收在它下面；点「保存」生效` : `已并入「${$('.nm', target).value.trim()}」${add.length} 个源；点「保存」生效`);
       target.scrollIntoView({ block: 'nearest' });
@@ -2598,3 +2611,6 @@ async function recognizeFlow(text, quiet) {
 }
 
 loadSites().then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
+
+$('#cardBtn').onclick = () => setCardMode(cardMode() === 'wide' ? 'poster' : 'wide');
+applyCardMode();

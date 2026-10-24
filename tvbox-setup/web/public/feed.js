@@ -106,11 +106,12 @@ function mkSlide() {
     <div class="fd-info"><h2></h2><div class="m"></div><p></p></div><div class="fd-msg"></div>`;
   slidesBox.append(el);
   const s = { el, video: el.querySelector('video'), bg: el.querySelector('.fd-bg'), h2: el.querySelector('h2'), meta: el.querySelector('.m'), blurb: el.querySelector('p'), msg: el.querySelector('.fd-msg'),
-    i: -1, it: null, d: null, line: 0, ep: 0, eps: [], startAt: 0, hls: null, via: false, loading: false, err: false, watched: 0, lastT: 0, judged: true, lastSave: 0 };
+    i: -1, it: null, d: null, line: 0, ep: 0, eps: [], startAt: 0, hls: null, via: false, loading: false, pre: false, err: false, watched: 0, lastT: 0, judged: true, lastSave: 0 };
   const v = s.video;
   v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); });
   v.addEventListener('waiting', () => { if (s === cur()) el.classList.add('wait'); });
   v.addEventListener('canplay', () => el.classList.remove('wait'));
+  v.addEventListener('progress', () => { if (s === cur() && aheadOf(v) >= 6) kick(); });
   v.addEventListener('play', () => el.classList.remove('paused'));
   v.addEventListener('pause', () => { if (s === cur() && !v.ended) el.classList.add('paused'); });
   v.addEventListener('ended', () => { if (s === cur()) onEnded(s); });
@@ -161,7 +162,7 @@ function paintInfo(s) {
 function bind(s, i) {
   teardown(s);
   const it = F.items[i] || null;
-  Object.assign(s, { i, it, d: null, err: false, watched: 0, judged: !it, loading: false, via: false });
+  Object.assign(s, { i, it, d: null, err: false, watched: 0, judged: !it, loading: false, via: false, pre: false });
   s.msg.textContent = '';
   s.el.classList.toggle('empty', !it);
   if (!it) { s.bg.style.cssText = ''; return; }
@@ -176,7 +177,7 @@ function ready(s, d) {
   const pic = s.it.pic || '';
   if (pic) s.video.poster = img(dbSize(pic, 'm') || pic);
   attach(s);
-  if (s === cur()) syncRail();
+  if (s === cur()) syncRail(); else if (cur()?.d && aheadOf(cur().video) >= 6) startPre(s);
 }
 
 // ---------- playback ----------
@@ -195,13 +196,13 @@ function attach(s, viaProxy = false) {
   };
   v.onerror = () => fail(s, '无法解码');
   if (window.Hls && Hls.isSupported() && !direct) {
-    s.loading = role >= 0;
+    s.loading = role === 0 || s.pre;
     const h = s.hls = new Hls({ enableWorker: true, capLevelToPlayerSize: true, backBufferLength: 20, autoStartLoad: s.loading, startPosition: startAt || -1, ...bufCfg(role) });
     h.on(Hls.Events.MANIFEST_PARSED, onMeta);
     h.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) fail(s, data.details); });
     h.loadSource(src); h.attachMedia(v);
   } else {
-    v.preload = role < 0 ? 'metadata' : 'auto';
+    v.preload = role === 0 || s.pre ? 'auto' : 'metadata';
     v.src = src; v.onloadedmetadata = onMeta;
   }
   if (s === cur()) { s.el.classList.add('wait'); tryPlay(s); }
@@ -213,12 +214,23 @@ function fail(s, why) {
   s.msg.textContent = '这部播放失败了，已为你跳过';
   if (s === cur()) setTimeout(() => { if (s === cur() && s.err) go(F.dir); }, 1200);
 }
+// Only the current title loads at full speed. The neighbours stay idle until the current one has ~6 s buffered (kick), so
+// they never fight it for bandwidth; after that they pre-buffer a few seconds each so a swipe lands on a ready picture.
+const aheadOf = v => { let e = 0; for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= v.currentTime + 1) e = Math.max(e, v.buffered.end(i)); return e - v.currentTime; };
+function startPre(s) {
+  if (s.pre || !s.d) return;
+  s.pre = true;
+  if (s.hls) { if (!s.loading) { s.hls.startLoad(-1); s.loading = true; } } else s.video.preload = 'auto';
+}
+let kickT = 0;
+function kick() { clearTimeout(kickT); ring.forEach(s => { if (s !== cur()) startPre(s); }); }
 function setRole(s, role) {
   if (s.hls) {
     Object.assign(s.hls.config, bufCfg(role));
-    if (role < 0 && s.loading) { s.hls.stopLoad(); s.loading = false; }
-    else if (role >= 0 && !s.loading) { s.hls.startLoad(-1); s.loading = true; }
-  } else if (s.video.preload !== (role < 0 ? 'metadata' : 'auto')) s.video.preload = role < 0 ? 'metadata' : 'auto';
+    if (role === 0) { if (!s.loading) { s.hls.startLoad(-1); s.loading = true; } }
+    else if (role < 0 && s.loading) { s.hls.stopLoad(); s.loading = false; }
+    else if (role > 0 && s.pre && !s.loading) { s.hls.startLoad(-1); s.loading = true; }
+  } else s.video.preload = role === 0 || (s.pre && role > 0) ? 'auto' : 'metadata';
 }
 function setMuted(m, save = true) {
   F.muted = m; if (save) localStorage.feedMuted = m ? '1' : '0';
@@ -259,6 +271,7 @@ function activate() {
   if (!s.it) return;
   markSeen(s.it);
   syncRail();
+  clearTimeout(kickT); kickT = setTimeout(kick, 7000);
   if (s.err) { s.msg.textContent = s.msg.textContent || '这部暂时播不了'; setTimeout(() => { if (s === cur() && s.err) go(F.dir); }, 800); return; }
   tryPlay(s);
 }

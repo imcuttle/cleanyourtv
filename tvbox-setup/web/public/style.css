@@ -568,7 +568,7 @@ html { scrollbar-gutter: stable; }
 .lmenu { left: 0; right: auto; top: calc(100% + 6px); width: min(380px, 92vw); max-height: none; overflow: visible; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .lmenu[hidden] { display: none; }
 .lm-top { display: flex; gap: 8px; } .lm-top .find { flex: 1; width: auto; height: 32px; }
-.lm-bar { display: flex; gap: 6px; align-items: center; font-size: 13px; color: #ddd; } .lm-bar[hidden] { display: none; } .lm-bar i { flex: 1; } .lm-bar .dng { color: #ff8a8c; }
+.lm-bar { display: flex; gap: 6px; align-items: center; font-size: 13px; color: #ddd; } .lm-bar[hidden] { display: none; } .lm-bar i { flex: 1; } .lm-bar span { white-space: nowrap; } .lm-bar .dng { color: #ff8a8c; }
 .lm-list { height: min(52vh, 380px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .lpr { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 8px; border-radius: 5px; cursor: pointer; color: #ddd; font-size: 14px; }
 .lpr:hover { background: #ffffff14; color: #fff; } .lpr.on { color: #fff; font-weight: 700; box-shadow: inset 3px 0 0 var(--red); }
@@ -584,7 +584,7 @@ html { scrollbar-gutter: stable; }
 /* phone: the picker is a bottom sheet (a popover would run off the screen), roomy rows, 16px inputs (no iOS zoom) */
 @media (max-width: 760px) {
   .lpick { position: static; }
-  .lmenu { position: fixed; left: 0; right: 0; top: auto; bottom: 0; width: auto; max-height: 82vh; z-index: 41; border-radius: 16px 16px 0 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); box-shadow: 0 -12px 40px #000c; }
+  .lmenu { position: fixed; left: 0; right: 0; top: auto; bottom: 0; width: auto; min-width: 0; max-width: none; max-height: 82vh; z-index: 41; border-radius: 16px 16px 0 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); box-shadow: 0 -12px 40px #000c; }
   .lmenu::before { content: ""; align-self: center; width: 38px; height: 4px; border-radius: 2px; background: #ffffff40; margin-top: -4px; }
   .lm-list { height: min(56vh, 460px); }
   .lpr { height: 48px; font-size: 15px; padding: 0 10px; }
@@ -695,3 +695,25 @@ html { scrollbar-gutter: stable; }
 body.sorting { cursor: grabbing; user-select: none; -webkit-user-select: none; }
 .srow .lan { min-width: 1.2em; }
 @media (max-width: 760px) { .srow .drag { width: 26px; } .srow.mem { margin-left: 10px; } }
+
+.srow .ops .rel { display: none; } .srow.mem .ops .rel { display: inline-block; }
+
+/* ---------- 宽卡模式 (html.wide-cards): 16:9 cards everywhere, the banner and the detail sheet follow ---------- */
+.cardbtn { width: 36px; padding: 0; justify-content: center; flex: none; }
+.cardbtn .i-wide { display: none; } .cardbtn.on .i-wide { display: inline; } .cardbtn.on .i-tall { display: none; }
+html.wide-cards .card { width: clamp(190px, 21vw, 300px); }
+html.wide-cards .card .img { aspect-ratio: 16/9; }
+html.wide-cards .card .img img { object-position: center 22%; }
+html.wide-cards .grid { grid-template-columns: repeat(auto-fill, minmax(clamp(180px, 21vw, 280px), 1fr)); gap: 20px 12px; }
+html.wide-cards .grid .card { width: auto; }
+html.wide-cards .card.top { margin-left: 24px; } html.wide-cards .card.top .num { bottom: 30px; left: -30px; }
+html.wide-cards .hero .poster { aspect-ratio: 16/9; height: auto; width: min(44vw, 640px); background-position: center 22%; }
+html.wide-cards .sheet .top .poster { aspect-ratio: 16/9; height: auto; width: min(38%, 400px); background-position: center 22%; }
+html.wide-cards .card .name { font-size: 14px; }
+@media (max-width: 760px) {
+  .cardbtn { width: 34px; height: 34px; }
+  html.wide-cards .card { width: clamp(150px, 56vw, 230px); }
+  html.wide-cards .grid { grid-template-columns: repeat(2, 1fr); gap: 16px 8px; }
+  html.wide-cards .hero .poster { width: 78vw; right: 50%; transform: translateX(50%); top: 110px; height: auto; }
+  html.wide-cards .sheet .top .poster { width: 62%; height: auto; top: 30px; }
+}
