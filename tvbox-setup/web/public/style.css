@@ -565,14 +565,14 @@ html { scrollbar-gutter: stable; }
 .lm-top { display: flex; gap: 8px; } .lm-top .find { flex: 1; width: auto; height: 32px; }
 .lm-bar { display: flex; gap: 6px; flex-wrap: wrap; } .lm-bar .dng { color: #ff8a8c; }
 .lm-list { height: min(52vh, 380px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
-.lrow { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 8px; border-radius: 5px; cursor: pointer; color: #ddd; font-size: 14px; }
-.lrow:hover { background: #ffffff14; color: #fff; } .lrow.on { color: #fff; font-weight: 700; box-shadow: inset 3px 0 0 var(--red); }
-.lrow .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lrow.dead .nm { opacity: .45; } .lrow input { width: auto; flex: none; }
-.lrow .hs { flex: none; font-weight: 400; font-size: 11px; color: #888; } .lrow .hs.ok { color: #46d369; } .lrow .hs.bad { color: #f5a623; }
-.lrow em.x { flex: none; font-style: normal; padding: 0 7px; border-radius: 4px; color: #888; font-size: 16px; opacity: 0; }
-.lrow:hover em.x, .lrow.on em.x { opacity: 1; } .lrow em.x:hover { background: #ff4d4f33; color: #ff6b6d; }
-@media (hover: none) { .lrow em.x { opacity: 1; } }
+.lpr { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 8px; border-radius: 5px; cursor: pointer; color: #ddd; font-size: 14px; }
+.lpr:hover { background: #ffffff14; color: #fff; } .lpr.on { color: #fff; font-weight: 700; box-shadow: inset 3px 0 0 var(--red); }
+.lpr .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lpr.dead .nm { opacity: .45; } .lpr input { width: auto; flex: none; }
+.lpr .hs { flex: none; font-weight: 400; font-size: 11px; color: #888; } .lpr .hs.ok { color: #46d369; } .lpr .hs.bad { color: #f5a623; }
+.lpr em.x { flex: none; font-style: normal; padding: 0 7px; border-radius: 4px; color: #888; font-size: 16px; opacity: 0; }
+.lpr:hover em.x, .lpr.on em.x { opacity: 1; } .lpr em.x:hover { background: #ff4d4f33; color: #ff6b6d; }
+@media (hover: none) { .lpr em.x { opacity: 1; } }
 .lm-foot { display: flex; justify-content: space-between; align-items: center; padding: 0 4px; }
 #lmBulk.on { background: #fff; color: #000; }
 

@@ -369,7 +369,7 @@ function queueHealth(s, force) {
   healthBusy.add(s.api); healthQ.push(s); drainHealth();
 }
 async function drainHealth() {
-  while (healthRun < 6 && healthQ.length) {
+  while (healthRun < 4 && healthQ.length) {
     const s = healthQ.shift(); healthRun++;
     (async () => {
       let r;
@@ -1606,7 +1606,7 @@ function lmRender() {
   box.innerHTML = rows.map(l => {
     const h = liveHealth.get(liveUrlOf(l.key));
     const st = h === 'busy' ? '<b class="hs">测速中…</b>' : h ? `<b class="hs ${h.ok ? 'ok' : 'bad'}">${esc(h.text)}</b>` : '';
-    return `<div class="lrow ${l.key === cur ? 'on' : ''} ${h && h !== 'busy' && !h.ok ? 'dead' : ''}" data-k="${esc(l.key)}">
+    return `<div class="lpr ${l.key === cur ? 'on' : ''} ${h && h !== 'busy' && !h.ok ? 'dead' : ''}" data-k="${esc(l.key)}">
       ${lm.bulk ? `<input type="checkbox" class="lsel" ${lm.sel.has(l.key) ? 'checked' : ''}>` : ''}<span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${st}
       <em class="x" data-del="${esc(l.key)}" title="删除这个直播源">×</em></div>`;
   }).join('') || '<div class="lan" style="padding:10px">没有匹配的直播源</div>';
@@ -1703,7 +1703,7 @@ async function renderLive() {
     $('#liveBtn').onclick = async e => {
       e.stopPropagation();
       const m = $('#liveMenu'); m.hidden = !m.hidden; $('#liveBtn').classList.toggle('open', !m.hidden);
-      if (!m.hidden) { lmRender(); await lmRefresh().catch(() => {}); lmRender(); $('.lrow.on', m)?.scrollIntoView({ block: 'nearest' }); }
+      if (!m.hidden) { lmRender(); await lmRefresh().catch(() => {}); lmRender(); $('.lpr.on', m)?.scrollIntoView({ block: 'nearest' }); }
     };
     $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lmRender(); };
     $('#lmBulk').onclick = () => { lm.bulk = !lm.bulk; lm.sel.clear(); lmRender(); };
@@ -1716,7 +1716,7 @@ async function renderLive() {
         if (confirm(`删除直播源「${l.name}」？`)) lmSave(lives => lives.filter((_, i) => i !== Number(k))).then(() => toast(`已删除「${l.name}」`), err => toast(err.message));
         return;
       }
-      const row = e.target.closest('.lrow'); if (!row) return;
+      const row = e.target.closest('.lpr'); if (!row) return;
       if (lm.bulk) { const k = row.dataset.k; lm.sel.has(k) ? lm.sel.delete(k) : lm.sel.add(k); return lmRender(); }
       localStorage.live = row.dataset.k;
       $('#liveMenu').hidden = true; $('#liveBtn').classList.remove('open');
@@ -1940,6 +1940,8 @@ function installSection() {
 
 const testCache = new Map();
 async function renderSettings() {
+  const localP = get('/api/local'); // sent together with the rest, so it never queues behind speed tests
+  localP.catch(() => {});
   const [cfg, info, safety] = await Promise.all([get('/api/config'), get('/api/info').catch(() => ({ urls: [] })), get('/api/safety')]);
   const flags = x => `<label class="flag"><input type="checkbox" class="kids" ${x.kids ? 'checked' : ''}>少儿</label><label class="flag"><input type="checkbox" class="adult" ${x.adult ? 'checked' : ''}>成人</label>`;
   const cacheOf = x => testCache.get(String(x.api || x.url || '').trim());
@@ -2051,10 +2053,16 @@ async function renderSettings() {
     r.dataset.ok = res.ok ? '1' : '0';
     testCache.set(url, { cls, text: res.text, title: res.title });
   };
-  const testMany = async rows => {
-    const gen = testGen, q = [...rows], size = rows[0]?.parentElement.id === 'lives' ? 3 : 6;
-    await Promise.all(Array.from({ length: Math.min(size, q.length) }, async () => { while (q.length && gen === testGen) await test(q.shift(), gen); }));
+  // One pool for sites and lives together: at most 4 requests in flight, so page loads and /api/local are never starved
+  // (browsers allow only 6 connections per host). Entries from an older generation drain instantly (test() bails out).
+  const TEST_MAX = 4, testQ = []; let testRun = 0;
+  const pump = () => {
+    while (testRun < TEST_MAX && testQ.length) {
+      const { r, gen, done } = testQ.shift(); testRun++;
+      test(r, gen).catch(() => {}).finally(() => { testRun--; done(); pump(); });
+    }
   };
+  const testMany = rows => Promise.all(rows.map(r => new Promise(done => { testQ.push({ r, gen: testGen, done }); pump(); })));
   const editText = async r => {
     const url = $('.url', r).value.trim(), name = $('.nm', r).value.trim() || url;
     const m = document.createElement('div');
@@ -2220,12 +2228,12 @@ async function renderSettings() {
       await loadSites(); toast(`导入 ${j.imported.sites} 个点播源、${j.imported.lives} 个直播源`); renderSettings();
     } catch (err) { toast('导入失败：' + err.message); $('#imp').disabled = false; $('#imp').textContent = '导入'; }
   };
-  localSettings().catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
+  localSettings(localP).catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
 }
 
 // ---------- settings: 本地媒体 (built-in source from local folders) ----------
-async function localSettings() {
-  const j = await get('/api/local');
+async function localSettings(pre) {
+  const j = await (pre || get('/api/local'));
   const box = $('#localSec'); if (!box) return;
   const c = j.cfg;
   const flag = (cls, on, label, title) => `<label class="flag" title="${title}"><input type="checkbox" class="${cls}" ${on ? 'checked' : ''}>${label}</label>`;
