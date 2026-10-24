@@ -34,7 +34,8 @@ adb -s "$SERIAL" install -r TVBox-5.7.9.apk
 | Path | What |
 |---|---|
 | `SKILL.md` | The whole procedure, written as an agent skill. Start here if you are an assistant. |
-| `config/vod-xhz-54sites.json` | A 54-site 点播 config, spider jar + 6 解析 lines. Known-good shape, sources rotate. |
+| `config/vod-5-direct.json` | **Use this one.** Five 苹果CMS sites with direct APIs — no spider jar, no 解析. All five list and play. |
+| `config/vod-xhz-54sites.json` | A 54-site spider-config. Loads, but most sites can't produce a playable URL. Kept as a reference for the shape, not as a daily driver. |
 | `config/live-cn-466.txt` | 466-channel 直播 list in TVBox `.txt` format with groups. |
 | `sources.md` | Where sources come from, and which ones answered — with the date. |
 | `scripts/` | discover / push / probe / verify. |

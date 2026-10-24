@@ -16,6 +16,40 @@ which is the only one that counts.
 | `.m3u` | `#EXTM3U` + `#EXTINF` | 直播. Carries logos and EPG. |
 | `.txt` | `名称,url` with `#genre#` group lines | 直播. No logos, parses anywhere. |
 
+## 点播 — what actually plays
+
+The short version, after a day of testing: **spider-based sites die, plain JSON APIs survive.**
+
+A site entry with `"type": 1` and a direct `api` (`https://host/api.php/provide/vod`) is a
+苹果CMS source. It returns a list, a detail and a **direct m3u8** — no spider jar, no 解析
+service, nothing else that can rot. A `"type": 3` site with `api: "csp_Whatever"` depends on a
+spider jar plus, usually, a web 解析 to turn a video page into a stream. When either link
+breaks you get a grid that loads and a detail page that says `这里什么都没有 👀`.
+
+Verified from the TV on 2026-10-24, all five listing **and playing** (183–288 KB/s, hardware
+decoder running):
+
+| Site | API | Note |
+|---|---|---|
+| 暴风 | `https://bfzyapi.com/api.php/provide/vod` | Line name `bfzym3u8`, direct m3u8. The one to keep. |
+| 索尼 | `https://suoniapi.com/api.php/provide/vod` | |
+| 量子 | `https://cj.lziapi.com/api.php/provide/vod` | |
+| 非凡 | `http://cj.ffzyapi.com/api.php/provide/vod` | plain http |
+| 海外看 | `https://haiwaikan.com/api.php/provide/vod` | |
+| 快帆 | `https://api.kuaifan.tv/api.php/provide/vod` | **dead** from this network |
+
+`config/vod-5-direct.json` is exactly this list, 暴风 first, no spider, no 解析. That is the
+config to ship.
+
+What failed, and why it matters:
+
+| Symptom | Real cause |
+|---|---|
+| grid loads, detail says `这里什么都没有` | the spider site's detail API returns nothing — the site is broken, not your config |
+| `播放地址解析失败` on every line | the site's play page needs a web 解析 and all six in the config (777 / jsonplayer / xmflv / 剖云 / Web聚合 / Json聚合) are dead |
+| site list opens at the bottom / only 兒童, 高中… | TVBox reopens the picker at the *last used* site. A config ending in B站 edu sites (少儿/小学/初中/高中/戏曲) drops you somewhere empty. Keep working sites first. |
+| everything empty right after `pm clear` | `pm clear` revokes storage permission. `file://TV/...` then reads nothing. Re-grant: `pm grant com.fongmi.android.tv android.RESOURCE…STORAGE` — see the note at the bottom. |
+
 ## 点播 — multi-warehouse
 
 | Address | laptop | tv | Note |
@@ -72,3 +106,16 @@ which is the only one that counts.
 2. Probe it **from the TV**.
 3. If it works, copy it under `/sdcard/TV/` and point the pref at `file://TV/…`.
 4. Add a row here with today's date and both columns.
+
+### If you ever `pm clear` the app
+
+`pm clear` resets granted permissions, so `file://TV/…` silently reads nothing and the home
+stays on the default `影视` placeholder with no 直播 button. Re-grant before anything else:
+
+```bash
+adb shell pm grant com.fongmi.android.tv android.permission.READ_EXTERNAL_STORAGE
+adb shell pm grant com.fongmi.android.tv android.permission.WRITE_EXTERNAL_STORAGE
+```
+
+That one line is worth remembering — it looked exactly like "the config is broken" for a long
+time, and re-ordering the config never helped.
