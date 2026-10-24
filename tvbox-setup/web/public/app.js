@@ -3,30 +3,37 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $('#view');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const bg = url => url ? `background-image:url('${esc(url).replace(/'/g, '%27')}')` : '';
+// 豆瓣's image CDN refuses requests without its Referer → go through the server's /img relay.
+const img = u => /^https?:\/\/[^/]*doubanio\.com\//.test(u || '') ? '/img?u=' + encodeURIComponent(u) : (u || '');
+const bg = url => url ? `background-image:url('${esc(img(url)).replace(/'/g, '%27')}')` : '';
 const ROWS = ['国产剧', '韩剧|韩国剧', '欧美剧', '动作片', '喜剧片', '科幻片', '日剧|日本剧', '国产动漫', '日韩动漫', '大陆综艺', '爱情片', '纪录片|记录片'];
 const LEVELS = { kids: '儿童', standard: '标准', all: '全部' };
 
 const state = { sites: [], lives: [], level: 'standard', site: localStorage.site || '', cats: [], downloads: [] };
 
 // ---------- http ----------
-async function req(method, path, body, retried) {
+// Every read belongs to the current page: switching pages aborts what the old one still had in flight, so
+// slow sources / 豆瓣 / covers don't hold the browser's ~6 connections per host and stall the next page.
+let pageCtl = new AbortController();
+const isAbort = e => e?.name === 'AbortError';
+async function req(method, path, body, retried, signal) {
   const headers = { 'Content-Type': 'application/json' };
   if (sessionStorage.pin) headers['X-Pin'] = sessionStorage.pin;
-  const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const r = await fetch(path, { method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body) });
   const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
   if (r.status === 403 && j.pin && !retried) {
     const pin = prompt('需要家长 PIN');
     if (pin === null) throw new Error('已取消');
     sessionStorage.pin = pin;
     if (body && typeof body === 'object' && 'pin' in body) body.pin = pin;
-    return req(method, path, body, true);
+    return req(method, path, body, true, signal);
   }
   if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
 }
-const get = path => req('GET', path);
-const api = (route, params = {}) => get(`/api/${route}?` + new URLSearchParams(params));
+// signal: omitted → current page; null → never aborted (app-level reads); or a specific controller's signal.
+const get = (path, signal) => req('GET', path, undefined, false, signal === undefined ? pageCtl.signal : signal || undefined);
+const api = (route, params = {}, signal) => get(`/api/${route}?` + new URLSearchParams(params), signal);
 function toast(msg) {
   const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
   document.body.append(t); setTimeout(() => t.remove(), 2600);
@@ -43,6 +50,32 @@ const hist = {
     list.unshift({ ...entry, at: Date.now() });
     localStorage.history = JSON.stringify(list.slice(0, 40));
   },
+  del(site, id) { localStorage.history = JSON.stringify(hist.all().filter(h => !(h.site === site && h.id === id))); },
+  clear() { localStorage.history = '[]'; },
+};
+
+// ---------- favorites (hidden in 儿童 mode) ----------
+const favs = {
+  all: () => JSON.parse(localStorage.favs || '[]'),
+  has: (site, id) => favs.all().some(f => f.site === site && f.id === id),
+  toggle(d) {
+    if (favs.has(d.site, d.id)) { favs.del(d.site, d.id); return false; }
+    const { site, siteName, id, name, pic, remarks, year, type } = d;
+    localStorage.favs = JSON.stringify([{ site, siteName, id, name, pic, remarks, year, type, at: Date.now() }, ...favs.all()].slice(0, 500));
+    return true;
+  },
+  del(site, id) { localStorage.favs = JSON.stringify(favs.all().filter(f => !(f.site === site && f.id === id))); },
+  clear() { localStorage.favs = '[]'; },
+};
+const kidsMode = () => state.level === 'kids';
+const liveFavs = {
+  all: () => JSON.parse(localStorage.liveFavs || '[]'),
+  has: url => liveFavs.all().some(f => f.url === url),
+  toggle(c) {
+    const on = !liveFavs.has(c.url);
+    localStorage.liveFavs = JSON.stringify(on ? [{ name: c.name, url: c.url, logo: c.logo || '' }, ...liveFavs.all()] : liveFavs.all().filter(f => f.url !== c.url));
+    return on;
+  },
 };
 
 // ---------- 豆瓣 ratings (lazy, cached) ----------
@@ -55,7 +88,7 @@ function dbRate(name, year) {
   return new Promise(ok => { dbQueue.push({ name, year, k, ok }); dbPump(); });
 }
 function dbPump() {
-  while (dbActive < 3 && dbQueue.length) {
+  while (dbActive < 2 && dbQueue.length) {
     const { name, year, k, ok } = dbQueue.shift();
     dbActive++;
     api('douban/rating', { name, year: year || '' }).catch(() => ({ found: false, error: 1 })).then(r => {
@@ -74,13 +107,14 @@ function observeRatings(root = document) { $$('.db[data-n]', root).forEach(el =>
 
 // ---------- boot / source picker ----------
 async function loadSites() {
-  const j = await api('sites');
+  const j = await api('sites', {}, null);
   state.sites = j.sites; state.lives = j.live; state.level = j.level;
   if (!state.sites.some(s => s.key === state.site)) state.site = state.sites[0]?.key || '';
   const cur = state.sites.find(s => s.key === state.site);
   $('#siteName').textContent = cur ? cur.name : '无源';
   $('.picker').hidden = !state.sites.length;
   $('#levelTag').hidden = j.level === 'standard';
+  $('[data-nav=favorites]').hidden = j.level === 'kids';
   $('#levelTag').textContent = j.level === 'kids' ? '儿童模式' : '无限制';
   $('#levelTag').className = 'level ' + j.level;
   $('#siteMenu').innerHTML = `<div class="mhead">点播源 · ${state.sites.length}</div>` + state.sites.map(s =>
@@ -100,9 +134,35 @@ addEventListener('scroll', () => $('#top').classList.toggle('solid', scrollY > 3
 addEventListener('hashchange', route);
 
 let heroTimer, pageTimer;
+function newPage() {
+  pageCtl.abort();
+  pageCtl = new AbortController();
+  dbQueue.length = 0;
+  thumbQueue.length = 0;
+  stopPreview();
+}
 async function route() {
   clearInterval(heroTimer); clearInterval(pageTimer); view.onclick = null;
-  const [, page, a, b] = location.hash.split('/');
+  newPage();
+  let [, page, a, b, c] = location.hash.split('/');
+  // Deep links (what a card's href points at, e.g. after ⌘-click into a new tab): show the page
+  // underneath, then the detail / player on top.
+  if (page === 'v' || page === 'find') {
+    history.replaceState(null, '', '#/');
+    const [site, id, name] = [decodeURIComponent(a || ''), decodeURIComponent(b || ''), decodeURIComponent(a || '')];
+    route();
+    return page === 'v' ? openDetail(site, id) : openByName(name);
+  }
+  if (page === 'tv') {
+    history.replaceState(null, '', '#/live');
+    localStorage.live = decodeURIComponent(a || '');
+    return renderLive().then(groups => {
+      const url = decodeURIComponent(b || '');
+      const g = groups?.find(x => x.channels.some(ch => ch.url === url));
+      if (g) playLive(g.channels, g.channels.findIndex(ch => ch.url === url));
+      else if (url) playLive([{ name: decodeURIComponent(c || '直播'), url }], 0);
+    }).catch(e => { if (!isAbort(e)) throw e; });
+  }
   $$('nav a').forEach(n => n.classList.toggle('on', n.dataset.nav === (page || 'home')));
   scrollTo(0, 0);
   try {
@@ -110,10 +170,20 @@ async function route() {
     if (page === 'settings') return await renderSettings();
     if (page === 'downloads') return await renderDownloads();
     if (!state.sites.length) return renderNoSites();
+    if (page === 'history') return renderHistory();
+    if (page === 'favorites') return renderFavorites();
+    if (page === 'person') return await renderPerson(a, decodeURIComponent(b || ''));
+    if (page === 'site') {
+      const k = decodeURIComponent(a || '');
+      if (state.sites.some(x => x.key === k)) { state.site = localStorage.site = k; state.cats = []; await loadSites(); }
+      history.replaceState(null, '', '#/');
+      return await renderHome();
+    }
     if (page === 'search') return await renderSearch(decodeURIComponent(a || ''));
-    if (page === 'cat') return await renderCategory(a, decodeURIComponent(b || ''));
+    if (page === 'cat') return await renderCategory(a, decodeURIComponent(b || ''), decodeURIComponent(c || ''));
     return await renderHome();
   } catch (e) {
+    if (isAbort(e)) return;
     view.innerHTML = `<div class="page"><div class="err">加载失败：${esc(e.message)}。右上角换个源试试，或去 <a href="#/settings"><u>设置</u></a> 检查。</div></div>`;
   }
 }
@@ -123,19 +193,34 @@ function renderNoSites() {
 }
 
 // ---------- cards & rows ----------
+const vodHref = (site, id) => `#/v/${encodeURIComponent(site)}/${encodeURIComponent(id)}`;
+// Plain clicks are handled in-page; ⌘/Ctrl/Shift/Alt/middle click fall through to the browser (new tab / window).
+const plainClick = e => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
 function card(it, opts = {}) {
   const h = it.site && hist.get(it.site, it.id);
   const pct = h && h.dur ? Math.min(100, (h.t / h.dur) * 100) : 0;
+  const href = it.douban ? `#/find/${encodeURIComponent(it.name)}` : vodHref(it.site, it.id);
   const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"`;
   const rate = it.douban ? (it.rate ? `<span class="db">${esc(it.rate)}</span>` : '')
     : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
-  return `<a class="card" href="javascript:" ${data}>
-    <div class="img">${it.pic ? `<img src="${esc(it.pic)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="this.classList.add('ok')" onerror="this.remove()">` : ''}${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${rate}
+  return `<a class="card" href="${esc(href)}" ${data}>${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
+    <div class="img">${it.pic ? `<img src="${esc(img(it.pic))}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="this.classList.add('ok')" onerror="this.remove()">` : ''}${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${rate}
       ${pct ? `<div class="prog" style="width:${pct}%"></div>` : ''}</div>
     <div class="name">${esc(it.name)}</div>${opts.sub ? `<div class="sub">${esc(opts.sub)}</div>` : ''}</a>`;
 }
 document.addEventListener('click', e => {
   const c = e.target.closest('#view .card'); if (!c) return;
+  const rm = e.target.closest('.rm');
+  if (rm) {
+    e.preventDefault(); e.stopPropagation();
+    (rm.dataset.rm === 'fav' ? favs : hist).del(c.dataset.site, c.dataset.id);
+    const sc = c.closest('.scroller, .grid');
+    c.remove();
+    if (sc && !sc.querySelector('.card')) sc.closest('.row, .page')?.querySelector('.hempty')?.removeAttribute('hidden'), sc.closest('.row')?.remove();
+    return;
+  }
+  if (!plainClick(e)) return;
+  e.preventDefault();
   if (c.dataset.db !== undefined) return openByName(c.dataset.db);
   openDetail(c.dataset.site, c.dataset.id);
 });
@@ -145,10 +230,10 @@ async function openByName(name) {
   const hit = j.results.find(r => r.name === name);
   if (hit) openDetail(hit.site, hit.id); else location.hash = '#/search/' + encodeURIComponent(name);
 }
-function row(title, items, href, sub) {
-  return `<section class="row"><h2>${href ? `<a href="${href}">${esc(title)}</a>` : esc(title)}</h2>
+function row(title, items, href, sub, opts = {}) {
+  return `<section class="row"><h2>${href ? `<a href="${href}">${esc(title)}</a>` : esc(title)}${opts.extra || ''}</h2>
     <div class="track"><button class="arrow l">‹</button>
-    <div class="scroller">${items.map(it => card(it, { sub: sub?.(it) })).join('')}</div>
+    <div class="scroller">${items.map(it => card(it, { sub: sub?.(it), removable: opts.removable })).join('')}</div>
     <button class="arrow r">›</button></div></section>`;
 }
 document.addEventListener('click', e => {
@@ -164,12 +249,16 @@ async function renderHome() {
   const [latest, cats] = await Promise.all([api('list', { site }),
     state.cats.length ? { categories: state.cats } : api('categories', { site }).catch(() => ({ categories: [] }))]);
   state.cats = cats.categories;
+  const sig = pageCtl.signal;
   const cont = hist.all().filter(h => state.sites.some(s => s.key === h.site)).slice(0, 20);
+  const favList = favs.all().filter(f => state.sites.some(s => s.key === f.site)).slice(0, 30);
   const kids = state.level === 'kids';
   view.innerHTML = `
     <div class="hero" id="hero"></div>
     <div class="rows">
-      ${cont.length ? row('继续观看', cont, '', it => `${it.siteName} · ${it.epName || ''}`) : ''}
+      ${cont.length ? row('继续观看', cont, '#/history', it => `${it.siteName} · ${it.epName || ''}`,
+        { removable: 'hist', extra: '<button class="hclear" data-clear="hist">清空</button>' }) : ''}
+      ${!kids && favList.length ? row('我的收藏', favList, '#/favorites', it => it.siteName, { removable: 'fav' }) : ''}
       ${row(kids ? '少儿精选' : '最新更新', latest.list, '#/cat//' + encodeURIComponent(kids ? '少儿精选' : '最新更新'))}
       <div id="dbRows"></div>
       <div id="more"></div>
@@ -179,7 +268,7 @@ async function renderHome() {
   observeRatings(view);
   if (!kids) {
     Promise.all(['tv', 'movie'].map(t => api('douban/hot', { type: t }).catch(() => ({ list: [] })))).then(([tv, mv]) => {
-      if (!$('#dbRows')) return;
+      if (sig.aborted || !$('#dbRows')) return;
       $('#dbRows').innerHTML = (tv.list.length ? row('豆瓣热门剧集', tv.list.map(x => ({ ...x, douban: 1 }))) : '')
         + (mv.list.length ? row('豆瓣热门电影', mv.list.map(x => ({ ...x, douban: 1 }))) : '');
     });
@@ -187,7 +276,7 @@ async function renderHome() {
   const isWhitelisted = kids || state.cats.length <= 8;
   const wanted = isWhitelisted ? state.cats.slice(0, 8) : ROWS.map(w => state.cats.find(c => w.split('|').includes(c.name))).filter(Boolean);
   const lists = await Promise.all(wanted.map(c => api('list', { site, t: c.id }).catch(() => ({ list: [] }))));
-  if (site !== state.site || !$('#more')) return;
+  if (sig.aborted || site !== state.site || !$('#more')) return;
   $('#more').innerHTML = wanted.map((c, i) => lists[i].list.length ? row(c.name, lists[i].list, `#/cat/${c.id}/${encodeURIComponent(c.name)}`) : '').join('');
   observeRatings($('#more'));
 }
@@ -212,15 +301,58 @@ function hero(items) {
   heroTimer = setInterval(() => { if (!document.hidden && $('#player').hidden && !$('#modal')) { i = (i + 1) % items.length; show(); } }, 8000);
 }
 
+// ---------- watch history ----------
+function renderHistory() {
+  const list = hist.all();
+  const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
+  view.innerHTML = `<div class="page"><div class="pagehead"><h1>观看历史</h1>
+      ${list.length ? '<button class="small" data-clear="hist">清空全部</button>' : ''}</div>
+    <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有观看记录。</p>
+    ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'hist', sub: `${names[it.site] || it.siteName} · ${it.epName || ''}` })).join('')}</div>` : ''}</div>`;
+  observeRatings(view);
+}
+function renderFavorites() {
+  if (kidsMode()) { view.innerHTML = '<div class="page"><h1>我的收藏</h1><p class="empty">儿童模式下收藏不可见。</p></div>'; return; }
+  const list = favs.all();
+  view.innerHTML = `<div class="page"><div class="pagehead"><h1>我的收藏</h1>
+      ${list.length ? '<button class="small" data-clear="fav">清空全部</button>' : ''}</div>
+    <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有收藏。打开影片，点「＋ 收藏」。</p>
+    ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'fav', sub: [it.siteName, it.type].filter(Boolean).join(' · ') })).join('')}</div>` : ''}</div>`;
+  observeRatings(view);
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('#view [data-clear]'); if (!b) return;
+  e.preventDefault();
+  const fav = b.dataset.clear === 'fav';
+  if (!confirm(fav ? '清空全部收藏？' : '清空全部观看历史？')) return;
+  (fav ? favs : hist).clear();
+  toast(fav ? '收藏已清空' : '观看历史已清空');
+  route();
+});
+
+// ---------- people (演员 / 导演) ----------
+async function renderPerson(role, name) {
+  const label = role === 'director' ? '导演' : '演员';
+  view.innerHTML = `<div class="page"><h1>${esc(name)} <span class="role">${label}</span></h1><p class="lan">在 ${state.sites.length} 个源里找作品…</p>${spinner}</div>`;
+  const j = await api('person', { name, role });
+  view.innerHTML = `<div class="page"><h1>${esc(name)} <span class="role">${label}</span></h1>
+    <p class="lan">${j.list.length ? `${j.list.length} 部作品，按年份排序（只列出各源里能搜到、且演职员表里确实有这个名字的）` : ''}</p>
+    ${j.list.length ? `<div class="grid">${j.list.map(it => card(it, { sub: [it.year, it.type, it.siteName].filter(x => x && x !== '0').join(' · ') })).join('')}</div>`
+      : '<p class="empty">各源都没搜到。部分源的搜索只按片名匹配，不认演员。</p>'}</div>`;
+  observeRatings(view);
+}
+
 // ---------- category grid (infinite scroll) ----------
-async function renderCategory(t, name) {
-  view.innerHTML = `<div class="page"><h1>${esc(name || '全部')}</h1><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
+async function renderCategory(t, name, siteKey) {
+  const site = state.sites.some(x => x.key === siteKey) ? siteKey : state.site;
+  const other = site !== state.site ? state.sites.find(x => x.key === site)?.name : '';
+  view.innerHTML = `<div class="page"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
   let pg = 0, count = 1, busy = false;
   const seen = new Set();
   const more = async () => {
     if (busy || pg >= count || !$('#grid')) return;
     busy = true;
-    const j = await api('list', { site: state.site, t, pg: pg + 1 });
+    const j = await api('list', { site, t, pg: pg + 1 });
     pg = j.page; count = j.pagecount;
     const fresh = j.list.filter(it => !seen.has(it.id) && seen.add(it.id));
     $('#grid')?.insertAdjacentHTML('beforeend', fresh.map(it => card(it)).join(''));
@@ -229,8 +361,10 @@ async function renderCategory(t, name) {
     busy = false;
   };
   await more();
+  const sig = pageCtl.signal;
   const io = new IntersectionObserver(es => { if (es[0].isIntersecting) more().catch(() => { busy = false; }); }, { rootMargin: '600px' });
   io.observe($('#tail'));
+  sig.addEventListener('abort', () => io.disconnect());
 }
 
 // ---------- search (all sources) ----------
@@ -248,7 +382,7 @@ async function renderSearch(q) {
 }
 
 // ---------- downloads ----------
-async function refreshDownloads() { state.downloads = (await api('downloads').catch(() => ({ jobs: [] }))).jobs; return state.downloads; }
+async function refreshDownloads(signal) { state.downloads = (await api('downloads', {}, signal).catch(() => ({ jobs: state.downloads }))).jobs; return state.downloads; }
 const dlFor = (site, id, url) => state.downloads.find(j => j.site === site && j.vid === id && j.url === url);
 async function enqueue(d, line, eps) {
   await req('POST', '/api/downloads', { items: eps.map(i => ({ site: d.site, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, line, ep: i, epName: d.lines[line].episodes[i].name, url: d.lines[line].episodes[i].url })) });
@@ -301,11 +435,12 @@ async function openDetail(site, id, autoplay = false, replace = false) {
   m.className = 'modal'; m.id = 'modal';
   m.innerHTML = `<div class="sheet">${spinner}</div>`;
   m.onclick = e => { if (e.target === m) history.back(); };
+  m.ctl = new AbortController();
   document.body.append(m); document.body.style.overflow = 'hidden';
   if (!replace) history.pushState({ modal: 1 }, '');
   let d;
-  try { [d] = await Promise.all([api('detail', { site, id }), refreshDownloads()]); }
-  catch (e) { m.firstChild.innerHTML = `<button class="close">✕</button><div class="body"><div class="err">详情加载失败：${esc(e.message)}</div></div>`; m.querySelector('.close').onclick = () => history.back(); return; }
+  try { [d] = await Promise.all([api('detail', { site, id }, m.ctl.signal), refreshDownloads(m.ctl.signal)]); }
+  catch (e) { if (isAbort(e)) return; m.firstChild.innerHTML = `<button class="close">✕</button><div class="body"><div class="err">详情加载失败：${esc(e.message)}</div></div>`; m.querySelector('.close').onclick = () => history.back(); return; }
   const h0 = hist.get(site, id);
   let line = h0 && d.lines[h0.line] ? h0.line : 0, dlMode = false, alts = null;
   const render = () => {
@@ -318,12 +453,16 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
           ${eps.length ? `<button class="btn play" data-ep="${resumeIdx}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</button>
             <button class="btn more" id="dlToggle">${dlMode ? '✓ 完成' : '⬇ 下载'}</button>` : ''}
+          ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
         </div></div></div>
       <div class="body">
-        <div class="metaRow"><a class="dbtag" id="dbtag" hidden target="_blank" rel="noreferrer"></a><span class="tag">${esc(d.siteName)}</span>${esc([d.year, d.area, d.type, d.remarks].filter(x => x && x !== '0').join('  ·  '))}</div>
+        <div class="metaRow"><a class="dbtag" id="dbtag" hidden target="_blank" rel="noreferrer"></a>
+          <a class="tag" data-nav href="#/site/${encodeURIComponent(site)}" title="切换到这个源">${esc(d.siteName)}</a>
+          ${d.type ? `<a class="tag cat" data-nav href="#/cat/${encodeURIComponent(d.typeId || '')}/${encodeURIComponent(d.type)}/${encodeURIComponent(site)}" title="看这个分类">${esc(d.type)} ›</a>` : ''}
+          ${esc([d.year, d.area, d.lang, d.remarks].filter(x => x && x !== '0').join('  ·  '))}</div>
         ${d.blurb ? `<p class="desc">${esc(d.blurb)}</p>` : ''}
-        ${d.actor ? `<p class="credit">主演：<b>${esc(d.actor)}</b></p>` : ''}
-        ${d.director ? `<p class="credit">导演：<b>${esc(d.director)}</b></p>` : ''}
+        ${people('导演', 'director', d.directors)}
+        ${people('演员', 'actor', d.actors, 16)}
         ${d.lines.length ? `<h3>剧集 <span class="lines">${d.lines.map((l, i) => `<button data-line="${i}" class="${i === line ? 'on' : ''}">${esc(l.name)} (${l.episodes.length})</button>`).join('')}</span>
             ${dlMode ? `<span class="dlhint">点选要下载的集 <button class="small" id="dlAll">全部下载</button></span>` : ''}</h3>
           <div class="eps ${dlMode ? 'dlmode' : ''}">${eps.map((e, i) => {
@@ -338,6 +477,8 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     $$('[data-ep]', m).forEach(b => b.onclick = () => play(d, line, +b.dataset.ep));
     $$('[data-dl]', m).forEach(b => b.onclick = () => enqueue(d, line, [+b.dataset.dl]).then(render, e => toast(e.message)));
     if ($('#dlToggle', m)) $('#dlToggle', m).onclick = () => { dlMode = !dlMode; render(); };
+    if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
+    $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
     dbRate(d.name, d.year).then(r => {
       const t = $('#dbtag', m); if (!t || !r.id) return;
@@ -347,19 +488,36 @@ async function openDetail(site, id, autoplay = false, replace = false) {
   };
   const paintAlts = () => {
     const box = $('#alts', m); if (!box || !alts) return;
-    box.innerHTML = alts.length ? alts.map(a => `<button data-s="${esc(a.site)}" data-i="${esc(a.id)}">${esc(a.siteName)}<small>${esc(a.remarks)}</small></button>`).join('') : '<span class="lan">其他源没有同名的</span>';
-    $$('button', box).forEach(b => b.onclick = () => openDetail(b.dataset.s, b.dataset.i, false, true));
+    box.innerHTML = alts.length ? alts.map(a => `<a href="${esc(vodHref(a.site, a.id))}" data-s="${esc(a.site)}" data-i="${esc(a.id)}">${esc(a.siteName)}<small>${esc(a.remarks)}</small></a>`).join('') : '<span class="lan">其他源没有同名的</span>';
+    $$('a', box).forEach(b => b.onclick = e => { if (!plainClick(e)) return; e.preventDefault(); openDetail(b.dataset.s, b.dataset.i, false, true); });
   };
-  m.refresh = () => refreshDownloads().then(render);
+  m.refresh = () => refreshDownloads(m.ctl.signal).then(render);
   render();
-  api('search', { wd: d.name }).catch(() => ({ results: [] })).then(j => {
+  api('search', { wd: d.name }, m.ctl.signal).catch(() => ({ results: [] })).then(j => {
+    if (m.ctl.signal.aborted) return;
     alts = j.results.filter(r => r.name === d.name && !(r.site === site && r.id === id));
     paintAlts();
   });
   if (autoplay && d.lines.length) play(d, line, h0 && h0.line === line ? h0.ep : 0);
 }
+function people(label, role, list, max = 99) {
+  if (!list?.length) return '';
+  return `<div class="people ${list.length > max ? '' : 'all'}"><span class="plabel">${label}</span>${list.map((n, i) =>
+    `<a class="pchip ${i >= max ? 'extra' : ''}" data-nav href="#/person/${role}/${encodeURIComponent(n)}">${esc(n)}</a>`).join('')}
+    ${list.length > max ? `<button class="pchip more" data-more-people>+${list.length - max}</button>` : ''}</div>`;
+}
+// Links inside the detail sheet: a plain click leaves the sheet and goes there (replacing the sheet's
+// history entry, so Back returns to the page underneath); modifier clicks open a new tab as usual.
+document.addEventListener('click', e => {
+  const a = e.target.closest('#modal a[data-nav]'); if (!a || !plainClick(e)) return;
+  e.preventDefault();
+  closeDetail();
+  history.replaceState(null, '', a.getAttribute('href'));
+  route();
+});
 function closeDetail() {
   const m = $('#modal'); if (!m) return;
+  m.ctl?.abort();
   m.remove(); document.body.style.overflow = '';
 }
 addEventListener('popstate', () => { if (!$('#player').hidden) return closePlayer(); closeDetail(); });
@@ -374,16 +532,22 @@ function play(d, line, ep) {
   openPlayer(h && h.line === line && h.ep === ep && h.dur - h.t > 30 ? h.t : 0);
 }
 function playLive(channels, idx) {
-  cur = { kind: 'live', eps: channels.map(c => ({ name: c.name, url: c.url })), ep: idx };
+  cur = { kind: 'live', eps: channels.map(c => ({ name: c.name, url: c.url, logo: c.logo })), ep: idx };
   openPlayer(0);
 }
 function openPlayer(startAt) {
   const e = cur.eps[cur.ep];
   if (player.hidden) { player.hidden = false; history.pushState({ player: 1 }, ''); document.body.style.overflow = 'hidden'; }
   $('.ptitle').textContent = cur.kind === 'live' ? e.name : (cur.eps.length > 1 ? `${cur.title} · ${e.name}` : cur.title);
+  const live = cur.kind === 'live';
+  $('[data-act=prev]').textContent = live ? '上一台' : '上一集';
+  $('[data-act=next]').textContent = live ? '下一台' : '下一集';
+  $('[data-act=list]').textContent = live ? '频道' : '选集';
   $('[data-act=prev]').hidden = cur.ep <= 0;
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
+  $('[data-act=star]').hidden = !live;
+  if (live) $('[data-act=star]').textContent = liveFavs.has(e.url) ? '★ 已收藏' : '☆ 收藏';
   renderPlist();
   const local = cur.kind === 'vod' ? dlFor(cur.d.site, cur.d.id, e.url) : null;
   const useLocal = cur.kind === 'local' || local?.status === 'done';
@@ -421,15 +585,33 @@ video.addEventListener('timeupdate', () => {
     line, ep, epName: eps[ep].name, t: video.currentTime, dur: video.duration });
 });
 function step(n) { cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(0); }
+// Episode / channel picker. Live: numbered single column with a filter; 点播: compact grid.
+// Picking closes the panel; click outside or Esc also closes it.
 function renderPlist() {
+  const box = $('.plist'), live = cur.kind === 'live';
+  box.classList.toggle('live', live);
+  box.innerHTML = `<div class="phead"><b>${live ? '频道' : '选集'}</b><span>${cur.ep + 1} / ${cur.eps.length}</span>
+      <button class="icon sm" data-pclose title="关闭">✕</button></div>
+    ${cur.eps.length > 20 ? `<input class="pfind" type="search" placeholder="${live ? '搜频道' : '搜集数'}">` : ''}
+    <div class="pitems">${cur.eps.map((e, i) => `<button data-i="${i}" class="${i === cur.ep ? 'on' : ''}">${live ? `<em>${i + 1}</em>` : ''}<span>${esc(e.name)}</span></button>`).join('')}</div>`;
+  $('[data-pclose]', box).onclick = () => togglePlist(false);
+  $$('.pitems button', box).forEach(b => b.onclick = () => { cur.ep = +b.dataset.i; togglePlist(false); openPlayer(0); });
+  const find = $('.pfind', box);
+  if (find) find.oninput = () => {
+    const q = find.value.trim().toLowerCase();
+    $$('.pitems button', box).forEach(b => { b.hidden = !!q && !cur.eps[+b.dataset.i].name.toLowerCase().includes(q) && String(+b.dataset.i + 1) !== q; });
+  };
+}
+function togglePlist(open = $('.plist').hidden) {
   const box = $('.plist');
-  box.innerHTML = cur.eps.map((e, i) => `<button data-i="${i}" class="${i === cur.ep ? 'on' : ''}" title="${esc(e.name)}">${esc(e.name)}</button>`).join('');
-  $$('button', box).forEach(b => b.onclick = () => { cur.ep = +b.dataset.i; openPlayer(0); });
+  box.hidden = !open;
+  $('[data-act=list]').classList.toggle('on', open);
+  if (open) { $('.pitems .on', box)?.scrollIntoView({ block: 'center' }); poke(); }
 }
 function closePlayer() {
   if (hls) { hls.destroy(); hls = null; }
   video.pause(); video.removeAttribute('src'); video.load();
-  player.hidden = true; $('.plist').hidden = true; msg('');
+  player.hidden = true; togglePlist(false); msg('');
   if (!$('#modal')) document.body.style.overflow = '';
   $('#modal')?.refresh?.();
   cur = null;
@@ -439,11 +621,14 @@ player.addEventListener('click', e => {
   if (act === 'close') history.back();
   if (act === 'next') step(1);
   if (act === 'prev') step(-1);
-  if (act === 'list') { $('.plist').hidden = !$('.plist').hidden; $('.plist .on')?.scrollIntoView({ block: 'center' }); }
+  if (act === 'list') return togglePlist();
+  if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); $('[data-act=star]').textContent = liveFavs.has(c.url) ? '★ 已收藏' : '☆ 收藏'; return; }
+  if (!$('.plist').hidden && !e.target.closest('.plist, .pbar')) togglePlist(false);
 });
-function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && player.classList.add('idle'), 3000); }
+function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && player.classList.add('idle'), 3000); }
 player.addEventListener('mousemove', poke); player.addEventListener('touchstart', poke);
 addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !player.hidden && !$('.plist').hidden) { e.preventDefault(); return togglePlist(false); }
   if (e.target.matches('input, textarea')) return;
   if (e.key === 'Escape' && (!player.hidden || $('#modal'))) history.back();
   if (player.hidden) return;
@@ -459,13 +644,26 @@ addEventListener('keydown', e => {
 
 // ---------- live ----------
 let serverInfo = null;
-const infoP = () => serverInfo ? Promise.resolve(serverInfo) : get('/api/info').then(j => (serverInfo = j), () => ({ urls: [], ffmpeg: false }));
+const infoP = () => serverInfo ? Promise.resolve(serverInfo) : get('/api/info', null).then(j => (serverInfo = j), () => ({ urls: [], ffmpeg: false }));
+// Covers: two at a time (ffmpeg can take seconds per channel), dropped when the page changes.
+const thumbQueue = []; let thumbActive = 0;
+function thumbPump() {
+  while (thumbActive < 2 && thumbQueue.length) {
+    const el = thumbQueue.shift();
+    if (!el.isConnected) continue;
+    thumbActive++;
+    fetch('/api/live/thumb?u=' + encodeURIComponent(el.dataset.u), { signal: pageCtl.signal })
+      .then(r => r.ok ? r.blob() : null)
+      .then(b => { if (b && el.isConnected) { el.style.backgroundImage = `url('${URL.createObjectURL(b)}')`; el.classList.add('has'); } })
+      .catch(() => {})
+      .finally(() => { thumbActive--; thumbPump(); });
+  }
+}
 const thumbIO = new IntersectionObserver(es => es.forEach(e => {
   if (!e.isIntersecting) return;
-  const el = e.target; thumbIO.unobserve(el);
-  const img = new Image();
-  img.onload = () => { el.style.backgroundImage = `url('${img.src}')`; el.classList.add('has'); };
-  img.src = '/api/live/thumb?u=' + encodeURIComponent(el.dataset.u);
+  thumbIO.unobserve(e.target);
+  thumbQueue.push(e.target);
+  thumbPump();
 }), { rootMargin: '300px' });
 
 async function renderLive() {
@@ -478,19 +676,27 @@ async function renderLive() {
     <div class="seg">${state.lives.map(l => `<button data-src="${esc(l.key)}" class="${l.key === src ? 'on' : ''}">${esc(l.name)}</button>`).join('')}</div>
     <input id="chq" class="find" type="search" placeholder="搜频道"></div>
     <div id="liveBody">${spinner}</div></div>`;
-  $$('[data-src]').forEach(b => b.onclick = () => { localStorage.live = b.dataset.src; renderLive(); });
+  $$('[data-src]').forEach(b => b.onclick = () => { localStorage.live = b.dataset.src; newPage(); renderLive().catch(e => { if (!isAbort(e)) toast(e.message); }); });
   const [{ groups }, info] = await Promise.all([api('live', { src }), infoP()]);
-  let gi = 0;
+  // gi = -1 is the ★ 收藏 group (channels starred from any live source).
+  let gi = liveFavs.all().length ? -1 : 0;
   const paint = () => {
     const q = $('#chq').value.trim().toLowerCase();
-    const chans = q ? groups.flatMap(g => g.channels).filter(c => c.name.toLowerCase().includes(q)) : groups[gi]?.channels || [];
-    $('#liveBody').innerHTML = `<div class="live"><div class="groups">${groups.map((g, i) => `<button data-g="${i}" class="${i === gi && !q ? 'on' : ''}">${esc(g.name)}<span>${g.channels.length}</span></button>`).join('')}</div>
-      <div class="channels">${chans.map((c, i) => `<button class="ch" data-c="${i}">
-          <div class="cover" data-u="${esc(c.url)}"><div class="logo2" style="${bg(c.logo)}">${c.logo ? '' : '📺'}</div><span class="live-dot">LIVE</span></div>
-          <span class="chname">${esc(c.name)}</span></button>`).join('') || '<div class="empty">没有频道</div>'}</div></div>`;
+    const fav = liveFavs.all();
+    if (gi === -1 && !fav.length) gi = 0;
+    const chans = q ? groups.flatMap(g => g.channels).filter(c => c.name.toLowerCase().includes(q)) : gi === -1 ? fav : groups[gi]?.channels || [];
+    $('#liveBody').innerHTML = `<div class="live"><div class="groups">${fav.length ? `<button data-g="-1" class="favg ${gi === -1 && !q ? 'on' : ''}">★ 收藏<span>${fav.length}</span></button>` : ''}${groups.map((g, i) => `<button data-g="${i}" class="${i === gi && !q ? 'on' : ''}">${esc(g.name)}<span>${g.channels.length}</span></button>`).join('')}</div>
+      <div class="channels">${chans.map((c, i) => `<a class="ch" data-c="${i}" href="#/tv/${encodeURIComponent(src)}/${encodeURIComponent(c.url)}/${encodeURIComponent(c.name)}">
+          <div class="cover" data-u="${esc(c.url)}"><div class="logo2" style="${bg(c.logo)}">${c.logo ? '' : '📺'}</div><span class="live-dot">LIVE</span>
+            <button class="star ${liveFavs.has(c.url) ? 'on' : ''}" data-star="${i}" title="${liveFavs.has(c.url) ? '取消收藏' : '收藏'}">${liveFavs.has(c.url) ? '★' : '☆'}</button></div>
+          <span class="chname">${esc(c.name)}</span></a>`).join('') || '<div class="empty">没有频道</div>'}</div></div>`;
     $$('[data-g]', $('#liveBody')).forEach(b => b.onclick = () => { gi = +b.dataset.g; $('#chq').value = ''; paint(); });
     $$('.ch', $('#liveBody')).forEach(b => {
-      b.onclick = () => { stopPreview(); playLive(chans, +b.dataset.c); };
+      b.onclick = e => {
+        const st = e.target.closest('[data-star]');
+        if (st) { e.preventDefault(); e.stopPropagation(); toast(liveFavs.toggle(chans[+st.dataset.star]) ? '已收藏' : '已取消收藏'); return paint(); }
+        if (!plainClick(e)) return; e.preventDefault(); stopPreview(); playLive(chans, +b.dataset.c);
+      };
       b.onmouseenter = () => startPreview($('.cover', b), info.ffmpeg);
       b.onmouseleave = stopPreview;
     });
@@ -498,6 +704,7 @@ async function renderLive() {
   };
   $('#chq').oninput = paint;
   paint();
+  return groups;
 }
 
 // Hover preview: a fresh 3-second gif cut by the server's ffmpeg; without ffmpeg, a muted live mini-player
@@ -547,7 +754,7 @@ function stopPreview() {
   if (!pv) return;
   clearTimeout(pv.timer);
   pv.cover.classList.remove('loading');
-  pv.img?.remove();
+  if (pv.img) { pv.img.onload = pv.img.onerror = null; pv.img.src = ''; pv.img.remove(); }
   if (pv.hls) pv.hls.destroy();
   if (pv.video) { pv.video.pause(); pv.video.removeAttribute('src'); pv.video.load(); pv.video.remove(); }
   pv = null;

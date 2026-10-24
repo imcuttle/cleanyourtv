@@ -32,15 +32,34 @@ enum API {
         return data
     }
 
-    static func get(_ site: Site, _ params: [String: String]) async throws -> [String: Any] {
-        guard var comps = url(site.api).flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }) else { throw URLError(.badURL) }
-        comps.queryItems = (comps.queryItems ?? []) + params.map { URLQueryItem(name: $0.key, value: $0.value) }
-        guard let u = comps.url else { throw URLError(.badURL) }
-        let data = try await fetch(u)
-        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw URLError(.cannotParseResponse)
+    /// 5-minute response cache with in-flight de-duplication: going back to a page, or several rows asking
+    /// for the same list, costs nothing. Parsing happens off the main actor.
+    actor ResponseCache {
+        private var store: [URL: (Date, [String: Any])] = [:]
+        private var inflight: [URL: Task<[String: Any], Error>] = [:]
+        func value(_ u: URL, timeout: TimeInterval, fresh: Bool) async throws -> [String: Any] {
+            if !fresh, let (at, v) = store[u], Date().timeIntervalSince(at) < 300 { return v }
+            if let t = inflight[u] { return try await t.value }
+            let t = Task.detached(priority: .userInitiated) { () throws -> [String: Any] in
+                let data = try await API.fetch(u, timeout: timeout)
+                guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw URLError(.cannotParseResponse) }
+                return obj
+            }
+            inflight[u] = t
+            defer { inflight[u] = nil }
+            let v = try await t.value
+            store[u] = (Date(), v)
+            if store.count > 400, let oldest = store.min(by: { $0.value.0 < $1.value.0 })?.key { store[oldest] = nil }
+            return v
         }
-        return obj
+    }
+    static let responses = ResponseCache()
+
+    static func get(_ site: Site, _ params: [String: String], timeout: TimeInterval = 15, fresh: Bool = false) async throws -> [String: Any] {
+        guard var comps = url(site.api).flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }) else { throw URLError(.badURL) }
+        comps.queryItems = (comps.queryItems ?? []) + params.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
+        guard let u = comps.url else { throw URLError(.badURL) }
+        return try await responses.value(u, timeout: timeout, fresh: fresh)
     }
 
     /// Leaf categories only (top-level ones return empty lists on these sites), filtered by 安全级别.
@@ -56,7 +75,7 @@ enum API {
     static func item(_ site: Site, _ d: [String: Any]) -> VodItem {
         VodItem(site: site, vodId: str(d["vod_id"]), name: str(d["vod_name"]), pic: str(d["vod_pic"]),
                 remarks: str(d["vod_remarks"]), typeName: str(d["type_name"]), year: str(d["vod_year"]),
-                blurb: clean(str(d["vod_content"])))
+                blurb: String(clean(str(d["vod_content"])).prefix(300)), typeId: str(d["type_id"]))
     }
 
     private static func items(_ site: Site, _ obj: [String: Any]) -> [VodItem] {
@@ -88,7 +107,39 @@ enum API {
     }
 
     static func search(_ site: Site, _ wd: String) async throws -> [VodItem] {
-        items(site, try await get(site, ["ac": "detail", "wd": wd]))
+        items(site, try await get(site, ["ac": "detail", "wd": wd], timeout: 8))
+    }
+
+    static func splitPeople(_ v: String) -> [String] {
+        v.components(separatedBy: CharacterSet(charactersIn: ",，、/|;；"))
+            .flatMap { $0.components(separatedBy: "  ") }
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// 苹果CMS has no actor filter, but some sites' `wd` also matches credits. Search every site (two pages),
+    /// keep titles whose credits really contain the name, one per title + year, newest first.
+    static func person(_ name: String, role: String, sites: [Site]) async -> [VodItem] {
+        let field = role == "director" ? "vod_director" : "vod_actor"
+        let found = await withTaskGroup(of: [(Site, [String: Any])].self) { group in
+            for s in sites { for pg in [1, 2] {
+                group.addTask {
+                    let o = try? await get(s, ["ac": "detail", "wd": name, "pg": String(pg)], timeout: 8)
+                    return (o?["list"] as? [[String: Any]] ?? []).map { (s, $0) }
+                }
+            } }
+            var all: [(Site, [String: Any])] = []
+            for await r in group { all += r }
+            return all
+        }
+        var seen = Set<String>(), out: [VodItem] = []
+        for (s, d) in found {
+            guard splitPeople(str(d[field])).contains(name) else { continue }
+            let it = item(s, d)
+            guard !it.name.contains("解说"), !it.name.contains("预告"), !it.typeName.contains("解说"),
+                  it.typeName.isEmpty || Safety.catAllowed(s, it.typeName) else { continue }
+            if seen.insert(it.name.replacingOccurrences(of: " ", with: "") + "|" + it.year).inserted { out.append(it) }
+        }
+        return out.sorted { (Int($0.year) ?? 0) > (Int($1.year) ?? 0) }
     }
 
     /// Search every given site in parallel. Exact title matches first, then by site order.
@@ -122,7 +173,9 @@ enum API {
             if !eps.isEmpty { lines.append(PlayLine(name: i < froms.count ? froms[i] : "线路\(i + 1)", episodes: eps)) }
         }
         return VodDetail(year: str(d["vod_year"]), area: str(d["vod_area"]), actor: str(d["vod_actor"]),
-                         director: str(d["vod_director"]), content: clean(str(d["vod_content"])), lines: lines)
+                         director: str(d["vod_director"]), content: clean(str(d["vod_content"])), lines: lines,
+                         actors: splitPeople(str(d["vod_actor"])), directors: splitPeople(str(d["vod_director"])),
+                         typeId: str(d["type_id"]), typeName: str(d["type_name"]), lang: str(d["vod_lang"]))
     }
 
     // MARK: - Source checks
@@ -130,7 +183,7 @@ enum API {
     static func checkSite(_ api: String) async -> String {
         let t0 = Date()
         do {
-            let obj = try await get(Site(key: "", name: "", api: api), ["ac": "list"])
+            let obj = try await get(Site(key: "", name: "", api: api), ["ac": "list"], timeout: 10, fresh: true)
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
             return "✓ \(ms)ms · \(str(obj["total"]))部"
         } catch { return "✗ 不通：\(error.localizedDescription)" }
@@ -226,18 +279,24 @@ enum API {
 
     private static func douban(_ url: URL) async -> Any? {
         await gate.wait()
+        if Task.isCancelled { return nil }
         guard let d = try? await fetch(url, referer: "https://movie.douban.com/", timeout: 10) else { return nil }
         return try? JSONSerialization.jsonObject(with: d)
     }
 
     /// 豆瓣 subject + rating by exact title (+ year when known). Cached on disk.
+    static func cachedRating(name: String, year: String) -> DoubanRating? {
+        lock.lock(); defer { lock.unlock() }
+        return ratings[name + "|" + year]
+    }
+
     static func doubanRating(name: String, year: String) async -> DoubanRating {
         let key = name + "|" + year
         lock.lock(); let hit = ratings[key]; lock.unlock()
         if let hit { return hit }
         var c = URLComponents(string: "https://movie.douban.com/j/subject_suggest")!
         c.queryItems = [URLQueryItem(name: "q", value: name)]
-        guard let list = await douban(c.url!) as? [[String: Any]] else { return DoubanRating() }
+        guard let list = await douban(c.url!) as? [[String: Any]], !Task.isCancelled else { return DoubanRating() }
         let norm: (String) -> String = { $0.replacingOccurrences(of: "[\\s·:：\\-—!！,，.。]", with: "", options: .regularExpression).lowercased() }
         let exact = list.filter { str($0["title"]) == name || norm(str($0["title"])) == norm(name) }
         var out = DoubanRating()
@@ -251,8 +310,20 @@ enum API {
         ratings[key] = out
         let snapshot = ratings
         lock.unlock()
-        UserDefaults.standard.set(try? JSONEncoder().encode(snapshot), forKey: "douban.cache")
+        saveRatings(snapshot)
         return out
+    }
+
+    /// Writing the whole cache after every rating thrashed the main thread; coalesce to one write per 3 s.
+    private static var saveTask: Task<Void, Never>?
+    private static func saveRatings(_ snapshot: [String: DoubanRating]) {
+        lock.lock(); defer { lock.unlock() }
+        saveTask?.cancel()
+        saveTask = Task.detached(priority: .background) {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if Task.isCancelled { return }
+            UserDefaults.standard.set(try? JSONEncoder().encode(snapshot), forKey: "douban.cache")
+        }
     }
 
     static func doubanHot(_ type: String) async -> [DoubanItem] {

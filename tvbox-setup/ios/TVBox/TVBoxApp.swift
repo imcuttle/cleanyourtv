@@ -27,8 +27,8 @@ struct RootView: View {
                 .tabItem { Label("搜索", systemImage: "magnifyingglass") }
             NavigationStack { LiveView() }
                 .tabItem { Label("直播", systemImage: "tv") }
-            NavigationStack { DownloadsView() }
-                .tabItem { Label("下载", systemImage: "arrow.down.circle") }
+            NavigationStack { MineView() }
+                .tabItem { Label("我的", systemImage: "person.crop.circle") }
             NavigationStack { SettingsView(clip: $clip) }
                 .tabItem { Label("设置", systemImage: "gearshape") }
         }

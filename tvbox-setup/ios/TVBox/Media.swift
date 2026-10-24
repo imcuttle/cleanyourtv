@@ -36,7 +36,9 @@ final class ImagePipeline {
         let t = Task.detached(priority: .userInitiated) { () -> UIImage? in
             var data = try? Data(contentsOf: file)
             if data == nil, let u = API.url(url) {
-                data = try? await API.fetch(u, timeout: 20)
+                // 豆瓣's image CDN answers 418 without its Referer.
+                let ref = (u.host ?? "").hasSuffix("doubanio.com") ? "https://movie.douban.com/" : nil
+                data = try? await API.fetch(u, referer: ref, timeout: 20)
                 if let data { try? data.write(to: file) }
             }
             guard let data else { return nil }

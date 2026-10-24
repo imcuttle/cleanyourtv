@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// TVBox web: one Node process, zero npm dependencies.
+// TVBox web: zero npm dependencies. One worker per CPU core (node:cluster); stateful work — downloads,
+// config/safety writes, ffmpeg, 豆瓣 rate limiting — lives in one "leader" worker, the others reach it over IPC.
 //   - serves the Netflix-style UI in ./public
 //   - /api/*    sources (editable), 苹果CMS proxy, 豆瓣, safety level, downloads
 //   - /hls?u=   relays m3u8/ts for CDNs that send no CORS headers
@@ -13,6 +14,8 @@ const os = require('os');
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const { spawn, execFileSync } = require('child_process');
+const cluster = require('cluster');
+const zlib = require('zlib');
 
 const PORT = Number(process.env.PORT) || 9988;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -23,6 +26,98 @@ const DATA = process.env.TVBOX_DATA || path.join(ROOT, 'data');
 const DL = path.join(DATA, 'downloads');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 fs.mkdirSync(DL, { recursive: true });
+
+const CPUS = (os.availableParallelism ? os.availableParallelism() : os.cpus().length) || 1;
+const WORKERS = Math.max(1, Math.min(Number(process.env.WORKERS) || CPUS, 16));
+if (cluster.isPrimary && WORKERS > 1) return primary();
+const IS_LEADER = !cluster.isWorker || process.env.TVBOX_LEADER === '1';
+
+// ---- primary: fork, restart, relay RPC between workers and the leader ----
+function primary() {
+  cluster.schedulingPolicy = cluster.SCHED_RR; // even spread, also on Windows
+  let leader = null, announced = false, stopping = false;
+  const pending = new Map(); // rpc id -> requesting worker
+  const fork = lead => {
+    const w = cluster.fork({ TVBOX_LEADER: lead ? '1' : '0' });
+    w.isLeader = lead;
+    if (lead) leader = w;
+    w.on('message', m => {
+      if (!m || typeof m !== 'object') return;
+      if (m.t === 'rpc') {
+        if (!leader || !leader.isConnected()) return w.send({ t: 'rpc-res', id: m.id, error: '服务重启中，稍后再试' });
+        pending.set(m.id, w);
+        leader.send(m);
+      } else if (m.t === 'rpc-res') {
+        const to = pending.get(m.id);
+        pending.delete(m.id);
+        if (to && to.isConnected()) to.send(m);
+      } else if (m.t === 'reload') {
+        for (const x of Object.values(cluster.workers)) if (x !== w && x.isConnected()) x.send(m);
+      } else if (m.t === 'ready' && !announced) {
+        announced = true;
+        banner(WORKERS, m.ffmpeg, m.dl);
+      }
+    });
+  };
+  fork(true);
+  for (let i = 1; i < WORKERS; i++) fork(false);
+  cluster.on('exit', (w, code, sig) => {
+    if (stopping) return;
+    if (w.isLeader) leader = null;
+    console.log(`  进程 ${w.process.pid} 退出（${sig || code}），1 秒后重启`);
+    setTimeout(() => fork(w.isLeader), 1000);
+  });
+  for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { stopping = true; for (const w of Object.values(cluster.workers)) w.kill(); process.exit(0); });
+}
+
+function banner(n, ffmpeg, dl) {
+  console.log('\n  TVBox 已启动，浏览器打开：\n');
+  console.log(`    本机      http://localhost:${PORT}`);
+  for (const ip of lanIps()) console.log(`    局域网    http://${ip}:${PORT}`);
+  console.log(`\n  进程：${n} 个（CPU ${CPUS} 核，环境变量 WORKERS 可调）`);
+  console.log(`  下载目录：${dl}`);
+  console.log(`  直播封面：${ffmpeg ? 'ffmpeg 已找到' : '没有 ffmpeg，悬停时用浏览器截图'}`);
+  console.log('  关闭这个窗口即停止服务。\n');
+}
+
+// ---- RPC: run `op` in the leader (directly when we are the leader) ----
+const rpcHandlers = {};
+const rpcWait = new Map();
+let rpcSeq = 0;
+function rpc(op, args, ms = 60000) {
+  if (IS_LEADER) return Promise.resolve().then(() => rpcHandlers[op](args));
+  return new Promise((ok, bad) => {
+    const id = `${process.pid}:${++rpcSeq}`;
+    const t = setTimeout(() => { rpcWait.delete(id); bad(new Error('内部请求超时')); }, ms);
+    rpcWait.set(id, { ok, bad, t });
+    process.send({ t: 'rpc', id, op, args });
+  });
+}
+if (cluster.isWorker) {
+  process.on('message', async m => {
+    if (!m || typeof m !== 'object') return;
+    if (m.t === 'rpc' && IS_LEADER) {
+      try { process.send({ t: 'rpc-res', id: m.id, result: await rpcHandlers[m.op](m.args) }); }
+      catch (e) { process.send({ t: 'rpc-res', id: m.id, error: e.message || String(e) }); }
+    } else if (m.t === 'rpc-res') {
+      const w = rpcWait.get(m.id);
+      if (!w) return;
+      rpcWait.delete(m.id); clearTimeout(w.t);
+      m.error !== undefined ? w.bad(new Error(m.error)) : w.ok(m.result);
+    } else if (m.t === 'reload') reloadState();
+  });
+}
+// After the leader changes config/safety on disk, every worker re-reads it.
+function broadcastReload() {
+  reloadState();
+  if (cluster.isWorker) process.send({ t: 'reload' });
+}
+function reloadState() {
+  const c = readJson(STORE, null);
+  if (c) config = normalize(c);
+  safety = readJson(SAFETY, { level: 'standard', pin: '' });
+  cache.clear();
+}
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon', '.json': 'application/json',
@@ -73,7 +168,7 @@ function normalize(cfg) {
 
 let config = (() => { const c = readJson(STORE, null); return c ? normalize(c) : defaults(); })();
 const saveConfig = () => writeJson(STORE, config);
-if (!fs.existsSync(STORE)) saveConfig();
+if (IS_LEADER && !fs.existsSync(STORE)) saveConfig();
 
 // ======================= safety level =======================
 // kids: only kids sites; standard: hide adult sites + adult categories; all: everything.
@@ -136,7 +231,7 @@ function limited(fn) {
   return new Promise((ok, bad) => { mediaQueue.push({ fn, ok, bad }); drainMedia(); });
 }
 function drainMedia() {
-  while (mediaRunning < 3 && mediaQueue.length) {
+  while (mediaRunning < Math.max(2, Math.min(CPUS, 6)) && mediaQueue.length) {
     const { fn, ok, bad } = mediaQueue.shift();
     mediaRunning++;
     fn().then(ok, bad).finally(() => { mediaRunning--; drainMedia(); });
@@ -151,6 +246,7 @@ function ffmpeg(args, ms) {
   });
 }
 const mediaFile = (kind, url) => path.join(THUMBS, crypto.createHash('md5').update(url).digest('hex') + (kind === 'thumb' ? '.jpg' : '.gif'));
+rpcHandlers.media = ({ kind, url }) => liveMedia(kind, url);
 async function liveMedia(kind, url) {
   const file = mediaFile(kind, url);
   const st = await fsp.stat(file).catch(() => null);
@@ -180,29 +276,41 @@ async function fetchText(url, ms = 15000, headers = {}) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.text();
 }
+// Identical upstream requests that overlap share one fetch.
+const inflight = new Map();
+function once(key, fn) {
+  if (inflight.has(key)) return inflight.get(key);
+  const p = fn().finally(() => inflight.delete(key));
+  inflight.set(key, p);
+  return p;
+}
 async function cachedText(url) {
   const hit = cache.get(url);
   if (hit && Date.now() - hit.at < TTL) return hit.body;
-  const body = await fetchText(url);
-  cache.set(url, { at: Date.now(), body });
-  return body;
+  return once('t|' + url, async () => {
+    const body = await fetchText(url);
+    cache.set(url, { at: Date.now(), body });
+    return body;
+  });
 }
-async function cmsGet(site, params, fresh = false) {
+async function cmsGet(site, params, fresh = false, ms = 15000) {
   const u = new URL(site.api);
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.searchParams.set(k, v);
   const key = u.toString();
   const hit = cache.get(key);
   if (!fresh && hit && Date.now() - hit.at < TTL) return hit.body;
-  let body;
-  try { body = JSON.parse(await fetchText(key)); } catch (e) { throw new Error(`${site.name}：${/JSON/.test(e.message) ? '返回的不是 JSON' : e.message}`); }
-  cache.set(key, { at: Date.now(), body });
-  if (cache.size > 800) cache.delete(cache.keys().next().value);
-  return body;
+  return once('j|' + key, async () => {
+    let body;
+    try { body = JSON.parse(await fetchText(key, ms)); } catch (e) { throw new Error(`${site.name}：${/JSON/.test(e.message) ? '返回的不是 JSON' : e.message}`); }
+    cache.set(key, { at: Date.now(), body });
+    if (cache.size > 800) cache.delete(cache.keys().next().value);
+    return body;
+  });
 }
 
 function item(site, d) {
   return { site: site.key, siteName: site.name, id: str(d.vod_id), name: str(d.vod_name), pic: str(d.vod_pic),
-    remarks: str(d.vod_remarks), type: str(d.type_name), year: str(d.vod_year), area: str(d.vod_area),
+    remarks: str(d.vod_remarks), type: str(d.type_name), typeId: str(d.type_id), year: str(d.vod_year), area: str(d.vod_area),
     blurb: clean(d.vod_content).slice(0, 300) };
 }
 const itemOk = (site, it) => !it.type || catAllowed(site, it.type);
@@ -382,12 +490,62 @@ async function recognize(input) {
   return { sites, lives, unknown };
 }
 
+// ======================= people =======================
+// 苹果CMS has no actor filter, but some sites' `wd` also matches vod_actor / vod_director. Search every
+// visible site (two pages), keep titles whose credits really contain the name, one per title+year.
+const splitPeople = v => str(v).split(/[,，、/|;；]+|\s{2,}/).map(x => x.trim()).filter(Boolean);
+async function person(name, role, sites) {
+  const field = role === 'director' ? 'vod_director' : 'vod_actor';
+  const pages = await Promise.all(sites.flatMap(s => [1, 2].map(pg => cmsGet(s, { ac: 'detail', wd: name, pg: String(pg) }, false, 8000)
+    .then(b => (b.list || []).map(d => ({ s, d })), () => []))));
+  const seen = new Set(), out = [];
+  for (const { s, d } of pages.flat()) {
+    if (!splitPeople(d[field]).some(p => p === name)) continue;
+    if (/解说|预告/.test(str(d.vod_name)) || /解说|预告/.test(str(d.type_name))) continue;
+    const it = item(s, d);
+    if (!itemOk(s, it)) continue;
+    const k = it.name.replace(/\s+/g, '') + '|' + it.year;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(it);
+  }
+  return out.sort((a, b) => (Number(b.year) || 0) - (Number(a.year) || 0));
+}
+
+// ======================= images =======================
+// 豆瓣's image CDN answers 418 without a douban Referer, which browsers won't send cross-site. Relay those
+// (and only those), cached on disk for a week.
+const IMGS = path.join(DATA, 'img');
+fs.mkdirSync(IMGS, { recursive: true });
+async function imageProxy(target, res) {
+  let u;
+  try { u = new URL(target); } catch { return send(res, 400, 'bad url', 'text/plain'); }
+  if (!/(^|\.)doubanio\.com$/.test(u.hostname)) return send(res, 403, 'host not allowed', 'text/plain');
+  const file = path.join(IMGS, crypto.createHash('md5').update(u.toString()).digest('hex'));
+  const st = await fsp.stat(file).catch(() => null);
+  const head = { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=604800, immutable' };
+  if (st && Date.now() - st.mtimeMs < 7 * 86400e3) { res.writeHead(200, { ...head, 'Content-Length': st.size }); return fs.createReadStream(file).pipe(res); }
+  const buf = await once('img|' + file, async () => {
+    const r = await fetch(u, { headers: { 'User-Agent': DB_UA_IMG, Referer: 'https://movie.douban.com/' }, signal: AbortSignal.timeout(15000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const b = Buffer.from(await r.arrayBuffer());
+    await fsp.writeFile(file + '.' + process.pid, b);
+    await fsp.rename(file + '.' + process.pid, file);
+    return b;
+  });
+  res.writeHead(200, { ...head, 'Content-Length': buf.length });
+  res.end(buf);
+}
+const DB_UA_IMG = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
+
 // ======================= 豆瓣 =======================
 const DB_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 const DB_FILE = path.join(DATA, 'douban.json');
 const dbRatings = readJson(DB_FILE, {}); // "name|year" -> {id, rate, at}
 let dbDirty = false;
-setInterval(() => { if (dbDirty) { dbDirty = false; writeJson(DB_FILE, dbRatings); } }, 10000).unref();
+if (IS_LEADER) setInterval(() => { if (dbDirty) { dbDirty = false; writeJson(DB_FILE, dbRatings); } }, 10000).unref();
+rpcHandlers.dbRating = ({ name, year }) => doubanRating(name, year);
+rpcHandlers.dbHot = ({ type }) => doubanHot(type);
 const dbMem = new Map();
 let dbChain = Promise.resolve();
 // Serialize requests to 豆瓣 with a small gap so we don't get rate-limited.
@@ -439,8 +597,21 @@ async function doubanHot(type) {
 // Each episode → data/downloads/<id>/{index.m3u8, 00001.ts…}. Segments are decrypted on the way in,
 // so the folder plays anywhere and concatenates into a single file.
 const DL_INDEX = path.join(DL, 'index.json');
-const jobs = readJson(DL_INDEX, []);
-for (const j of jobs) if (j.status === 'downloading') j.status = 'queued';
+let jobs = [];
+if (IS_LEADER) {
+  jobs = readJson(DL_INDEX, []);
+  for (const j of jobs) if (j.status === 'downloading') j.status = 'queued';
+}
+// Other workers serve finished files; they read the leader's index (re-read when it changes).
+let jobSnap = { mtime: -1, list: [] };
+function jobsSnapshot() {
+  if (IS_LEADER) return jobs;
+  try {
+    const st = fs.statSync(DL_INDEX);
+    if (st.mtimeMs !== jobSnap.mtime) jobSnap = { mtime: st.mtimeMs, list: readJson(DL_INDEX, []) };
+  } catch {}
+  return jobSnap.list;
+}
 let saveTimer;
 const saveJobs = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => writeJson(DL_INDEX, jobs), 500); };
 let running = 0;
@@ -571,7 +742,7 @@ const jobView = j => ({ ...j, play: j.status !== 'done' ? '' : fs.existsSync(pat
 
 async function serveDownload(rest, req, res) {
   const [id, file] = rest.split('/');
-  const j = jobs.find(x => x.id === id);
+  const j = jobsSnapshot().find(x => x.id === id);
   if (!j || !/^[\w.-]+$/.test(file || '')) return send(res, 404, 'not found', 'text/plain');
   const dir = path.join(DL, id);
   if (file === 'save') {
@@ -602,8 +773,16 @@ async function serveDownload(rest, req, res) {
 
 // ======================= HTTP =======================
 function send(res, code, body, type = 'application/json; charset=utf-8') {
-  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' });
-  res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
+  if (res.destroyed) return;
+  let buf = typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body);
+  const headers = { 'Content-Type': type, 'Cache-Control': 'no-store' };
+  if (buf.length > 1024 && /json|text/.test(type) && /\bgzip\b/.test(res.req?.headers['accept-encoding'] || '')) {
+    buf = zlib.gzipSync(buf, { level: 5 });
+    headers['Content-Encoding'] = 'gzip';
+    headers.Vary = 'Accept-Encoding';
+  }
+  res.writeHead(code, headers);
+  res.end(buf);
 }
 function readBody(req) {
   return new Promise((ok, fail) => {
@@ -619,57 +798,19 @@ async function api(route, q, res, req) {
   const SITES = visibleSites();
   const write = req.method !== 'GET';
 
-  // ---- safety ----
-  if (route === 'safety') {
-    if (write) {
-      const b = await readBody(req);
-      if (safety.pin && b.pin !== safety.pin) return needPin(res);
-      if (['kids', 'standard', 'all'].includes(b.level)) safety.level = b.level;
-      if (typeof b.newPin === 'string') safety.pin = b.newPin.trim();
-      writeJson(SAFETY, safety); cache.clear();
-    }
-    return send(res, 200, { level: safety.level, hasPin: !!safety.pin });
-  }
+  const leader = async (op, args) => { const r = await rpc(op, args); return send(res, r.code || 200, r.body); };
 
-  // ---- config ----
+  // ---- safety / config: written by the leader, then every worker reloads ----
+  if (route === 'safety') {
+    if (!write) return send(res, 200, { level: safety.level, hasPin: !!safety.pin });
+    return leader('safety', await readBody(req));
+  }
   if (route.startsWith('config')) {
-    if (write && !pinOk(req)) return needPin(res);
-    if (route === 'config' && req.method === 'PUT') { config = normalize(await readBody(req)); saveConfig(); cache.clear(); }
-    if (route === 'config/reset' && write) { config = defaults(); saveConfig(); cache.clear(); }
-    if (route === 'config/add' && write) {
-      // From clipboard recognition: append only what isn't there; pasted lists become local files.
-      const b = await readBody(req);
-      const lives = [];
-      const haveText = new Set();
-      for (const f of await fsp.readdir(LIVES).catch(() => [])) {
-        if (config.lives.some(l => l.url === 'local:' + f)) haveText.add(textKey(await fsp.readFile(path.join(LIVES, f), 'utf8').catch(() => '')));
-      }
-      for (const l of Array.isArray(b.lives) ? b.lives : []) {
-        if (l.text && haveText.has(textKey(l.text))) continue;
-        if (l.text) {
-          haveText.add(textKey(l.text));
-          const file = crypto.randomBytes(5).toString('hex') + '.m3u';
-          await fsp.writeFile(path.join(LIVES, file), str(l.text));
-          lives.push({ name: str(l.name) || '剪贴板频道', url: 'local:' + file });
-        } else if (/^https?:\/\//.test(str(l.url))) lives.push({ name: str(l.name) || hostOf(l.url), url: str(l.url) });
-      }
-      const haveApi = new Set(config.sites.filter(s => !s.categories).map(s => normApi(s.api)));
-      const sites = (Array.isArray(b.sites) ? b.sites : []).filter(s => s.categories || !haveApi.has(normApi(s.api)));
-      const before = { s: config.sites.length, l: config.lives.length };
-      config = normalize({ sites: [...config.sites, ...sites], lives: [...config.lives, ...lives] });
-      saveConfig(); cache.clear();
-      return send(res, 200, { ...config, added: { sites: config.sites.length - before.s, lives: config.lives.length - before.l } });
-    }
-    if (route === 'config/import' && write) {
-      const { url, replace } = await readBody(req);
-      if (!/^https?:\/\//.test(url || '')) return send(res, 400, { error: '要 http(s) 地址' });
-      const found = await importFrom(url);
-      if (!found.sites.length && !found.lives.length) return send(res, 422, { error: '没找到可直连的苹果CMS点播源或直播源' });
-      config = replace ? found : normalize({ sites: [...config.sites, ...found.sites], lives: [...config.lives, ...found.lives] });
-      saveConfig(); cache.clear();
-      return send(res, 200, { ...config, imported: { sites: found.sites.length, lives: found.lives.length } });
-    }
-    return send(res, 200, config);
+    if (!write) return send(res, 200, config);
+    if (!pinOk(req)) return needPin(res);
+    const op = { config: 'put', 'config/reset': 'reset', 'config/add': 'add', 'config/import': 'import' }[route];
+    if (!op || (op === 'put' && req.method !== 'PUT')) return send(res, 404, { error: 'unknown api' });
+    return leader('config', { op, body: await readBody(req) });
   }
   if (route === 'check') {
     const t = Date.now();
@@ -689,11 +830,7 @@ async function api(route, q, res, req) {
       catch (e) { return send(res, 200, { text: '', error: e.message }); }
     }
     if (!pinOk(req)) return needPin(res);
-    const { url, text } = await readBody(req);
-    const file = str(url).startsWith('local:') ? path.basename(str(url).slice(6)) : crypto.randomBytes(5).toString('hex') + '.m3u';
-    await fsp.writeFile(path.join(LIVES, file), str(text));
-    cache.clear();
-    return send(res, 200, { url: 'local:' + file });
+    return leader('config', { op: 'liveRaw', body: await readBody(req) });
   }
   if (route === 'live/thumb' || route === 'live/preview') {
     const u = q.get('u') || '';
@@ -705,52 +842,19 @@ async function api(route, q, res, req) {
       if (m) await fsp.writeFile(mediaFile('thumb', u), Buffer.from(m[1], 'base64'));
       return send(res, 200, { ok: !!m });
     }
-    const file = await liveMedia(route === 'live/thumb' ? 'thumb' : 'preview', u);
+    const file = await rpc('media', { kind: route === 'live/thumb' ? 'thumb' : 'preview', url: u }, 90000);
     if (!file) return send(res, 404, { error: FFMPEG ? '截不到画面' : '服务端没有 ffmpeg' });
     res.writeHead(200, { 'Content-Type': route === 'live/thumb' ? 'image/jpeg' : 'image/gif', 'Cache-Control': 'max-age=300' });
     return fs.createReadStream(file).pipe(res);
   }
 
   // ---- 豆瓣 ----
-  if (route === 'douban/rating') return send(res, 200, await doubanRating(q.get('name') || '', q.get('year') || ''));
-  if (route === 'douban/hot') return send(res, 200, safety.level === 'kids' ? { list: [] } : await doubanHot(q.get('type') === 'movie' ? 'movie' : 'tv'));
+  if (route === 'douban/rating') return send(res, 200, await rpc('dbRating', { name: q.get('name') || '', year: q.get('year') || '' }));
+  if (route === 'douban/hot') return send(res, 200, safety.level === 'kids' ? { list: [] } : await rpc('dbHot', { type: q.get('type') === 'movie' ? 'movie' : 'tv' }));
 
-  // ---- downloads ----
+  // ---- downloads (leader runs the queue) ----
   if (route === 'downloads') {
-    if (req.method === 'POST') {
-      const b = await readBody(req);
-      const added = [];
-      for (const e of Array.isArray(b.items) ? b.items : [b]) {
-        if (!/^https?:\/\//.test(str(e.url))) continue;
-        const key = `${e.site}|${e.id}|${e.url}`;
-        let j = jobs.find(x => x.key === key);
-        if (j) { if (j.status === 'error' || j.status === 'paused') j.status = 'queued'; }
-        else {
-          j = { id: crypto.randomBytes(6).toString('hex'), key, site: str(e.site), siteName: str(e.siteName), vid: str(e.id), name: str(e.name),
-            pic: str(e.pic), line: Number(e.line) || 0, ep: Number(e.ep) || 0, epName: str(e.epName), url: e.url,
-            status: 'queued', done: 0, total: 0, bytes: 0, at: Date.now() };
-          jobs.unshift(j);
-        }
-        added.push(j.id);
-      }
-      saveJobs(); pump();
-      return send(res, 200, { added });
-    }
-    if (req.method === 'DELETE') {
-      const i = jobs.findIndex(x => x.id === q.get('id'));
-      if (i >= 0) { jobs[i].status = 'deleted'; await fsp.rm(path.join(DL, jobs[i].id), { recursive: true, force: true }); jobs.splice(i, 1); saveJobs(); }
-      return send(res, 200, { ok: true });
-    }
-    if (req.method === 'PATCH') {
-      const j = jobs.find(x => x.id === q.get('id'));
-      if (j && q.get('action') === 'pause' && ['queued', 'downloading'].includes(j.status)) j.status = 'paused';
-      if (j && q.get('action') === 'resume' && ['paused', 'error'].includes(j.status)) j.status = 'queued';
-      saveJobs(); pump();
-      return send(res, 200, { ok: true });
-    }
-    let free = null;
-    try { const s = await fsp.statfs(DL); free = s.bavail * s.bsize; } catch {}
-    return send(res, 200, { jobs: jobs.map(jobView), free, dir: DL });
+    return leader('downloads', { method: req.method, id: q.get('id'), action: q.get('action'), body: req.method === 'POST' ? await readBody(req) : null });
   }
 
   // ---- 直播 ----
@@ -763,9 +867,14 @@ async function api(route, q, res, req) {
   }
 
   // ---- 点播 ----
+  if (route === 'person') {
+    const name = (q.get('name') || '').trim();
+    if (!name) return send(res, 400, { error: '缺少名字' });
+    return send(res, 200, { list: await person(name, q.get('role'), SITES) });
+  }
   if (route === 'search') {
     const wd = q.get('wd') || '';
-    const out = await Promise.all(SITES.map(s => cmsGet(s, { ac: 'detail', wd })
+    const out = await Promise.all(SITES.map(s => cmsGet(s, { ac: 'detail', wd }, false, 8000)
       .then(b => ({ site: s.key, list: (b.list || []).map(d => item(s, d)).filter(it => itemOk(s, it)) }))
       .catch(e => ({ site: s.name, error: e.message, list: [] }))));
     return send(res, 200, { results: out.flatMap(o => o.list), failed: out.filter(o => o.error).map(o => o.site) });
@@ -789,10 +898,99 @@ async function api(route, q, res, req) {
     if (!d) return send(res, 404, { error: '没有这部' });
     const it = item(site, d);
     if (!itemOk(site, it)) return send(res, 403, { error: '当前安全级别下不可看' });
-    return send(res, 200, { ...it, blurb: clean(d.vod_content), actor: str(d.vod_actor), director: str(d.vod_director), lines: lines(d) });
+    return send(res, 200, { ...it, blurb: clean(d.vod_content), actor: str(d.vod_actor), director: str(d.vod_director),
+      actors: splitPeople(d.vod_actor), directors: splitPeople(d.vod_director), lang: str(d.vod_lang), lines: lines(d) });
   }
   send(res, 404, { error: 'unknown api' });
 }
+
+// ======================= leader-side handlers =======================
+rpcHandlers.safety = b => {
+  if (safety.pin && b.pin !== safety.pin) return { code: 403, body: { error: '需要家长 PIN', pin: true } };
+  if (['kids', 'standard', 'all'].includes(b.level)) safety.level = b.level;
+  if (typeof b.newPin === 'string') safety.pin = b.newPin.trim();
+  writeJson(SAFETY, safety);
+  broadcastReload();
+  return { body: { level: safety.level, hasPin: !!safety.pin } };
+};
+
+rpcHandlers.config = async ({ op, body: b }) => {
+  let extra = {};
+  if (op === 'put') config = normalize(b);
+  else if (op === 'reset') config = defaults();
+  else if (op === 'liveRaw') {
+    const file = str(b.url).startsWith('local:') ? path.basename(str(b.url).slice(6)) : crypto.randomBytes(5).toString('hex') + '.m3u';
+    await fsp.writeFile(path.join(LIVES, file), str(b.text));
+    broadcastReload();
+    return { body: { url: 'local:' + file } };
+  } else if (op === 'import') {
+    if (!/^https?:\/\//.test(b.url || '')) return { code: 400, body: { error: '要 http(s) 地址' } };
+    const found = await importFrom(b.url);
+    if (!found.sites.length && !found.lives.length) return { code: 422, body: { error: '没找到可直连的苹果CMS点播源或直播源' } };
+    config = b.replace ? found : normalize({ sites: [...config.sites, ...found.sites], lives: [...config.lives, ...found.lives] });
+    extra = { imported: { sites: found.sites.length, lives: found.lives.length } };
+  } else if (op === 'add') {
+    // From clipboard recognition: append only what isn't there; pasted lists become local files.
+    const lives = [];
+    const haveText = new Set();
+    for (const f of await fsp.readdir(LIVES).catch(() => [])) {
+      if (config.lives.some(l => l.url === 'local:' + f)) haveText.add(textKey(await fsp.readFile(path.join(LIVES, f), 'utf8').catch(() => '')));
+    }
+    for (const l of Array.isArray(b.lives) ? b.lives : []) {
+      if (l.text && haveText.has(textKey(l.text))) continue;
+      if (l.text) {
+        haveText.add(textKey(l.text));
+        const file = crypto.randomBytes(5).toString('hex') + '.m3u';
+        await fsp.writeFile(path.join(LIVES, file), str(l.text));
+        lives.push({ name: str(l.name) || '剪贴板频道', url: 'local:' + file });
+      } else if (/^https?:\/\//.test(str(l.url))) lives.push({ name: str(l.name) || hostOf(l.url), url: str(l.url) });
+    }
+    const haveApi = new Set(config.sites.filter(s => !s.categories).map(s => normApi(s.api)));
+    const sites = (Array.isArray(b.sites) ? b.sites : []).filter(s => s.categories || !haveApi.has(normApi(s.api)));
+    const before = { s: config.sites.length, l: config.lives.length };
+    config = normalize({ sites: [...config.sites, ...sites], lives: [...config.lives, ...lives] });
+    extra = { added: { sites: config.sites.length - before.s, lives: config.lives.length - before.l } };
+  }
+  saveConfig();
+  broadcastReload();
+  return { body: { ...config, ...extra } };
+};
+
+rpcHandlers.downloads = async ({ method, id, action, body: b }) => {
+  if (method === 'POST') {
+    const added = [];
+    for (const e of Array.isArray(b.items) ? b.items : [b]) {
+      if (!/^https?:\/\//.test(str(e.url))) continue;
+      const key = `${e.site}|${e.id}|${e.url}`;
+      let j = jobs.find(x => x.key === key);
+      if (j) { if (j.status === 'error' || j.status === 'paused') j.status = 'queued'; }
+      else {
+        j = { id: crypto.randomBytes(6).toString('hex'), key, site: str(e.site), siteName: str(e.siteName), vid: str(e.id), name: str(e.name),
+          pic: str(e.pic), line: Number(e.line) || 0, ep: Number(e.ep) || 0, epName: str(e.epName), url: e.url,
+          status: 'queued', done: 0, total: 0, bytes: 0, at: Date.now() };
+        jobs.unshift(j);
+      }
+      added.push(j.id);
+    }
+    saveJobs(); pump();
+    return { body: { added } };
+  }
+  if (method === 'DELETE') {
+    const i = jobs.findIndex(x => x.id === id);
+    if (i >= 0) { jobs[i].status = 'deleted'; await fsp.rm(path.join(DL, jobs[i].id), { recursive: true, force: true }); jobs.splice(i, 1); saveJobs(); }
+    return { body: { ok: true } };
+  }
+  if (method === 'PATCH') {
+    const j = jobs.find(x => x.id === id);
+    if (j && action === 'pause' && ['queued', 'downloading'].includes(j.status)) j.status = 'paused';
+    if (j && action === 'resume' && ['paused', 'error'].includes(j.status)) j.status = 'queued';
+    saveJobs(); pump();
+    return { body: { ok: true } };
+  }
+  let free = null;
+  try { const st = await fsp.statfs(DL); free = st.bavail * st.bsize; } catch {}
+  return { body: { jobs: jobs.map(jobView), free, dir: DL } };
+};
 
 function lanIps() {
   return Object.values(os.networkInterfaces()).flat()
@@ -838,7 +1036,11 @@ async function relay(target, res, req) {
   if (!/^https?:$/.test(u.protocol)) return send(res, 400, 'bad url', 'text/plain');
   const headers = { 'User-Agent': UA };
   if (req.headers.range) headers.Range = req.headers.range;
-  const r = await fetch(u, { headers, redirect: 'follow', signal: AbortSignal.timeout(20000) });
+  const ac = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ac.abort(); });
+  const timer = setTimeout(() => ac.abort(), 20000);
+  let r;
+  try { r = await fetch(u, { headers, redirect: 'follow', signal: ac.signal }); } finally { clearTimeout(timer); }
   const type = r.headers.get('content-type') || '';
   const isList = /mpegurl/i.test(type) || /\.m3u8(\?|$)/i.test(r.url);
   const base = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
@@ -859,36 +1061,50 @@ async function relay(target, res, req) {
   if (r.body) Readable.fromWeb(r.body).on('error', () => res.destroy()).pipe(res); else res.end();
 }
 
-function serveStatic(p, req, res) {
+// Static files: kept in memory with a pre-gzipped copy; re-read when the file changes on disk.
+// no-cache + ETag: the browser revalidates, so an updated app.js/style.css shows up on the next load.
+const staticCache = new Map();
+async function serveStatic(p, req, res) {
   const file = path.normalize(path.join(PUBLIC, p === '/' ? 'index.html' : p));
   if (!file.startsWith(PUBLIC)) return send(res, 403, 'forbidden', 'text/plain');
-  fs.readFile(file, (err, buf) => {
-    if (err) return send(res, 404, 'not found', 'text/plain');
-    // no-cache: the browser revalidates, so an updated app.js/style.css shows up on the next load.
-    const etag = '"' + crypto.createHash('md5').update(buf).digest('hex').slice(0, 16) + '"';
-    if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag }); return res.end(); }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', ETag: etag });
-    res.end(buf);
-  });
+  const st = await fsp.stat(file).catch(() => null);
+  if (!st || !st.isFile()) return send(res, 404, 'not found', 'text/plain');
+  let c = staticCache.get(file);
+  if (!c || c.mtime !== st.mtimeMs) {
+    const buf = await fsp.readFile(file);
+    const type = MIME[path.extname(file)] || 'application/octet-stream';
+    c = { mtime: st.mtimeMs, buf, type, etag: '"' + crypto.createHash('md5').update(buf).digest('hex').slice(0, 16) + '"',
+      gz: /text|javascript|css|svg|json/.test(type) && buf.length > 1024 ? zlib.gzipSync(buf, { level: 9 }) : null };
+    staticCache.set(file, c);
+  }
+  if (req.headers['if-none-match'] === c.etag) { res.writeHead(304, { ETag: c.etag }); return res.end(); }
+  const gz = c.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+  const body = gz ? c.gz : c.buf;
+  res.writeHead(200, { 'Content-Type': c.type, 'Cache-Control': 'no-cache', ETag: c.etag, 'Content-Length': body.length,
+    ...(gz ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}) });
+  res.end(body);
 }
 
-http.createServer(async (req, res) => {
+const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   try {
     if (u.pathname.startsWith('/api/')) return await api(u.pathname.slice(5), u.searchParams, res, req);
     if (u.pathname === '/hls') return await relay(u.searchParams.get('u') || '', res, req);
+    if (u.pathname === '/img') return await imageProxy(u.searchParams.get('u') || '', res);
     if (u.pathname.startsWith('/dl/')) return await serveDownload(u.pathname.slice(4), req, res);
-    serveStatic(decodeURIComponent(u.pathname), req, res);
+    return await serveStatic(decodeURIComponent(u.pathname), req, res);
   } catch (e) {
+    if (res.destroyed) return;            // the browser already gave up (page switched)
     if (!res.headersSent) send(res, 502, { error: e.message || String(e) });
     else res.destroy();
   }
-}).listen(PORT, HOST, () => {
-  console.log('\n  TVBox 已启动，浏览器打开：\n');
-  console.log(`    本机      http://localhost:${PORT}`);
-  for (const ip of lanIps()) console.log(`    局域网    http://${ip}:${PORT}`);
-  console.log(`\n  下载目录：${DL}`);
-  console.log(`  直播封面：${FFMPEG ? 'ffmpeg 已找到' : '没有 ffmpeg，悬停时用浏览器截图'}`);
-  console.log('  关闭这个窗口即停止服务。\n');
-  pump();
+});
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+server.listen(PORT, HOST, () => {
+  if (!cluster.isWorker) banner(1, !!FFMPEG, DL);
+  if (IS_LEADER) {
+    pump();
+    if (cluster.isWorker) process.send({ t: 'ready', ffmpeg: !!FFMPEG, dl: DL });
+  }
 });

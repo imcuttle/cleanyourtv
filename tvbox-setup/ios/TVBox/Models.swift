@@ -33,6 +33,7 @@ struct VodItem: Identifiable, Hashable {
     let typeName: String
     var year: String = ""
     var blurb: String = ""
+    var typeId: String = ""
     var id: String { site.key + "/" + vodId }
 }
 
@@ -55,6 +56,11 @@ struct VodDetail {
     let director: String
     let content: String
     let lines: [PlayLine]
+    var actors: [String] = []
+    var directors: [String] = []
+    var typeId = ""
+    var typeName = ""
+    var lang = ""
 }
 
 struct LiveChannel: Identifiable, Hashable {

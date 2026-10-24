@@ -20,13 +20,27 @@ struct PosterCell: View {
     let item: VodItem
     var width: CGFloat? = nil
     var showSite = false
-    @State private var rate = ""
+    var progress: Double = 0
+    @State private var rate: String
+
+    init(item: VodItem, width: CGFloat? = nil, showSite: Bool = false, progress: Double = 0) {
+        self.item = item; self.width = width; self.showSite = showSite; self.progress = progress
+        _rate = State(initialValue: API.cachedRating(name: item.name, year: item.year)?.rate ?? "")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Color.clear
                 .aspectRatio(2 / 3, contentMode: .fit)
                 .overlay(Poster(url: item.pic))
+                .overlay(alignment: .bottom) {
+                    if progress > 0 {
+                        GeometryReader { g in
+                            Rectangle().fill(Color.brand).frame(width: g.size.width * progress, height: 3)
+                                .frame(maxHeight: .infinity, alignment: .bottom)
+                        }
+                    }
+                }
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(alignment: .topLeading) {
                     if !item.remarks.isEmpty {
@@ -41,7 +55,11 @@ struct PosterCell: View {
             if showSite { Text(item.site.name).font(.caption2).foregroundStyle(.secondary) }
         }
         .frame(width: width)
-        .task(id: item.id) { if rate.isEmpty { rate = await API.doubanRating(name: item.name, year: item.year).rate } }
+        .task(id: item.id) {
+            guard rate.isEmpty, API.cachedRating(name: item.name, year: item.year) == nil else { return }
+            try? await Task.sleep(nanoseconds: 250_000_000)  // skip posters that only fly past while scrolling
+            if !Task.isCancelled { rate = await API.doubanRating(name: item.name, year: item.year).rate }
+        }
     }
 }
 
@@ -72,6 +90,7 @@ struct Row: Identifiable {
 
 struct VodHomeView: View {
     @ObservedObject private var cfg = Config.shared
+    @ObservedObject private var lib = Library.shared
     @AppStorage("safety.level") private var level = "standard"
     @AppStorage("siteKey") private var siteKey = ""
     @State private var cats: [VodCategory] = []
@@ -96,6 +115,10 @@ struct VodHomeView: View {
                     Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).padding(.horizontal)
                 }
                 if loading && latest.isEmpty { ProgressView().frame(maxWidth: .infinity, minHeight: 300) }
+                let cont = lib.history.prefix(20).compactMap { e in e.item.map { (e, $0) } }
+                if !cont.isEmpty { historyRow(Array(cont)) }
+                let favs = level == "kids" ? [] : lib.favorites.prefix(30).compactMap(\.item)
+                if !favs.isEmpty { vodRow("我的收藏", Array(favs), nil) }
                 if latest.count > 6 {
                     vodRow(level == "kids" ? "少儿精选" : "最新更新", Array(latest.dropFirst(6)), VodCategory(id: "", pid: "", name: level == "kids" ? "少儿精选" : "最新更新"))
                 }
@@ -108,9 +131,7 @@ struct VodHomeView: View {
         }
         .ignoresSafeArea(edges: .top)
         .background(Color.black)
-        .navigationDestination(for: VodItem.self) { VodDetailView(item: $0) }
-        .navigationDestination(for: DoubanItem.self) { DoubanResolveView(item: $0) }
-        .navigationDestination(for: VodCategory.self) { c in if let site { CategoryGridView(site: site, cat: c) } }
+        .appDestinations()
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -149,9 +170,33 @@ struct VodHomeView: View {
         }.foregroundStyle(.white)
     }
 
-    private func vodRow(_ title: String, _ items: [VodItem], _ cat: VodCategory) -> some View {
+    private func historyRow(_ list: [(LibEntry, VodItem)]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            NavigationLink(value: cat) { header(title) }.padding(.horizontal)
+            NavigationLink { HistoryView() } label: { header("继续观看") }.padding(.horizontal)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 8) {
+                    ForEach(list, id: \.0.id) { e, item in
+                        NavigationLink(value: item) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                PosterCell(item: item, width: 112, progress: e.progress)
+                                Text(e.epName).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu { Button("从观看历史删除", systemImage: "trash", role: .destructive) { Library.shared.deleteHistory(e.id) } }
+                    }
+                }.padding(.horizontal)
+            }
+        }
+    }
+
+    @ViewBuilder private func vodRow(_ title: String, _ items: [VodItem], _ cat: VodCategory?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let cat, let site {
+                NavigationLink(value: CatRoute(site: site, cat: cat)) { header(title) }.padding(.horizontal)
+            } else if cat == nil {
+                NavigationLink { FavoritesView() } label: { header(title) }.padding(.horizontal)
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 8) {
                     ForEach(items) { item in
@@ -180,7 +225,7 @@ struct VodHomeView: View {
             Text("全部分类").font(.title3.weight(.bold)).padding(.horizontal)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
                 ForEach(cats) { c in
-                    NavigationLink(value: c) {
+                    NavigationLink(value: CatRoute(site: site!, cat: c)) {
                         Text(c.name).font(.subheadline).lineLimit(1)
                             .frame(maxWidth: .infinity).padding(.vertical, 9)
                             .background(Color.card).foregroundStyle(.white)
@@ -323,6 +368,8 @@ struct CategoryGridView: View {
 struct VodDetailView: View {
     @State var item: VodItem
     @ObservedObject private var dm = DownloadManager.shared
+    @ObservedObject private var lib = Library.shared
+    @AppStorage("safety.level") private var level = "standard"
     @State private var detail: VodDetail?
     @State private var lineIdx = 0
     @State private var error: String?
@@ -345,8 +392,8 @@ struct VodDetailView: View {
                     if let d = detail {
                         let text = d.content.isEmpty ? item.blurb : d.content
                         if !text.isEmpty { Text(text).font(.subheadline).foregroundStyle(.white.opacity(0.8)).lineLimit(5) }
-                        if !d.actor.isEmpty { credit("主演", d.actor) }
-                        if !d.director.isEmpty { credit("导演", d.director) }
+                        PeopleRow(label: "导演", role: "director", names: d.directors)
+                        PeopleRow(label: "演员", role: "actor", names: d.actors, max: 12)
                         episodes(d)
                     }
                     sources
@@ -382,13 +429,20 @@ struct VodDetailView: View {
     }
 
     private var meta: some View {
-        let parts = [detail?.year, detail?.area, item.typeName, item.remarks].compactMap { $0 }.filter { !$0.isEmpty && $0 != "0" }
+        let parts = [detail?.year, detail?.area, detail?.lang, item.remarks].compactMap { $0 }.filter { !$0.isEmpty && $0 != "0" }
         return HStack(spacing: 8) {
             if !douban.id.isEmpty, let u = URL(string: "https://movie.douban.com/subject/\(douban.id)/") {
                 Link(destination: u) { RateBadge(rate: douban.rate.isEmpty ? "豆瓣 暂无" : "豆瓣 \(douban.rate)") }
             }
             Text(item.site.name).font(.caption.weight(.bold)).padding(.horizontal, 6).padding(.vertical, 2)
                 .overlay(RoundedRectangle(cornerRadius: 3).stroke(.white.opacity(0.5)))
+            if let d = detail, !d.typeId.isEmpty, !d.typeName.isEmpty {
+                NavigationLink(value: CatRoute(site: item.site, cat: VodCategory(id: d.typeId, pid: "", name: d.typeName))) {
+                    Text("\(d.typeName) ›").font(.caption.weight(.bold)).foregroundStyle(Color(red: 0.56, green: 0.85, blue: 0.88))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color(red: 0.33, green: 0.73, blue: 0.77)))
+                }
+            }
             Text(parts.joined(separator: "  •  ")).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
         }
     }
@@ -396,9 +450,10 @@ struct VodDetailView: View {
     @ViewBuilder private var actions: some View {
         if let d = detail, lineIdx < d.lines.count, let first = d.lines[lineIdx].episodes.first {
             let eps = d.lines[lineIdx].episodes
+            let h = lib.entry(item).flatMap { $0.line == lineIdx && $0.ep < eps.count ? $0 : nil }
             HStack(spacing: 10) {
-                Button { play(eps, 0) } label: {
-                    Label(eps.count > 1 ? "播放 \(first.name)" : "播放", systemImage: "play.fill")
+                Button { play(eps, h?.ep ?? 0, resume: h) } label: {
+                    Label(h.map { "继续 \(eps[$0.ep].name)" } ?? (eps.count > 1 ? "播放 \(first.name)" : "播放"), systemImage: "play.fill")
                         .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
                         .background(.white, in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.black)
                 }
@@ -409,6 +464,16 @@ struct VodDetailView: View {
                           systemImage: dlMode ? "checkmark" : "arrow.down.to.line")
                         .font(.headline).padding(.vertical, 12).padding(.horizontal, 16)
                         .background(Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.white)
+                }
+                if level != "kids" {
+                    Button {
+                        note = lib.toggleFavorite(item) ? "已收藏" : "已取消收藏"
+                    } label: {
+                        Image(systemName: lib.isFavorite(item) ? "heart.fill" : "heart")
+                            .font(.headline).foregroundStyle(lib.isFavorite(item) ? Color.brand : .white)
+                            .padding(.vertical, 12).padding(.horizontal, 14)
+                            .background(Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 5))
+                    }
                 }
             }
         } else if detail != nil {
@@ -451,7 +516,7 @@ struct VodDetailView: View {
                 ForEach(eps.indices, id: \.self) { i in
                     let rec = dm.record(for: eps[i].url)
                     Button {
-                        if dlMode { dm.add(item, eps[i]) } else { play(eps, i) }
+                        if dlMode { dm.add(item, eps[i]) } else { play(eps, i, resume: lib.entry(item).flatMap { $0.line == lineIdx ? $0 : nil }) }
                     } label: {
                         HStack(spacing: 3) {
                             if let rec {
@@ -499,8 +564,9 @@ struct VodDetailView: View {
         }
     }
 
-    private func play(_ eps: [Episode], _ i: Int) {
-        playing = PlayRequest(title: item.name, episodes: eps, index: i)
+    private func play(_ eps: [Episode], _ i: Int, resume: LibEntry? = nil) {
+        let at = resume.map { $0.ep == i && $0.dur - $0.t > 30 ? $0.t : 0 } ?? 0
+        playing = PlayRequest(title: item.name, episodes: eps, index: i, item: item, line: lineIdx, startAt: at)
     }
 
     private func load() async {
@@ -508,7 +574,11 @@ struct VodDetailView: View {
         detail = nil; error = nil; lineIdx = 0; dlMode = false; douban = DoubanRating()
         let current = item
         Task { douban = await API.doubanRating(name: current.name, year: current.year) }
-        do { detail = try await API.detail(item) } catch { self.error = "详情加载失败：\(error.localizedDescription)" }
+        do {
+            let d = try await API.detail(item)
+            if let h = lib.entry(item), h.line < d.lines.count { lineIdx = h.line }
+            detail = d
+        } catch { self.error = "详情加载失败：\(error.localizedDescription)" }
         if matches == nil {
             let (found, _) = await API.searchAll(current.name, sites: Safety.visible(Config.shared.sites))
             matches = found.filter { $0.name == current.name }
@@ -577,7 +647,7 @@ struct SearchView: View {
         }
         .background(Color.black)
         .navigationTitle("搜索")
-        .navigationDestination(for: VodItem.self) { VodDetailView(item: $0) }
+        .appDestinations()
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "片名，所有源一起搜")
         .onSubmit(of: .search) { Task { await run() } }
     }

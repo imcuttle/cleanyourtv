@@ -45,6 +45,9 @@ every source editable in the app rather than baked in.
 | 下载 | on the server (AES-128 decrypted), playable by every device on the LAN, export as one file | on the device (AVAssetDownloadTask), offline playback |
 | 源 | edit / reorder / 测速 (点播 + 直播, one click) / import a TVBox config URL / edit a live list as text | same |
 | 剪贴板 | ⌘/Ctrl+V anywhere → recognise sources in the text, confirm, add only new ones | banner when the clipboard has a link (system PasteButton, no prompt) |
+| 历史 / 收藏 | 继续观看 with progress; delete one or clear all; 收藏 for 点播 and 直播 (hidden in 儿童) | same, under 我的 |
+| 详情 | 分类 tag opens that category; 导演 / 演员 chips open their other works across all sources | same |
+| 后台 | — | background audio, lock-screen controls, Picture-in-Picture when switching apps |
 | 安全级别 | 儿童 · 标准 · 全部, optional parent PIN | same |
 
 ### Web
@@ -53,6 +56,14 @@ every source editable in the app rather than baked in.
 web/start.command        # macOS — or start.bat on Windows
 → http://localhost:9988 and http://<this machine>:9988 for the rest of the LAN
 ```
+
+The server runs one worker per CPU core (`node:cluster`, set `WORKERS=n` to override); downloads,
+config writes, ffmpeg and 豆瓣 rate-limiting live in one leader worker the others talk to over IPC.
+Static files are held in memory pre-gzipped, JSON responses are gzipped, identical upstream requests
+in flight are shared, and the stream relay drops its upstream fetch when the browser goes away. On
+the page side every read belongs to the current view — switching pages aborts what is still pending,
+so slow sources don't hold the browser's six connections. Cards are real links: ⌘/Ctrl-click opens a
+title or channel in a new tab.
 
 The launchers use the system Node.js 18+ if there is one, otherwise download a portable
 Node into `web/.tools/` (npmmirror first, nodejs.org as fallback). Nothing is installed
