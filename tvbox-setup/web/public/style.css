@@ -128,7 +128,7 @@ a.dbtag:hover { filter: brightness(1.15); }
 .sheet .top { position: relative; height: 380px; overflow: hidden; }
 .sheet .top .bg { position: absolute; inset: -40px; background: center/cover; filter: blur(26px) brightness(.5); }
 .sheet .top .poster { position: absolute; right: 5%; top: 40px; height: 300px; aspect-ratio: 2/3; border-radius: 6px; background: center/cover; box-shadow: 0 20px 40px #000a; }
-.sheet .top::after { content: ""; position: absolute; inset: 0; background: linear-gradient(#0000 40%, #181818); }
+.sheet .top::after { content: ""; position: absolute; inset: 0; background: linear-gradient(#0000 40%, #181818); pointer-events: none; }
 .sheet .top .info { position: absolute; z-index: 2; left: 5%; bottom: 28px; width: 55%; }
 .sheet .top h1 { margin: 0 0 14px; font-size: 34px; line-height: 1.15; }
 .sheet .close { position: absolute; z-index: 3; top: 14px; right: 14px; width: 36px; height: 36px; border-radius: 50%; border: 0; background: #181818; color: #fff; font-size: 18px; }
@@ -523,8 +523,15 @@ nav a svg { display: none; }
 .hnav button:disabled { opacity: .3; cursor: default; }
 .hnav button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 
-/* 本地媒体 hover preview: the gif fades in over the poster; a thin bar shimmers while the server makes it */
-.card .img img.pvl { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .2s; pointer-events: none; }
-.card .img img.pvl.on { opacity: 1; }
-.card .img.pvload::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; z-index: 2;
+/* 本地媒体 hover preview: a floating layer grown out of the cover (see startLocalPreview). pointer-events none, so the
+   card underneath keeps its hover and click. The shadow sits on the wrapper (a clip-path would cut an inner one off). */
+.lpv { position: fixed; z-index: 36; pointer-events: none; filter: drop-shadow(0 14px 30px #000c); contain: layout style; }
+.lpv-in { position: absolute; inset: 0; background: #000; overflow: hidden; will-change: clip-path, opacity; }
+.lpv-in .lpv-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.card .img.pvload::after, .sheet .top .poster.pvload::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; z-index: 2;
   background: linear-gradient(90deg, transparent, #fffc, transparent) 0 0 / 200% 100%; animation: shimmer 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .lpv-in { will-change: auto; } }
+
+/* icon + short label buttons (打开 / 文件夹) */
+.btn.ico { display: inline-flex; align-items: center; gap: 7px; }
+.btn.ico svg { width: 20px; height: 20px; flex: none; fill: currentColor; }

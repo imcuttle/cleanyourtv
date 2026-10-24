@@ -277,7 +277,7 @@ async function liveMedia(kind, url) {
     const args = kind === 'thumb'
       // Preview-sized on purpose: ~8 KB covers, ~130 KB gifs (240px, 6 fps, 2.5 s, 48 colours).
       ? [...input, '-skip_frame', 'nokey', '-i', url, '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '9', tmp]
-      : [...input, '-t', '2.5', '-i', url, '-an', '-vf', 'fps=6,scale=240:-2:flags=bilinear,split[a][b];[a]palettegen=max_colors=48:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', tmp];
+      : [...input, '-t', '2.5', '-i', url, '-an', '-vf', `fps=6,${GIF_FIT},split[a][b];[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`, '-loop', '0', tmp];
     mediaJobs.set(key, limited(() => ffmpeg(args, kind === 'thumb' ? 25000 : 40000))
       .then(() => fsp.rename(tmp, file)).then(() => file, () => { fsp.rm(tmp, { force: true }).catch(() => {}); return st ? file : null; })
       .finally(() => mediaJobs.delete(key)));
@@ -1516,12 +1516,36 @@ async function localThumb(id) {
   return mediaJobs.get(key);
 }
 // ---- hover previews: a short gif of the title (media process, cached in data/thumbs) ----
-// A title ≥ 40 s long gets three 1 s clips (15 % / 45 % / 75 % in) joined into one gif, shorter ones a single 2.5 s clip,
-// 240 px wide, 6 fps, 48 colours (≈ 100–250 KB). Same machinery as the covers: shared LIFO queue (the card being hovered now
+// A title ≥ 40 s long gets three 2 s clips (15 % / 45 % / 75 % in) joined into one gif (6 s), shorter ones a single 5 s clip,
+// fitted into 512×288 (aspect kept), 6 fps, 64 colours. Same machinery as the covers: shared LIFO queue (the card being hovered now
 // is made next), at most a few ffmpeg at once at nice 10, "hot" LRU id → file, disk cap with oldest-used pruned, failures
 // remembered for an hour, files keyed by source path + size + mtime so an edited video gets a new preview.
-const GIF_DISK_MAX = 600, GIF_HOT_MAX = 600;
+const GIF_DISK_MAX = 400, GIF_HOT_MAX = 600;
+const GIF_FIT = 'scale=512:288:force_original_aspect_ratio=decrease:flags=bilinear'; // shown as tall as the cover, so not tiny
 const gifHot = new Map(), gifFail = new Map();
+// The gif lane is a side channel and never competes with what the page needs: its own queue (newest request first,
+// short backlog, a request that waited > 15 s is dropped as 'busy' — the client simply doesn't show a preview), ONE
+// ffmpeg at a time, nice 10, and it only runs while nothing else is being worked on in this process: no cover being
+// made or waiting, no folder scan, no transcode for playback. Anything above it always goes first.
+const GIF_BACKLOG = 8, GIF_WAIT = 15e3;
+const gifQ = []; let gifRun = 0;
+const gifIdle = () => thumbRun === 0 && thumbQ.length === 0 && !localScan.running && hlsJobs.size === 0;
+function gifJob(fn) {
+  return new Promise((ok, bad) => {
+    gifQ.push({ fn, ok, bad, at: Date.now() });
+    if (gifQ.length > GIF_BACKLOG) gifQ.shift().bad(new Error('busy'));
+    drainGifs();
+  });
+}
+function drainGifs() {
+  for (let i = gifQ.length - 1; i >= 0; i--) if (Date.now() - gifQ[i].at > GIF_WAIT) gifQ.splice(i, 1)[0].bad(new Error('busy'));
+  while (gifRun < 1 && gifQ.length && gifIdle()) {
+    const { fn, ok, bad } = gifQ.pop(); // newest first
+    gifRun++;
+    fn().then(ok, bad).finally(() => { gifRun--; drainGifs(); });
+  }
+}
+if (IS_MEDIA) setInterval(() => { if (gifQ.length) drainGifs(); }, 1500).unref(); // the gate opens without an event of its own
 rpcHandlers.localGif = ({ id }) => localGif(id);
 async function localGif(id) {
   const hot = gifHot.get(id);
@@ -1531,7 +1555,7 @@ async function localGif(id) {
   const f = it.files[0];
   const st = await io(() => fsp.stat(f.path)).catch(() => null);
   if (!st) return null;
-  const file = path.join(THUMBS, `localgif-${hashId(id + '|' + f.path + '|' + st.size + '|' + Math.round(st.mtimeMs), 12)}.gif`);
+  const file = path.join(THUMBS, `localgif3-${hashId(id + '|' + f.path + '|' + st.size + '|' + Math.round(st.mtimeMs), 12)}.gif`);
   const done = await fsp.stat(file).catch(() => null);
   const keep = () => { gifHot.delete(id); gifHot.set(id, file); if (gifHot.size > GIF_HOT_MAX) gifHot.delete(gifHot.keys().next().value); return file; };
   if (done) { fsp.utimes(file, new Date(), new Date()).catch(() => {}); return keep(); } // touch = LRU stamp for pruning
@@ -1541,20 +1565,20 @@ async function localGif(id) {
     const tmp = file.replace(/\.gif$/, '.tmp.gif');
     const run = async () => {
       const { duration: dur = 0 } = await mediaInfo(f.path);
-      const clip = dur >= 40 ? 1 : 2.5;
-      const starts = dur >= 40 ? [0.15, 0.45, 0.75].map(p => dur * p) : dur >= 6 ? [dur * 0.25] : [0];
+      const clip = dur >= 40 ? 2 : 5;
+      const starts = dur >= 40 ? [0.15, 0.45, 0.75].map(p => dur * p) : dur >= 8 ? [Math.min(dur * 0.25, dur - 5.5)] : [0];
       const inputs = starts.flatMap(t => ['-ss', t.toFixed(2), '-t', String(clip), '-i', f.path]);
-      const chains = starts.map((_, n) => `[${n}:v:0]fps=6,scale=240:-2:flags=bilinear,setpts=PTS-STARTPTS[v${n}]`);
+      const chains = starts.map((_, n) => `[${n}:v:0]fps=6,${GIF_FIT},setpts=PTS-STARTPTS[v${n}]`);
       if (starts.length > 1) chains.push(`${starts.map((_, n) => `[v${n}]`).join('')}concat=n=${starts.length}:v=1:a=0[c]`);
-      const fc = [...chains, `${starts.length > 1 ? '[c]' : '[v0]'}split[a][b]`, '[a]palettegen=max_colors=48:stats_mode=diff[p]',
-        '[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle'].join(';');
+      const fc = [...chains, `${starts.length > 1 ? '[c]' : '[v0]'}split[a][b]`, '[a]palettegen=max_colors=64:stats_mode=diff[p]',
+        '[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle'].join(';');
       const base = ['-hide_banner', '-loglevel', 'error', '-y'];
       const tail = ['-an', '-loop', '0', tmp];
-      // Odd containers (no index) can't seek; fall back to the first 2.5 s.
+      // Odd containers (no index) can't seek; fall back to the first 5 s.
       return ffmpeg([...base, ...inputs, '-filter_complex', fc, ...tail], 60000, 10)
-        .catch(() => ffmpeg([...base, '-t', '2.5', '-i', f.path, '-an', '-vf', 'fps=6,scale=240:-2:flags=bilinear,split[a][b];[a]palettegen=max_colors=48:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', tmp], 60000, 10));
+        .catch(() => ffmpeg([...base, '-t', '5', '-i', f.path, '-an', '-vf', 'fps=6,scale=240:-2:flags=bilinear,split[a][b];[a]palettegen=max_colors=48:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', tmp], 60000, 10));
     };
-    mediaJobs.set(key, thumbJob(run)
+    mediaJobs.set(key, gifJob(run)
       .then(() => fsp.rename(tmp, file)).then(keep, e => {
         fsp.rm(tmp, { force: true }).catch(() => {});
         if (e.message === 'busy') throw e;
@@ -1570,8 +1594,9 @@ async function localGif(id) {
 async function pruneThumbs() {
   try {
     const all = await fsp.readdir(THUMBS);
-    for (const n of all) if (/^local(gif)?-.*\.tmp\./.test(n)) fsp.rm(path.join(THUMBS, n), { force: true }).catch(() => {});
-    for (const [prefix, cap] of [['local-', THUMB_DISK_MAX], ['localgif-', GIF_DISK_MAX]]) {
+    for (const n of all) if (/^local(gif\d?)?-.*\.tmp\./.test(n)) fsp.rm(path.join(THUMBS, n), { force: true }).catch(() => {});
+    for (const n of all) if (/^localgif[12]?-/.test(n)) fsp.rm(path.join(THUMBS, n), { force: true }).catch(() => {}); // earlier, shorter / smaller previews
+    for (const [prefix, cap] of [['local-', THUMB_DISK_MAX], ['localgif3-', GIF_DISK_MAX]]) {
       const names = all.filter(n => n.startsWith(prefix) && !n.includes('.tmp.'));
       if (names.length <= cap) continue;
       const st = [];
@@ -2049,17 +2074,21 @@ function isLoopback(req) {
   return true;
 }
 // Hand a file to the OS. Arguments go as an array (no shell), so file names can't inject commands.
+// Windows: the window of what we open must stay visible (no windowsHide here), explorer wants backslashes, and
+// `/select,"path"` has to reach it with the quotes intact (windowsVerbatimArguments). explorer.exe exits non-zero
+// even when it worked, so only a failure to start counts as an error.
 function openPath(file, reveal) {
+  const win = process.platform === 'win32';
+  if (win) file = path.win32.normalize(file.replace(/\//g, '\\'));
   const [cmd, args] = process.platform === 'darwin' ? ['open', reveal ? ['-R', file] : [file]]
-    : process.platform === 'win32' ? (reveal ? ['explorer.exe', [`/select,"${file}"`]] : ['rundll32', ['url.dll,FileProtocolHandler', file]])
+    : win ? (reveal ? [process.env.SystemRoot ? path.win32.join(process.env.SystemRoot, 'explorer.exe') : 'explorer.exe', [`/select,"${file}"`]]
+        : [process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `start "" "${file}"`]])
     : ['xdg-open', [reveal ? path.dirname(file) : file]];
   return new Promise((ok, bad) => {
-    // explorer wants /select,"path" with the quotes inside the one argument, so Windows gets it verbatim.
-    const p = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true, windowsVerbatimArguments: process.platform === 'win32' && reveal });
+    const p = spawn(cmd, args, { stdio: 'ignore', detached: !win, windowsVerbatimArguments: win });
     p.on('error', bad);
     p.unref();
-    // `open` / `xdg-open` return at once; explorer.exe exits non-zero even on success, so only a spawn error counts.
-    setTimeout(ok, 150);
+    setTimeout(ok, 200);
   });
 }
 function lanIps() {

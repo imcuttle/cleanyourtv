@@ -271,7 +271,7 @@ function newPage() {
   pageCtl = new AbortController();
   dbQueue.length = 0;
   thumbQueue.length = 0;
-  stopPreview(); stopLocalPreview();
+  stopPreview(); stopLocalPreview(true);
 }
 // ---- scroll position per history entry ----
 // Every page the user lands on gets a key in its history entry's state; the scroll offset is remembered under it
@@ -871,12 +871,12 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     const eps = d.lines[line]?.episodes || [];
     const resumeIdx = h && h.line === line && eps[h.ep] ? h.ep : 0;
     m.firstChild.innerHTML = `
-      <div class="top"><div class="bg" style="${bg(dbSize(d.pic, 's') || d.pic)}"></div><div class="poster" style="${dbPic ? bgLayers(d.pic, dbPic, 'l') : bgHi(d.pic, 'm')}"></div>
+      <div class="top"><div class="bg" style="${bg(dbSize(d.pic, 's') || d.pic)}"></div><div class="poster" ${d.local ? `data-pv="/media/g/${esc(d.id)}"` : ''} style="${dbPic ? bgLayers(d.pic, dbPic, 'l') : bgHi(d.pic, 'm')}"></div>
         <button class="close">✕</button>
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
           ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
             ${d.local ? '' : '<button class="btn more dlbtn" id="dlToggle">⬇ 下载</button>'}` : ''}
-          ${canOpen && eps.length ? `<button class="btn more" id="extPlay" title="用系统默认播放器打开${eps.length > 1 ? ' ' + esc(eps[resumeIdx].name) : ''}">↗ 默认播放器</button><button class="btn more" id="extReveal" title="在文件夹中显示这个文件">⌕ 显示文件</button>` : ''}
+          ${canOpen && eps.length ? `<button class="btn more ico" id="extPlay" title="用系统默认播放器打开${eps.length > 1 ? ' ' + esc(eps[resumeIdx].name) : ''}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14zM5 5h6v2H5v12h12v-6h2v8H3V5z"/></svg>播放器</button><button class="btn more ico" id="extReveal" title="在文件夹中显示这个文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5A1.5 1.5 0 0 1 4.5 4h5.2c.4 0 .8.2 1.1.5L12.3 6H19.5A1.5 1.5 0 0 1 21 7.5v10A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>文件夹</button>` : ''}
           ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
         </div></div></div>
       <div class="body">
@@ -1060,6 +1060,7 @@ document.addEventListener('click', e => {
 });
 function closeDetail() {
   const m = $('#modal'); if (!m) return;
+  stopLocalPreview(true);
   m.ctl?.abort();
   m.remove(); document.body.style.overflow = '';
 }
@@ -1413,50 +1414,98 @@ async function renderLive() {
   return groups;
 }
 
-// 本地媒体 hover preview: a short gif of the title made by the server (see localGif). Hover for 350 ms (60 ms when this
-// one has played before) → the gif is requested and fades in over the poster; leaving aborts the request. The server keeps
-// the gifs (disk LRU) and the browser caches them for a week; here only small bookkeeping is held: urls that loaded
-// before (→ shorter delay) and urls that just failed / were busy (→ not asked again for 90 s). One preview at a time.
+// 本地媒体 hover preview (local titles only — remote sources are never previewed, it would be too slow).
+// Hover a cover for 350 ms (120 ms when it has played before) → the server's gif is fetched; once it has loaded and decoded
+// it opens as a floating layer on top of the cover: as tall as the cover, as wide as the video's aspect needs, and it
+// grows out of the cover's own rectangle (clip-path + opacity via the Web Animations API, so it runs on the compositor) toward
+// the side with room — from the left edge when the cover sits in the left third of the window, from the right edge in the
+// right third, from the middle otherwise. The layer ignores the pointer, so the card underneath still gets hover and
+// click; leaving the cover (or scrolling) folds it back. Server: disk LRU + hot LRU; browser: HTTP cache for a week; here only
+// "played before" / "just failed" are remembered, and one preview exists at a time.
 const lpvSeen = new Set(), lpvFail = new Map();
+// Two animations on purpose: the shape grows with a soft start and a long settle, the fade-in is short and independent of it.
+const LPV_GROW = { duration: 440, easing: 'cubic-bezier(.32,.72,0,1)', fill: 'forwards' };
+const LPV_FADE = { duration: 180, easing: 'ease-out', fill: 'forwards' };
 let lpv = null;
-function startLocalPreview(card) {
-  const url = card.dataset.pv, box = $('.img', card);
-  if (!url || !box || !matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+function startLocalPreview(el, url, box = el) {
+  if (!url || !matchMedia('(hover: hover) and (pointer: fine)').matches) return;
   if (Date.now() - (lpvFail.get(url) || 0) < 90e3) return;
+  if (lpv && lpv.el === el) return;
   stopLocalPreview();
-  const me = lpv = { card, box, img: null, timer: 0 };
+  const me = lpv = { el, box, ov: null, img: null, timer: 0, off: null };
   me.timer = setTimeout(async () => {
     if (lpv !== me) return;
     const info = serverInfo || await infoP();
     if (lpv !== me || !info.ffmpeg) return;
     box.classList.add('pvload');
     const img = new Image();
-    img.className = 'pvl'; img.decoding = 'async'; img.alt = '';
-    img.onload = () => {
-      if (lpv !== me) return;
-      box.classList.remove('pvload');
-      lpvSeen.delete(url); lpvSeen.add(url); if (lpvSeen.size > 300) lpvSeen.delete(lpvSeen.values().next().value);
-      box.append(img);
-      requestAnimationFrame(() => img.classList.add('on'));
-    };
+    img.className = 'lpv-img'; img.decoding = 'async'; img.alt = '';
+    me.img = img;
     img.onerror = () => {
-      if (lpv === me) box.classList.remove('pvload');
+      if (lpv === me) { box.classList.remove('pvload'); lpv = null; }
       lpvFail.set(url, Date.now()); if (lpvFail.size > 300) lpvFail.delete(lpvFail.keys().next().value);
     };
-    me.img = img;
+    img.onload = async () => {
+      await img.decode().catch(() => {});                 // first frame ready before anything moves
+      if (lpv !== me || !box.isConnected) return;
+      box.classList.remove('pvload');
+      lpvSeen.delete(url); lpvSeen.add(url); if (lpvSeen.size > 300) lpvSeen.delete(lpvSeen.values().next().value);
+      openLocalPreview(me);
+    };
     img.src = url;
-  }, lpvSeen.has(url) ? 60 : 350);
+  }, lpvSeen.has(url) ? 120 : 350);
 }
-function stopLocalPreview() {
-  if (!lpv) return;
-  clearTimeout(lpv.timer);
-  lpv.box.classList.remove('pvload');
-  if (lpv.img) { lpv.img.onload = lpv.img.onerror = null; lpv.img.src = ''; lpv.img.remove(); }
+function openLocalPreview(me) {
+  const r = me.box.getBoundingClientRect(), vw = document.documentElement.clientWidth;
+  const ar = me.img.naturalWidth / Math.max(1, me.img.naturalHeight);
+  let h = r.height, w = Math.max(r.width, h * ar);       // cover's height, the video's width (never narrower than the cover)
+  const room = vw - 24;
+  if (w > room) { const k = room / w; w *= k; h *= k; }  // wider than the window: shrink, keep the aspect
+  const top = r.top + (r.height - h) / 2;
+  const cx = r.left + r.width / 2;
+  let left = cx < vw / 3 ? r.left : cx > vw * 2 / 3 ? r.right - w : cx - w / 2;
+  left = Math.max(12, Math.min(left, vw - 12 - w));
+  const px = n => Math.max(0, n).toFixed(1) + 'px';
+  const from = `inset(${px(r.top - top)} ${px(left + w - r.right)} ${px(top + h - r.bottom)} ${px(r.left - left)} round 4px)`;
+  const to = 'inset(0px round 8px)';
+  const ov = document.createElement('div');
+  ov.className = 'lpv';
+  ov.style.cssText = `left:${left.toFixed(1)}px;top:${top.toFixed(1)}px;width:${w.toFixed(1)}px;height:${h.toFixed(1)}px`;
+  const inner = document.createElement('div');
+  inner.className = 'lpv-in';
+  inner.style.clipPath = from; inner.style.opacity = '0';
+  inner.append(me.img); ov.append(inner);
+  document.body.append(ov);
+  me.ov = ov; me.inner = inner; me.from = from; me.to = to;
+  inner.animate([{ clipPath: from }, { clipPath: to }], LPV_GROW);
+  inner.animate([{ opacity: 0 }, { opacity: 1 }], LPV_FADE);
+  const off = () => { if (lpv === me) stopLocalPreview(); };
+  me.off = off;
+  addEventListener('scroll', off, { passive: true, once: true, capture: true });
+  addEventListener('resize', off, { once: true });
+}
+function stopLocalPreview(immediate) {
+  const me = lpv; if (!me) return;
   lpv = null;
+  clearTimeout(me.timer);
+  me.box.classList.remove('pvload');
+  if (me.img) me.img.onload = me.img.onerror = null;
+  if (me.off) { removeEventListener('scroll', me.off, true); removeEventListener('resize', me.off); }
+  if (!me.ov) { if (me.img) me.img.src = ''; return; }
+  if (immediate) return me.ov.remove();
+  // Fold back into the cover's rectangle, then go (a quick re-hover elsewhere can already start the next one).
+  me.inner.getAnimations().forEach(x => x.cancel());
+  me.inner.animate([{ clipPath: me.to }, { clipPath: me.from }], { duration: 240, easing: 'cubic-bezier(.4,0,.2,1)', fill: 'forwards' });
+  const a = me.inner.animate([{ opacity: 1 }, { opacity: 1, offset: .5 }, { opacity: 0 }], { duration: 240, easing: 'linear', fill: 'forwards' });
+  a.onfinish = a.oncancel = () => me.ov.remove();
 }
-// mouseenter / mouseleave don't bubble, but a capturing listener on document still sees every card.
-document.addEventListener('mouseenter', e => { if (e.target instanceof Element && e.target.matches('#view .card[data-pv]')) startLocalPreview(e.target); }, true);
-document.addEventListener('mouseleave', e => { if (lpv && e.target === lpv.card) stopLocalPreview(); }, true);
+// mouseenter / mouseleave don't bubble, but capturing listeners on document still see every card and the detail poster.
+const lpvTarget = t => t instanceof Element && (t.matches('#view .card[data-pv]') || t.matches('.sheet .top .poster[data-pv]')) ? t : null;
+document.addEventListener('mouseenter', e => {
+  const t = lpvTarget(e.target); if (!t) return;
+  startLocalPreview(t, t.dataset.pv, t.classList.contains('card') ? $('.img', t) || t : t);
+}, true);
+document.addEventListener('mouseleave', e => { if (lpv && e.target === lpv.el) stopLocalPreview(); }, true);
 
 // Hover preview: a fresh 3-second gif cut by the server's ffmpeg; without ffmpeg, a muted live mini-player
 // (through the same-origin relay, so a frame can be captured and saved as the channel's cover).
