@@ -369,3 +369,43 @@ a.ch { color: inherit; }
   .card.top { margin-left: 22px; } .card.top .num { font-size: 72px; left: -26px; -webkit-text-stroke-width: 2px; letter-spacing: -4px; }
   .srows .row h2 small { display: none; }
 }
+
+/* player control bar (mouse devices) with hover frame preview */
+.ctrl { position: absolute; z-index: 2; left: 0; right: 0; bottom: 0; padding: 40px 22px 14px; background: linear-gradient(#0000, #000c 70%); transition: opacity .3s; }
+#player.idle .ctrl { opacity: 0; }
+#player.idle { cursor: none; }
+.tl { --p: 0%; --b: 0%; --h: 0%; position: relative; height: 18px; display: flex; align-items: center; cursor: pointer; touch-action: none; }
+.tl .rail { position: relative; flex: 1; height: 4px; background: #ffffff33; border-radius: 2px; transition: height .12s; }
+.tl:hover .rail, .tl.drag .rail { height: 7px; }
+.tl .rail i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: inherit; }
+.tl .buf { width: var(--b); background: #ffffff55; }
+.tl .hov { width: var(--h); background: #ffffff40; }
+.tl .played { width: var(--p); background: var(--red); }
+.tl .knob { position: absolute; left: var(--p); width: 15px; height: 15px; margin-left: -7.5px; border-radius: 50%; background: var(--red); transform: scale(0); transition: transform .12s; }
+.tl:hover .knob, .tl.drag .knob { transform: scale(1); }
+.tip { position: absolute; bottom: 26px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
+.tip .frame { width: 240px; aspect-ratio: 16/9; border-radius: 6px; overflow: hidden; background: #111; border: 2px solid #fff; box-shadow: 0 8px 30px #000c; position: relative; }
+.tip .frame video { width: 100%; height: 100%; object-fit: cover; display: block; opacity: 0; transition: opacity .15s; }
+.tip.ready .frame video { opacity: 1; }
+.tip:not(.ready) .frame::after { content: ""; position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px; border: 3px solid #fff4; border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
+.tip span { font-size: 14px; font-weight: 700; text-shadow: 0 1px 4px #000; font-variant-numeric: tabular-nums; }
+.cbar { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.cbar button { width: 40px; height: 40px; border: 0; border-radius: 50%; background: none; color: #fff; display: grid; place-items: center; padding: 0; transition: background .15s, transform .15s; }
+.cbar button:hover { background: #ffffff1f; transform: scale(1.08); }
+.cbar svg { width: 26px; height: 26px; fill: currentColor; }
+.cbar svg text { font-size: 7px; font-weight: 800; text-anchor: middle; fill: currentColor; }
+.cbar button.txt { width: auto; padding: 0 12px; border-radius: 20px; font-size: 14px; font-weight: 700; }
+#player .i-pause, #player.paused .i-play { display: inline; } #player .i-play, #player.paused .i-pause { display: none; }
+#player .i-x, #player.muted .i-wave { display: none; } #player.muted .i-x { display: inline; }
+.vol { width: 0; opacity: 0; transition: width .2s, opacity .2s; accent-color: #fff; }
+.cbar button[data-c=mute]:hover + .vol, .vol:hover, .vol:focus { width: 90px; opacity: 1; }
+.time { font-size: 14px; color: #ddd; margin-left: 6px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.grow { flex: 1; }
+/* 画中画: the player stays in the DOM (the small window needs its <video>) but steps out of the way */
+#player.pip { visibility: hidden; pointer-events: none; }
+/* search: people tags */
+.ptags { display: flex; flex-wrap: wrap; gap: 10px; }
+.ptag { display: inline-flex; align-items: baseline; gap: 8px; padding: 8px 16px; border-radius: 22px; background: #262626; border: 1px solid #333; transition: background .15s, transform .15s; }
+.ptag b { font-size: 15px; } .ptag span { font-size: 12px; color: var(--muted); }
+.ptag:hover { background: #fff; color: #000; border-color: #fff; } .ptag:hover span { color: #555; }
+.ptag:active { transform: scale(.96); }

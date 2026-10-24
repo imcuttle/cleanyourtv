@@ -1058,8 +1058,8 @@ async function api(route, q, res, req) {
           if (!g.seen.has(k)) { g.seen.add(k); g.list.push(it); }
         }
       }
-      return [...people].map(([name, g]) => ({ name, list: g.list.sort((a, b) => (Number(b.year) || 0) - (Number(a.year) || 0)) }))
-        .sort((a, b) => (b.name === wd) - (a.name === wd) || b.list.length - a.list.length).slice(0, 6);
+      return [...people].map(([name, g]) => ({ name, count: g.list.length }))
+        .sort((a, b) => (b.name === wd) - (a.name === wd) || b.count - a.count).slice(0, 30);
     };
     return send(res, 200, { results: out.flatMap(o => o.list.map(x => x.it)), actor: credit('vod_actor'), director: credit('vod_director'),
       failed: out.filter(o => o.error).map(o => o.site) });

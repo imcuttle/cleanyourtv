@@ -359,15 +359,15 @@ struct DownloadsView: View {
                         Button {
                             playing = PlayRequest(title: r.name, episodes: [Episode(name: r.epName, url: r.url)], index: 0)
                         } label: { Image(systemName: "play.circle.fill").font(.system(size: 34)) }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.press)
                     case "downloading", "queued":
                         Button { dm.pause(r.id) } label: { Image(systemName: "pause.circle").font(.system(size: 30)) }
-                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .buttonStyle(.press).foregroundStyle(.secondary)
                     default:
                         Button { dm.resume(r.id) } label: {
                             Image(systemName: r.status == "error" ? "arrow.clockwise.circle" : "play.circle").font(.system(size: 30))
                         }
-                        .buttonStyle(.plain).foregroundStyle(r.status == "error" ? .orange : .green)
+                        .buttonStyle(.press).foregroundStyle(r.status == "error" ? .orange : .green)
                     }
                 }
                 .swipeActions(edge: .leading) {

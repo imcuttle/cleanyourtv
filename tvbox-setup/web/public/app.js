@@ -381,26 +381,25 @@ async function renderCategory(t, name, siteKey) {
   sig.addEventListener('abort', () => io.disconnect());
 }
 
-// ---------- search (all sources; titles, plus works whose 演员/导演 credits contain the query) ----------
+// ---------- search (all sources) ----------
+// Every title that matched (by name, or because a site's search also matched its 演员/导演), then the
+// matching people as name tags that open their filmography.
 async function renderSearch(q) {
   $('#q').value = q;
   view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1><p class="lan">正在搜索全部 ${state.sites.length} 个源（片名 / 演员 / 导演）…</p>${spinner}</div>`;
   const j = await api('search', { wd: q });
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
   const order = Object.fromEntries(state.sites.map((s, i) => [s.key, i]));
-  const key = it => it.site + '|' + it.id;
+  const nq = normName(q);
+  const rank = it => it.name === q ? 0 : normName(it.name).includes(nq) ? 1 : 2;
+  const res = j.results.sort((a, b) => rank(a) - rank(b) || order[a.site] - order[b.site]);
   const people = [...(j.actor || []).map(p => ({ ...p, role: 'actor', label: '演员' })), ...(j.director || []).map(p => ({ ...p, role: 'director', label: '导演' }))]
-    .sort((a, b) => (b.name === q) - (a.name === q) || b.list.length - a.list.length);
-  const byCredit = new Set(people.flatMap(p => p.list.map(key)));
-  // Credit-only hits go to the per-person rows; titles that contain the query stay in the main grid.
-  const res = j.results.filter(it => !byCredit.has(key(it)) || normName(it.name).includes(normName(q)))
-    .sort((a, b) => (b.name === q) - (a.name === q) || order[a.site] - order[b.site]);
+    .sort((a, b) => (b.name === q) - (a.name === q) || (b.count ?? b.list?.length ?? 0) - (a.count ?? a.list?.length ?? 0));
   view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1>
-    <p class="lan">${state.sites.length} 个源，片名匹配 ${res.length} 条${people.length ? `；演职员：${people.map(p => `${esc(p.name)}（${p.label} ${p.list.length} 部）`).join('、')}` : ''}${j.failed.length ? `；${esc(j.failed.join(' / '))} 未响应` : ''}</p></div>
-    ${people.length ? `<div class="srows">${people.map(p => row(`${p.label} · ${p.name}`, p.list, `#/person/${p.role}/${encodeURIComponent(p.name)}`,
-      it => [it.year, it.siteName].filter(x => x && x !== '0').join(' · '))).join('')}</div>` : ''}
-    <div class="page spage">${people.length && res.length ? '<h2 class="rtitle">片名匹配</h2>' : ''}
-    ${res.length ? `<div class="grid">${res.map(it => card(it, { sub: names[it.site] || it.siteName })).join('')}</div>` : people.length ? '' : '<div class="empty">没搜到，换个关键词（片名、演员或导演的全名）</div>'}</div>`;
+    <p class="lan">${state.sites.length} 个源，${res.length} 部影片${people.length ? `，${people.length} 位演职员` : ''}${j.failed.length ? `；${esc(j.failed.join(' / '))} 未响应` : ''}</p>
+    ${res.length ? `<div class="grid">${res.map(it => card(it, { sub: names[it.site] || it.siteName })).join('')}</div>` : '<div class="empty">没有影片匹配，换个关键词（片名、演员或导演）</div>'}
+    ${people.length ? `<h2 class="rtitle">演员 / 导演</h2><div class="ptags">${people.map(p =>
+      `<a class="ptag" href="#/person/${p.role}/${encodeURIComponent(p.name)}"><b>${esc(p.name)}</b><span>${p.label} · ${p.count ?? p.list?.length ?? 0} 部</span></a>`).join('')}</div>` : ''}</div>`;
   observeRatings(view);
 }
 
@@ -751,11 +750,32 @@ function closeDetail() {
   m.ctl?.abort();
   m.remove(); document.body.style.overflow = '';
 }
-addEventListener('popstate', () => { if (!$('#player').hidden) return closePlayer(); closeDetail(); });
+addEventListener('popstate', () => {
+  if (pipSkip) { pipSkip = false; return; }  // our own back() when the player went into 画中画
+  if (playerOpen()) return closePlayer();
+  closeDetail();
+});
 
 // ---------- player ----------
 const player = $('#player'), video = $('#video');
 let hls, cur = null, idleTimer;
+// 画中画: the small window keeps playing while the full-screen player steps aside and the page underneath
+// comes back. "Back to tab" brings the player back; closing the small window stops playback.
+let pipOn = false, pipSkip = false;
+const playerOpen = () => !player.hidden && !pipOn;
+video.addEventListener('enterpictureinpicture', () => {
+  pipOn = true;
+  player.classList.add('pip'); togglePlist(false);
+  if (!$('#modal')) document.body.style.overflow = '';
+  if (history.state?.player) { pipSkip = true; history.back(); }
+});
+video.addEventListener('leavepictureinpicture', () => {
+  if (!pipOn) return;
+  pipOn = false;
+  player.classList.remove('pip');
+  if (video.paused) return closePlayer();
+  history.pushState({ player: 1 }, ''); document.body.style.overflow = 'hidden'; poke();
+});
 
 function play(d, line, ep) {
   cur = { kind: 'vod', d, line, ep, eps: d.lines[line].episodes, title: d.name };
@@ -768,7 +788,8 @@ function playLive(channels, idx) {
 }
 function openPlayer(startAt) {
   const e = cur.eps[cur.ep];
-  if (player.hidden) { player.hidden = false; history.pushState({ player: 1 }, ''); document.body.style.overflow = 'hidden'; }
+  if (pipOn) { pipOn = false; player.classList.remove('pip'); document.exitPictureInPicture?.().catch(() => {}); }
+  if (!playerOpen() || !history.state?.player) { player.hidden = false; history.pushState({ player: 1 }, ''); document.body.style.overflow = 'hidden'; }
   $('.ptitle').textContent = cur.kind === 'live' ? e.name : (cur.eps.length > 1 ? `${cur.title} · ${e.name}` : cur.title);
   const live = cur.kind === 'live';
   $('[data-act=prev]').textContent = live ? '上一台' : '上一集';
@@ -790,6 +811,8 @@ function msg(t) { $('.pmsg').textContent = t || ''; }
 function load(url, startAt, viaProxy, isLocal) {
   if (hls) { hls.destroy(); hls = null; }
   const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : url;
+  playingSrc = { src, hls: !/\.mp4(\?|$)/i.test(url) };
+  pvReset();
   msg('加载中…');
   const seek = () => { if (startAt) video.currentTime = startAt; video.play().catch(() => msg('点一下播放')); };
   const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集/换个源试试'); };
@@ -841,7 +864,9 @@ function togglePlist(open = $('.plist').hidden) {
 }
 function closePlayer() {
   if (hls) { hls.destroy(); hls = null; }
+  pvReset(); playingSrc = null;
   video.pause(); video.removeAttribute('src'); video.load();
+  if (pipOn) { pipOn = false; player.classList.remove('pip'); document.exitPictureInPicture?.().catch(() => {}); }
   player.hidden = true; togglePlist(false); msg('');
   if (!$('#modal')) document.body.style.overflow = '';
   $('#modal')?.refresh?.();
@@ -856,19 +881,126 @@ player.addEventListener('click', e => {
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); $('[data-act=star]').textContent = liveFavs.has(c.url) ? '★ 已收藏' : '☆ 收藏'; return; }
   if (!$('.plist').hidden && !e.target.closest('.plist, .pbar')) togglePlist(false);
 });
-function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && player.classList.add('idle'), 3000); }
+function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && !scrubbing && !$('.ctrl').matches(':hover') && player.classList.add('idle'), 3000); }
 player.addEventListener('mousemove', poke); player.addEventListener('touchstart', poke);
+
+// ---------- player controls (mouse devices) ----------
+// Native controls can't tell us where the pointer is on the timeline, so on hover-capable screens the
+// player gets its own bar. Hovering the timeline seeks a second, muted, lowest-quality copy of the stream
+// to that moment and shows its frame. Touch screens keep the native controls.
+const fineCursor = matchMedia('(hover: hover) and (pointer: fine)').matches;
+const ctrl = $('.ctrl'), tl = $('.tl'), tip = $('.tip'), seekV = $('.tip video');
+let playingSrc = null, pvHls = null, pvKey = '', pvWant = null, pvBusy = false, pvTimer = 0, scrubbing = false;
+video.controls = !fineCursor;
+ctrl.hidden = !fineCursor;
+const fmtT = s => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = String(s % 60).padStart(2, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`; };
+const isVodTime = () => Number.isFinite(video.duration) && video.duration > 0;
+function paintCtrl() {
+  const d = video.duration, t = video.currentTime;
+  player.classList.toggle('paused', video.paused);
+  player.classList.toggle('muted', video.muted || video.volume === 0);
+  $('.vol').value = video.muted ? 0 : video.volume;
+  tl.hidden = !isVodTime();
+  $('.time').textContent = isVodTime() ? `${fmtT(t)} / ${fmtT(d)}` : cur?.kind === 'live' ? '● 直播' : '';
+  if (!isVodTime()) return;
+  if (!scrubbing) tl.style.setProperty('--p', (t / d) * 100 + '%');
+  let end = 0;
+  for (let i = 0; i < video.buffered.length; i++) if (video.buffered.start(i) <= t + 1) end = Math.max(end, video.buffered.end(i));
+  tl.style.setProperty('--b', (end / d) * 100 + '%');
+}
+for (const ev of ['timeupdate', 'durationchange', 'progress', 'play', 'pause', 'volumechange', 'loadedmetadata']) video.addEventListener(ev, paintCtrl);
+const togglePlay = () => (video.paused ? video.play().catch(() => {}) : video.pause());
+const toggleFs = () => (document.fullscreenElement ? document.exitFullscreen() : player.requestFullscreen().catch(() => {}));
+const RATES = [1, 1.25, 1.5, 2, 0.75];
+ctrl.addEventListener('click', e => {
+  const c = e.target.closest('[data-c]')?.dataset.c; if (!c) return;
+  e.stopPropagation(); poke();
+  if (c === 'play') togglePlay();
+  if (c === 'back') video.currentTime -= 10;
+  if (c === 'fwd') video.currentTime += 10;
+  if (c === 'mute') { video.muted = !video.muted; if (!video.muted && !video.volume) video.volume = 0.5; }
+  if (c === 'fs') toggleFs();
+  if (c === 'pip') (document.pictureInPictureElement ? document.exitPictureInPicture() : video.requestPictureInPicture()).catch(() => toast('这个浏览器不支持画中画'));
+  if (c === 'rate') { video.playbackRate = RATES[(RATES.indexOf(video.playbackRate) + 1) % RATES.length]; e.target.closest('button').textContent = video.playbackRate + 'x'; }
+});
+$('.vol').oninput = e => { video.volume = +e.target.value; video.muted = video.volume === 0; };
+if (fineCursor) {
+  video.addEventListener('click', () => { if (!player.hidden && $('.plist').hidden) { togglePlay(); poke(); } });
+  video.addEventListener('dblclick', toggleFs);
+}
+
+// Timeline: hover → time + frame, press/drag → seek.
+const tlFrac = e => { const r = tl.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
+function hoverAt(e) {
+  if (!isVodTime()) return;
+  const f = tlFrac(e), t = f * video.duration, r = tl.getBoundingClientRect();
+  tl.style.setProperty('--h', f * 100 + '%');
+  tip.hidden = false;
+  $('span', tip).textContent = fmtT(t);
+  const w = tip.offsetWidth;
+  tip.style.left = Math.min(r.width - w / 2, Math.max(w / 2, f * r.width)) + 'px';
+  previewAt(t);
+}
+tl.addEventListener('pointermove', e => { hoverAt(e); if (scrubbing) { tl.style.setProperty('--p', tlFrac(e) * 100 + '%'); } });
+tl.addEventListener('pointerleave', () => { if (!scrubbing) { tip.hidden = true; tl.style.setProperty('--h', '0%'); } });
+tl.addEventListener('pointerdown', e => {
+  if (!isVodTime() || e.button !== 0) return;
+  scrubbing = true; tl.setPointerCapture(e.pointerId); tl.classList.add('drag');
+  tl.style.setProperty('--p', tlFrac(e) * 100 + '%'); hoverAt(e);
+});
+tl.addEventListener('pointerup', e => {
+  if (!scrubbing) return;
+  scrubbing = false; tl.classList.remove('drag');
+  video.currentTime = tlFrac(e) * video.duration;
+  if (!tl.matches(':hover')) tip.hidden = true;
+});
+
+// The preview copy: same source the player ended up using (direct or relayed), lowest level, tiny buffer.
+function previewAt(t) {
+  if (!playingSrc) return;
+  if (pvKey !== playingSrc.src) {
+    pvReset();
+    pvKey = playingSrc.src;
+    tip.classList.remove('ready');
+    if (playingSrc.hls && window.Hls && Hls.isSupported()) {
+      pvHls = new Hls({ startLevel: 0, capLevelToPlayerSize: true, maxBufferLength: 2, maxMaxBufferLength: 4, backBufferLength: 0, enableWorker: true, startPosition: t });
+      pvHls.on(Hls.Events.MANIFEST_PARSED, () => { pvHls.autoLevelCapping = 0; });
+      pvHls.loadSource(pvKey); pvHls.attachMedia(seekV);
+    } else seekV.src = pvKey;
+  }
+  pvWant = Math.round(t);
+  pvPump();
+}
+function pvPump() {
+  if (pvBusy || pvWant === null || seekV.readyState < 1) return;
+  const t = pvWant; pvWant = null;
+  if (Math.abs(seekV.currentTime - t) < 0.5 && seekV.readyState >= 2) return;
+  pvBusy = true;
+  clearTimeout(pvTimer);
+  pvTimer = setTimeout(() => { pvBusy = false; pvPump(); }, 4000);  // a slow fragment shouldn't block newer hovers
+  seekV.currentTime = t;
+}
+seekV.addEventListener('loadedmetadata', pvPump);
+seekV.addEventListener('seeked', () => { clearTimeout(pvTimer); pvBusy = false; tip.classList.add('ready'); pvPump(); });
+function pvReset() {
+  clearTimeout(pvTimer);
+  if (pvHls) { pvHls.destroy(); pvHls = null; }
+  seekV.removeAttribute('src'); seekV.load();
+  pvKey = ''; pvWant = null; pvBusy = false;
+  tip.hidden = true; tip.classList.remove('ready');
+}
 addEventListener('keydown', e => {
   if (e.key === 'Escape' && !player.hidden && !$('.plist').hidden) { e.preventDefault(); return togglePlist(false); }
   if (e.target.matches('input, textarea')) return;
-  if (e.key === 'Escape' && (!player.hidden || $('#modal'))) history.back();
-  if (player.hidden) return;
+  if (e.key === 'Escape' && (playerOpen() || $('#modal'))) history.back();
+  if (!playerOpen()) return;
   if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
   if (e.key === 'ArrowRight') video.currentTime += 10;
   if (e.key === 'ArrowLeft') video.currentTime -= 10;
   if (e.key === 'n' || e.key === 'PageDown') step(1);
   if (e.key === 'p' || e.key === 'PageUp') step(-1);
-  if (e.key === 'f') document.fullscreenElement ? document.exitFullscreen() : player.requestFullscreen();
+  if (e.key === 'f') toggleFs();
+  if (e.key === 'm') video.muted = !video.muted;
   if (cur?.kind === 'live' && e.key === 'ArrowDown') { e.preventDefault(); step(1); }
   if (cur?.kind === 'live' && e.key === 'ArrowUp') { e.preventDefault(); step(-1); }
 });

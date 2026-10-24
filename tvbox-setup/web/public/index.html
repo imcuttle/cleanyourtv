@@ -46,6 +46,22 @@
     <button class="pill" data-act="list">选集</button>
   </div>
   <div class="pmsg"></div>
+  <div class="ctrl" hidden>
+    <div class="tl"><div class="rail"><i class="buf"></i><i class="hov"></i><i class="played"></i></div><b class="knob"></b>
+      <div class="tip" hidden><div class="frame"><video muted playsinline preload="auto"></video></div><span></span></div></div>
+    <div class="cbar">
+      <button data-c="play" title="播放 / 暂停 (空格)"><svg viewBox="0 0 24 24"><path class="i-play" d="M7 4.5v15l12-7.5z"/><path class="i-pause" d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg></button>
+      <button data-c="back" title="后退 10 秒 (←)"><svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"/><text x="12" y="16.5">10</text></svg></button>
+      <button data-c="fwd" title="前进 10 秒 (→)"><svg viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7a6 6 0 1 0 6 6h2a8 8 0 1 1-8-8z"/><text x="12" y="16.5">10</text></svg></button>
+      <button data-c="mute" title="静音 (m)"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 5V4L8 9z"/><path class="i-wave" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2"/><path class="i-x" d="M16 9l6 6M22 9l-6 6" stroke="currentColor" stroke-width="2"/></svg></button>
+      <input class="vol" type="range" min="0" max="1" step="0.05" title="音量">
+      <span class="time"></span>
+      <span class="grow"></span>
+      <button data-c="rate" class="txt" title="倍速">1x</button>
+      <button data-c="pip" title="画中画"><svg viewBox="0 0 24 24"><path d="M3 5h18v14H3z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 12h7v5h-7z"/></svg></button>
+      <button data-c="fs" title="全屏 (f)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2"/></svg></button>
+    </div>
+  </div>
   <aside class="plist" hidden></aside>
 </div>
 

@@ -153,9 +153,8 @@ struct VodHomeView: View {
                         Text(site?.name ?? "无源").font(.subheadline.weight(.semibold))
                         Image(systemName: "chevron.down").font(.caption2.weight(.bold))
                     }
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
                     .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.6), radius: 4)
                 }
             }
         }
@@ -182,7 +181,7 @@ struct VodHomeView: View {
                                 Text(e.epName).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                             }
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.press)
                         .contextMenu { Button("从观看历史删除", systemImage: "trash", role: .destructive) { Library.shared.deleteHistory(e.id) } }
                     }
                 }.padding(.horizontal)
@@ -200,7 +199,7 @@ struct VodHomeView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 8) {
                     ForEach(items) { item in
-                        NavigationLink(value: item) { PosterCell(item: item, width: 112) }.buttonStyle(.plain)
+                        NavigationLink(value: item) { PosterCell(item: item, width: 112) }.buttonStyle(.press)
                     }
                 }.padding(.horizontal)
             }
@@ -213,7 +212,7 @@ struct VodHomeView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 8) {
                     ForEach(items) { item in
-                        NavigationLink(value: item) { DoubanCell(item: item) }.buttonStyle(.plain)
+                        NavigationLink(value: item) { DoubanCell(item: item) }.buttonStyle(.press)
                     }
                 }.padding(.horizontal)
             }
@@ -313,10 +312,9 @@ struct Hero: View {
                         .font(.footnote.weight(.medium)).foregroundStyle(.white.opacity(0.8))
                 }
                 NavigationLink(value: item) {
-                    Label("播放", systemImage: "play.fill").font(.headline)
-                        .padding(.horizontal, 34).padding(.vertical, 10)
-                        .background(.white, in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.black)
+                    Label("播放", systemImage: "play.fill").padding(.horizontal, 18)
                 }
+                .buttonStyle(.press(.primary))
             }
             .padding(.horizontal, 24).padding(.bottom, 44)
         }
@@ -339,7 +337,7 @@ struct CategoryGridView: View {
             if let error { Text(error).foregroundStyle(.orange).padding() }
             LazyVGrid(columns: gridColumns, spacing: 16) {
                 ForEach(items) { item in
-                    NavigationLink(value: item) { PosterCell(item: item) }.buttonStyle(.plain)
+                    NavigationLink(value: item) { PosterCell(item: item) }.buttonStyle(.press)
                         .onAppear { if item == items.last { Task { await fetch(next: true) } } }
                 }
             }.padding(.horizontal)
@@ -454,9 +452,9 @@ struct VodDetailView: View {
             HStack(spacing: 10) {
                 Button { play(eps, h?.ep ?? 0, resume: h) } label: {
                     Label(h.map { "继续 \(eps[$0.ep].name)" } ?? (eps.count > 1 ? "播放 \(first.name)" : "播放"), systemImage: "play.fill")
-                        .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
-                        .background(.white, in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.black)
+                        .lineLimit(1).frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.press(.primary))
                 let dl = downloadState(eps)
                 Button {
                     if eps.count > 1 { dlMode.toggle(); return }
@@ -478,20 +476,20 @@ struct VodDetailView: View {
                                     Color.green.opacity(0.45).frame(width: g.size.width * dl.progress)
                                 }
                             }
-                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
                         .foregroundStyle(.white)
                         .animation(.linear(duration: 0.8), value: dl.progress)
                 }
+                .buttonStyle(.press)
                 if level != "kids" {
                     Button {
                         note = lib.toggleFavorite(item) ? "已收藏" : "已取消收藏"
                     } label: {
                         Image(systemName: lib.isFavorite(item) ? "heart.fill" : "heart")
-                            .font(.headline).foregroundStyle(lib.isFavorite(item) ? Color.brand : .white)
-                            .padding(.vertical, 12).padding(.horizontal, 14)
-                            .background(Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 5))
+                            .foregroundStyle(lib.isFavorite(item) ? Color.brand : .white)
                     }
+                    .buttonStyle(.press(.secondary))
                 }
             }
         } else if detail != nil {
@@ -551,10 +549,10 @@ struct VodDetailView: View {
                     Text("点选下载，再点暂停/继续").font(.caption).foregroundStyle(.secondary)
                     if dm.records(for: item).contains(where: { ["downloading", "queued"].contains($0.status) }) {
                         Button("全部暂停") { dm.records(for: item).forEach { dm.pause($0.id) } }
-                            .font(.caption.weight(.semibold)).buttonStyle(.bordered)
+                            .buttonStyle(.press(.chip(false)))
                     }
                     Button("全部下载") { eps.forEach { dm.add(item, $0) }; note = "已加入下载：\(eps.count) 集" }
-                        .font(.caption.weight(.semibold)).buttonStyle(.bordered)
+                        .buttonStyle(.press(.chip(true)))
                 }
             }.padding(.top, 4)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 72), spacing: 8)], spacing: 8) {
@@ -600,7 +598,7 @@ struct VodDetailView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 5))
                         .overlay(RoundedRectangle(cornerRadius: 5)
                             .stroke(dlMode ? Color.white.opacity(0.45) : .clear, style: StrokeStyle(lineWidth: 1, dash: [3])))
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(.press)
                 }
             }
         }
@@ -624,7 +622,7 @@ struct VodDetailView: View {
                                     }
                                     .padding(.horizontal, 12).padding(.vertical, 8)
                                     .background(Color.card).clipShape(RoundedRectangle(cornerRadius: 6))
-                                }.buttonStyle(.plain)
+                                }.buttonStyle(.press)
                             }
                         }
                     }
@@ -674,7 +672,7 @@ struct DoubanResolveView: View {
                     ScrollView {
                         LazyVGrid(columns: gridColumns, spacing: 16) {
                             ForEach(results) { r in
-                                NavigationLink(value: r) { PosterCell(item: r, showSite: true) }.buttonStyle(.plain)
+                                NavigationLink(value: r) { PosterCell(item: r, showSite: true) }.buttonStyle(.press)
                             }
                         }.padding()
                     }
@@ -699,27 +697,58 @@ struct SearchView: View {
     @ObservedObject private var cfg = Config.shared
     @AppStorage("safety.level") private var level = "standard"
     @State private var query = ""
+    @State private var searched = ""
     @State private var results: [VodItem] = []
+    @State private var people: [API.PersonHit] = []
+    @State private var tab = 0
     @State private var status = ""
     @State private var searching = false
 
     var body: some View {
         ScrollView {
-            if !status.isEmpty {
-                Text(status).font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
-            }
-            LazyVGrid(columns: gridColumns, spacing: 16) {
-                ForEach(results) { item in
-                    NavigationLink(value: item) { PosterCell(item: item, showSite: true) }.buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 14) {
+                if !searched.isEmpty && !searching {
+                    Picker("", selection: $tab) {
+                        Text("影片 \(results.count)").tag(0)
+                        Text("演员 / 导演 \(people.count)").tag(1)
+                    }
+                    .pickerStyle(.segmented).padding(.horizontal)
                 }
-            }.padding(.horizontal)
-            if searching { ProgressView("正在搜索全部 \(Safety.visible(cfg.sites).count) 个源…").padding() }
+                if !status.isEmpty { Text(status).font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
+                if tab == 0 {
+                    // Every title that matched — by name, or because the site's search also matched its credits.
+                    LazyVGrid(columns: gridColumns, spacing: 16) {
+                        ForEach(results) { item in
+                            NavigationLink(value: item) { PosterCell(item: item, showSite: true) }.buttonStyle(.press)
+                        }
+                    }.padding(.horizontal)
+                    if !searching, !searched.isEmpty, results.isEmpty {
+                        Text("没有影片匹配，换个关键词").foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(30)
+                    }
+                } else {
+                    ChipFlow(spacing: 10) {
+                        ForEach(people) { p in
+                            NavigationLink(value: PersonRoute(name: p.name, role: p.role)) {
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    Text(p.name).font(.subheadline.weight(.semibold))
+                                    Text("\(p.role == "director" ? "导演" : "演员") · \(p.items.count) 部").font(.caption2).opacity(0.6)
+                                }
+                            }
+                            .buttonStyle(.press(.chip(false)))
+                        }
+                    }
+                    .padding(.horizontal)
+                    if people.isEmpty {
+                        Text("没有演员或导演的名字包含「\(searched)」").foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(30)
+                    }
+                }
+                if searching { ProgressView("正在搜索全部 \(Safety.visible(cfg.sites).count) 个源…").frame(maxWidth: .infinity).padding() }
+            }
         }
         .background(Color.black)
         .navigationTitle("搜索")
         .appDestinations()
-        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "片名，所有源一起搜")
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "片名 / 演员 / 导演")
         .onSubmit(of: .search) { Task { await run() } }
     }
 
@@ -727,10 +756,12 @@ struct SearchView: View {
         let wd = query.trimmingCharacters(in: .whitespaces)
         guard !wd.isEmpty else { return }
         let sites = Safety.visible(cfg.sites)
-        results = []; searching = true; status = ""
-        let (found, failed) = await API.searchAll(wd, sites: sites)
-        results = found
+        results = []; people = []; searching = true; status = ""; searched = wd; tab = 0
+        let r = await API.searchWithCredits(wd, sites: sites)
+        let rank: (VodItem) -> Int = { $0.name == wd ? 0 : $0.name.contains(wd) ? 1 : 2 }
+        results = r.items.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+        people = r.people
         searching = false
-        status = "\(sites.count) 个源，共 \(found.count) 条" + (failed.isEmpty ? "" : "；\(failed.joined(separator: "/")) 未响应")
+        status = r.failed.isEmpty ? "" : "\(r.failed.joined(separator: "/")) 未响应"
     }
 }

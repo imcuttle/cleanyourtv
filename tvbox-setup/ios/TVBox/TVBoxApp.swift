@@ -16,6 +16,7 @@ struct TVBoxApp: App {
 struct RootView: View {
     @Environment(\.scenePhase) private var phase
     @ObservedObject private var toast = Toast.shared
+    @ObservedObject private var pip = PiPKeeper.shared
     @State private var clip: ClipPayload?
     @State private var clipBanner = false
 
@@ -23,14 +24,14 @@ struct RootView: View {
         TabView {
             NavigationStack { VodHomeView() }
                 .tabItem { Label("首页", systemImage: "house") }
+            NavigationStack { ChartsView() }
+                .tabItem { Label("榜单", systemImage: "chart.bar.xaxis") }
             NavigationStack { SearchView() }
                 .tabItem { Label("搜索", systemImage: "magnifyingglass") }
             NavigationStack { LiveView() }
                 .tabItem { Label("直播", systemImage: "tv") }
-            NavigationStack { MineView() }
+            NavigationStack { MineView(clip: $clip) }
                 .tabItem { Label("我的", systemImage: "person.crop.circle") }
-            NavigationStack { SettingsView(clip: $clip) }
-                .tabItem { Label("设置", systemImage: "gearshape") }
         }
         .tint(.brand)
         .preferredColorScheme(.dark)
@@ -50,6 +51,7 @@ struct RootView: View {
         .animation(.spring(duration: 0.3), value: clipBanner)
         .animation(.spring(duration: 0.3), value: toast.text)
         .sheet(item: $clip) { ClipboardImportView(text: $0.text) }
+        .fullScreenCover(item: $pip.restore) { PlayerScreen(request: $0) }
         .onChange(of: phase) { _, p in
             if p == .active { ClipboardBanner.check { clipBanner = true } } else { clipBanner = false }
         }

@@ -145,14 +145,44 @@ enum API {
 
     /// Search every given site in parallel. Exact title matches first, then by site order.
     static func searchAll(_ wd: String, sites: [Site]) async -> ([VodItem], [String]) {
-        await withTaskGroup(of: (Int, [VodItem]?).self) { group in
-            for (i, s) in sites.enumerated() { group.addTask { (i, try? await search(s, wd)) } }
-            var bucket: [Int: [VodItem]] = [:], failed: [String] = []
-            for await (i, list) in group {
-                if let list { bucket[i] = list } else { failed.append(sites[i].name) }
+        let r = await searchWithCredits(wd, sites: sites)
+        return (r.items, r.failed)
+    }
+
+    struct PersonHit: Identifiable { let name: String; let role: String; let items: [VodItem]; var id: String { role + name } }
+
+    /// Same requests as searchAll (shared cache), plus works whose 演员 / 导演 credits contain the query —
+    /// many sites' `wd` also matches those fields. Grouped per credited person (exact name first, then most works).
+    static func searchWithCredits(_ wd: String, sites: [Site]) async -> (items: [VodItem], failed: [String], people: [PersonHit]) {
+        await withTaskGroup(of: (Int, [[String: Any]]?).self) { group in
+            for (i, s) in sites.enumerated() {
+                group.addTask { (i, (try? await get(s, ["ac": "detail", "wd": wd], timeout: 8))?["list"] as? [[String: Any]]) }
             }
-            let all = sites.indices.flatMap { bucket[$0] ?? [] }
-            return (all.filter { $0.name == wd } + all.filter { $0.name != wd }, failed)
+            var bucket: [Int: [[String: Any]]] = [:], failed: [String] = []
+            for await (i, list) in group { if let list { bucket[i] = list } else { failed.append(sites[i].name) } }
+            var items: [VodItem] = []
+            var people: [String: (seen: Set<String>, items: [VodItem])] = [:], order: [String] = []
+            for i in sites.indices {
+                for d in bucket[i] ?? [] {
+                    let it = item(sites[i], d)
+                    guard it.typeName.isEmpty || Safety.catAllowed(sites[i], it.typeName) else { continue }
+                    items.append(it)
+                    guard !(it.name + it.typeName).contains("解说"), !(it.name + it.typeName).contains("预告") else { continue }
+                    for (field, role) in [("vod_actor", "actor"), ("vod_director", "director")] {
+                        for p in Set(splitPeople(str(d[field])).filter { $0.contains(wd) }) {
+                            let k = role + "|" + p
+                            if people[k] == nil { people[k] = ([], []); order.append(k) }
+                            let dedupe = it.name.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: it.year, with: "") + "|" + it.year
+                            if people[k]!.seen.insert(dedupe).inserted { people[k]!.items.append(it) }
+                        }
+                    }
+                }
+            }
+            let hits = order.map { k -> PersonHit in
+                let parts = k.split(separator: "|", maxSplits: 1).map(String.init)
+                return PersonHit(name: parts[1], role: parts[0], items: people[k]!.items.sorted { (Int($0.year) ?? 0) > (Int($1.year) ?? 0) })
+            }.sorted { ($0.name == wd ? 1 : 0, $0.items.count) > ($1.name == wd ? 1 : 0, $1.items.count) }
+            return (items.filter { $0.name == wd } + items.filter { $0.name != wd }, failed, Array(hits.prefix(30)))
         }
     }
 
@@ -326,6 +356,9 @@ enum API {
             UserDefaults.standard.set(try? JSONEncoder().encode(snapshot), forKey: "douban.cache")
         }
     }
+
+    /// Rate-limited 豆瓣 JSON for other files (榜单).
+    static func doubanJSON(_ url: URL) async -> Any? { await douban(url) }
 
     static func doubanHot(_ type: String) async -> [DoubanItem] {
         var c = URLComponents(string: "https://movie.douban.com/j/search_subjects")!

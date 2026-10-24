@@ -117,6 +117,7 @@ extension View {
 // MARK: - 我的: history, favorites, downloads
 
 struct MineView: View {
+    @Binding var clip: ClipPayload?
     @ObservedObject private var lib = Library.shared
     @ObservedObject private var dm = DownloadManager.shared
     @AppStorage("safety.level") private var level = "standard"
@@ -142,6 +143,12 @@ struct MineView: View {
             NavigationLink { DownloadsView() } label: {
                 Label { HStack { Text("下载"); Spacer(); Text("\(dm.records.count)").foregroundStyle(.secondary) } }
                     icon: { Image(systemName: "arrow.down.circle") }
+            }
+            Section {
+                NavigationLink { SettingsView(clip: $clip) } label: {
+                    Label { HStack { Text("设置"); Spacer(); Text("源 · 安全级别").foregroundStyle(.secondary) } }
+                        icon: { Image(systemName: "gearshape") }
+                }
             }
         }
         .navigationTitle("我的")
@@ -272,7 +279,7 @@ struct PersonView: View {
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
                     LazyVGrid(columns: gridColumns, spacing: 16) {
                         ForEach(items) { it in
-                            NavigationLink(value: it) { PosterCell(item: it, showSite: true) }.buttonStyle(.plain)
+                            NavigationLink(value: it) { PosterCell(item: it, showSite: true) }.buttonStyle(.press)
                         }
                     }.padding(.horizontal)
                 }
@@ -324,10 +331,8 @@ struct PeopleRow: View {
                 Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 30, alignment: .leading).padding(.top, 5)
                 ChipFlow {
                     ForEach(Array((all ? names : Array(names.prefix(max))).enumerated()), id: \.offset) { _, n in
-                        NavigationLink(value: PersonRoute(name: n, role: role)) {
-                            Text(n).font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
-                                .background(Color.card, in: Capsule()).foregroundStyle(.white)
-                        }
+                        NavigationLink(value: PersonRoute(name: n, role: role)) { Text(n).font(.caption) }
+                            .buttonStyle(.press(.chip(false)))
                     }
                     if !all, names.count > max {
                         Button("+\(names.count - max)") { all = true }
