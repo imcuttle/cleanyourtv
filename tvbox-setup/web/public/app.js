@@ -96,7 +96,22 @@ async function req(method, path, body, retried, signal) {
 }
 // signal: omitted → current page; null → never aborted (app-level reads); or a specific controller's signal.
 const get = (path, signal) => req('GET', path, undefined, false, signal === undefined ? pageCtl.signal : signal || undefined);
-const api = (route, params = {}, signal) => get(`/api/${route}?` + new URLSearchParams(params), signal);
+// Reads that a page is built from are remembered for a few minutes (and per safety level), so going Back to a page that
+// was just left rebuilds it from memory in the same frame — no spinner, no network round trip, no flash.
+// Only successful results are kept; the sources list changing / a rescan / settings saves clear it.
+const apiMemo = new Map(), MEMO_TTL = { list: 300e3, categories: 600e3, 'douban/hot': 1800e3 }, MEMO_MAX = 160;
+let memoSig = '';
+const api = (route, params = {}, signal) => {
+  const path = `/api/${route}?` + new URLSearchParams(params), ttl = MEMO_TTL[route];
+  if (!ttl) return get(path, signal);
+  const k = state.level + '|' + path, hit = apiMemo.get(k);
+  if (hit && Date.now() - hit.at < ttl) { apiMemo.delete(k); apiMemo.set(k, hit); return Promise.resolve(hit.v); }
+  return get(path, signal).then(v => {
+    apiMemo.set(k, { at: Date.now(), v });
+    if (apiMemo.size > MEMO_MAX) apiMemo.delete(apiMemo.keys().next().value);
+    return v;
+  });
+};
 function toast(msg, sticky) {
   const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
   document.body.append(t);
@@ -239,6 +254,8 @@ function observeJav(root = document) { $$('.card[data-jav]', root).forEach(el =>
 async function loadSites() {
   const j = await api('sites', {}, null);
   state.sites = j.sites; state.lives = j.live; state.level = j.level;
+  const sig = j.level + '|' + j.sites.map(s => s.key + '|' + (s.api || '')).join(',');
+  if (sig !== memoSig) { memoSig = sig; apiMemo.clear(); }
   if (!state.sites.some(s => s.key === state.site)) state.site = state.sites[0]?.key || '';
   const cur = state.sites.find(s => s.key === state.site);
   $('#siteName').textContent = cur ? cur.name : '无源';
@@ -279,7 +296,7 @@ function newPage() {
 // Pages fill in asynchronously (rows, infinite-scroll grids), so restoring waits for the content to get tall enough.
 history.scrollRestoration = 'manual';
 const scrollMap = (() => { try { return JSON.parse(sessionStorage.scrolls || '{}'); } catch { return {}; } })();
-let scrollGuard = false, scrollTick = 0, scrollSave = 0, routeSeq = 0, restoreCtl = null;
+let keepView = null, scrollGuard = false, scrollTick = 0, scrollSave = 0, routeSeq = 0, restoreCtl = null;
 const saveScroll = (k, y) => {
   delete scrollMap[k]; scrollMap[k] = Math.round(y);
   const ks = Object.keys(scrollMap); if (ks.length > 80) for (const x of ks.slice(0, ks.length - 80)) delete scrollMap[x];
@@ -327,6 +344,7 @@ async function route(opts = {}) {
   clearInterval(heroTimer); clearInterval(pageTimer); view.onclick = null;
   newPage();
   const seq = ++routeSeq;
+  view.classList.remove('restoring');
   let [, page, a, b, c] = location.hash.split('/');
   // Deep links (what a card's href points at, e.g. after ⌘-click into a new tab): show the page
   // underneath, then the detail / player on top.
@@ -356,7 +374,21 @@ async function route(opts = {}) {
   restoreCtl?.();
   const restoreY = entryScroll();
   scrollGuard = true;                                     // don't let the jump to the top overwrite the saved offset
-  scrollTo(0, 0);
+  // Back to home / a category: leave the page that is on screen alone (no spinner, no jump to the top) and swap in the
+  // finished page in one go, already at its old scroll position. If that takes over 150 ms (cold data), fall back to the
+  // spinner so the click never looks dead.
+  const keep = !!opts.nav && restoreY > 0 && state.sites.length > 0 && (!page || page === 'cat') && !!view.firstElementChild;
+  keepView = keep ? view.firstElementChild : null;
+  let keepTimer = 0;
+  if (keep) {
+    // Slow path: hide the page (a centred spinner instead) until it is complete and back at its old position, so the
+    // user never sees it assemble at the top and then jump. 3 s at most, then the usual progressive fill takes over.
+    keepTimer = setTimeout(() => {
+      if (seq !== routeSeq) return;
+      view.classList.add('restoring');
+      setTimeout(() => { if (seq === routeSeq) view.classList.remove('restoring'); }, 3000);
+    }, 150);
+  } else scrollTo(0, 0);
   try {
     if (page === 'live') return await renderLive();
     if (page === 'settings') return await renderSettings();
@@ -379,7 +411,12 @@ async function route(opts = {}) {
     if (isAbort(e)) return;
     view.innerHTML = `<div class="page"><div class="err">加载失败：${esc(e.message)}。右上角换个源试试，或去 <a href="#/settings"><u>设置</u></a> 检查。</div></div>`;
   } finally {
-    if (seq === routeSeq) { if (opts.nav && restoreY > 0) restoreScroll(restoreY); else scrollGuard = false; }
+    clearTimeout(keepTimer);
+    if (seq === routeSeq) keepView = null;
+    if (seq === routeSeq) {
+      if (opts.nav && restoreY > 0) restoreScroll(restoreY); else scrollGuard = false;
+      view.classList.remove('restoring');
+    }
   }
 }
 
@@ -485,7 +522,7 @@ document.addEventListener('click', e => {
 
 // ---------- home ----------
 async function renderHome() {
-  view.innerHTML = spinner;
+  if (!keepView) view.innerHTML = spinner;
   const site = state.site;
   const [latest, cats] = await Promise.all([api('list', { site }),
     state.cats.length ? { categories: state.cats } : api('categories', { site }).catch(() => ({ categories: [] }))]);
@@ -606,14 +643,33 @@ async function renderPerson(role, name) {
 async function renderCategory(t, name, siteKey) {
   const site = state.sites.some(x => x.key === siteKey) ? siteKey : state.site;
   const other = site !== state.site ? state.sites.find(x => x.key === site)?.name : '';
-  view.innerHTML = `<div class="page"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
+  const head = `<div class="page"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
   let pg = 0, count = 1, busy = false;
   const seen = new Set();
+  const sk = history.state?.sk;
+  const wantPages = keepView && sk ? Math.max(1, Math.min(scrollMap[sk + '#p'] || 1, 12)) : 1;
+  if (!keepView) view.innerHTML = head;
+  else {                                                   // coming Back: fetch the pages seen before in parallel, paint once
+    let js;
+    try { js = await Promise.all(Array.from({ length: wantPages }, (_, i) => api('list', { site, t, pg: i + 1 }))); }
+    catch (e) { if (isAbort(e)) return; js = null; }
+    if (js && js[0]) {
+      view.innerHTML = head;
+      const g = $('#grid');
+      for (const j of js) {
+        pg = j.page; count = j.pagecount;
+        g.insertAdjacentHTML('beforeend', j.list.filter(it => !seen.has(it.id) && seen.add(it.id)).map(it => card(it)).join('') );
+      }
+      observeRatings(g); observeJav(g);
+      $('#tail').innerHTML = pg >= count ? (seen.size ? '' : '<div class="empty">这个分类是空的</div>') : spinner;
+    } else view.innerHTML = head;
+  }
   const more = async () => {
     if (busy || pg >= count || !$('#grid')) return;
     busy = true;
     const j = await api('list', { site, t, pg: pg + 1 });
     pg = j.page; count = j.pagecount;
+    if (sk) saveScroll(sk + '#p', pg);                      // how deep this entry was, so Back can rebuild it at once
     const fresh = j.list.filter(it => !seen.has(it.id) && seen.add(it.id));
     $('#grid')?.insertAdjacentHTML('beforeend', fresh.map(it => card(it)).join(''));
     if ($('#grid')) { observeRatings($('#grid')); observeJav($('#grid')); }
@@ -624,7 +680,8 @@ async function renderCategory(t, name, siteKey) {
     const tailEl = $('#tail');
     if (tailEl && pg < count && tailEl.getBoundingClientRect().top < innerHeight + 600) setTimeout(() => more().catch(() => { busy = false; }), 0);
   };
-  await more();
+  if (!pg) await more();
+  else if (pg < count) { const tailEl = $('#tail'); if (tailEl && tailEl.getBoundingClientRect().top < innerHeight + 600) await more(); }
   const sig = pageCtl.signal;
   // Scroll-driven (not IntersectionObserver): a restored / programmatic scroll can move the tail into reach in the same
   // frame the grid grew, which an observer sees as "still intersecting" and never reports.
@@ -1499,13 +1556,24 @@ function stopLocalPreview(immediate) {
   const a = me.inner.animate([{ opacity: 1 }, { opacity: 1, offset: .5 }, { opacity: 0 }], { duration: 240, easing: 'linear', fill: 'forwards' });
   a.onfinish = a.oncancel = () => me.ov.remove();
 }
-// mouseenter / mouseleave don't bubble, but capturing listeners on document still see every card and the detail poster.
-const lpvTarget = t => t instanceof Element && (t.matches('#view .card[data-pv]') || t.matches('.sheet .top .poster[data-pv]')) ? t : null;
-document.addEventListener('mouseenter', e => {
-  const t = lpvTarget(e.target); if (!t) return;
-  startLocalPreview(t, t.dataset.pv, t.classList.contains('card') ? $('.img', t) || t : t);
-}, true);
-document.addEventListener('mouseleave', e => { if (lpv && e.target === lpv.el) stopLocalPreview(); }, true);
+// The preview belongs to the cover itself. Pointing at an action on it (✕ 删除 / 取消收藏 / a link or button) is a different
+// intent and gets no hover effect: a running preview folds away and none starts until the pointer is back on the plain cover.
+// (mouseover bubbles, so one listener on document sees every card and the detail poster; moving from a button back onto the
+// cover fires it again, which is what restarts the preview.)
+const LPV_ACTION = 'button, a[href]:not(.card), .rm, .badge, .db, .q, input, select, textarea, [role=button]';
+const lpvTarget = t => t instanceof Element && t.closest('#view .card[data-pv], .sheet .top .poster[data-pv]');
+document.addEventListener('mouseover', e => {
+  const t = e.target instanceof Element ? e.target : null; if (!t) return;
+  const host = lpvTarget(t); if (!host) return;
+  if (t !== host && t.closest(LPV_ACTION) && host.contains(t.closest(LPV_ACTION))) { if (lpv) stopLocalPreview(); return; }
+  if (lpv && lpv.el === host) return;
+  startLocalPreview(host, host.dataset.pv, host.classList.contains('card') ? $('.img', host) || host : host);
+});
+document.addEventListener('mouseout', e => {
+  if (!lpv) return;
+  const to = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+  if (!to || !lpv.el.contains(to)) stopLocalPreview();
+});
 
 // Hover preview: a fresh 3-second gif cut by the server's ffmpeg; without ffmpeg, a muted live mini-player
 // (through the same-origin relay, so a frame can be captured and saved as the channel's cover).
@@ -1623,7 +1691,7 @@ async function renderSettings() {
   const redraw = c => { $('#sites').innerHTML = rowsHtml(c.sites, 'site'); $('#lives').innerHTML = rowsHtml(c.lives, 'live'); dirty(); };
   const persist = async c => {
     await req('PUT', '/api/config', c);
-    state.cats = []; await loadSites(); toast('已保存'); renderSettings();
+    state.cats = []; apiMemo.clear(); await loadSites(); toast('已保存'); renderSettings();
   };
   const test = async r => {
     const st = $('.status', r); st.className = 'status'; st.textContent = '测试中…';
@@ -1766,7 +1834,7 @@ async function localSettings() {
       if (!box.isConnected) return;
       if (status.running) { $('#lcStatus').textContent = statusText(status); return poll(); }
       cfg = collect(); draw(cfg, status); bind();
-      state.cats = []; await loadSites();
+      state.cats = []; apiMemo.clear(); await loadSites();
     }, 1000);
   };
   const bind = () => {
@@ -1779,7 +1847,7 @@ async function localSettings() {
         const r = await req('PUT', '/api/local', collect());
         cfg = r.cfg; status = r.status; draw(cfg, status); bind(); poll();
         toast(cfg.enabled ? '已保存，开始扫描' : '已保存（已停用）');
-        if (!cfg.enabled) { state.cats = []; await loadSites(); }
+        if (!cfg.enabled) { state.cats = []; apiMemo.clear(); await loadSites(); }
       } catch (err) { toast(err.message); }
     };
     $('#lcScan').onclick = async () => {

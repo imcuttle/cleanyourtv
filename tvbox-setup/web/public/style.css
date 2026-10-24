@@ -535,3 +535,9 @@ nav a svg { display: none; }
 /* icon + short label buttons (打开 / 文件夹) */
 .btn.ico { display: inline-flex; align-items: center; gap: 7px; }
 .btn.ico svg { width: 20px; height: 20px; flex: none; fill: currentColor; }
+
+/* Back to a page that has to be rebuilt from the network: hidden until complete and back at its old scroll position
+   (see route() in app.js), so it never assembles at the top and then jumps. */
+#view.restoring > * { visibility: hidden; }
+#view.restoring::before { content: ""; position: fixed; z-index: 4; left: 50%; top: 50%; width: 34px; height: 34px; margin: -17px 0 0 -17px;
+  border: 3px solid #ffffff30; border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
