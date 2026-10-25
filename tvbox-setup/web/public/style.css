@@ -633,7 +633,7 @@ nav a svg { display: none; }
 .fd-nav button:hover { background: #ffffff44; } .fd-nav svg { width: 22px; height: 22px; }
 @media (hover: none), (pointer: coarse) { .fd-fine { display: none !important; } }
 .fd-prog { position: absolute; z-index: 3; left: 0; right: 0; bottom: 0; height: calc(26px + env(safe-area-inset-bottom)); cursor: pointer; touch-action: none; }
-.fd-prog .rail { position: absolute; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 1px); height: 3px; background: #ffffff33; transition: height .15s; }
+.fd-prog .rail { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: #ffffff33; transition: height .15s; }
 .fd-prog .rail i { position: absolute; left: 0; top: 0; bottom: 0; }
 .fd-prog .buf { width: calc(var(--b, 0) * 100%); background: #ffffff55; } .fd-prog .played { width: calc(var(--p, 0) * 100%); background: #fff; }
 .fd-prog .knob { position: absolute; top: 50%; left: calc(var(--p, 0) * 100%); width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: #fff; transform: scale(0); transition: transform .15s; }
