@@ -96,10 +96,36 @@ function banner(n, ffmpeg, dl) {
   publicIp().then(ip => {
     if (!ip) return console.log('\n  公网：没查到公网 IP（离线或被墙），只能在局域网里访问。');
     const url = `http://${ip}:${PORT}`;
-    console.log(`\n  公网      ${url}`);
-    console.log('            从外网访问需要在路由器里把端口 ' + PORT + ' 转发到这台电脑（光猫 / 运营商没有公网 IPv4 时不通）。没有设家长 PIN 的话，别把它暴露出去。');
-    qr('公网二维码', url);
+    console.log(`\n  公网      ${url}  （正在从外网探测是否可达…）`);
+    reachableFromOutside(ip, PORT).then(ok => {
+      if (ok === true) {
+        console.log(`  公网可达  ✓ ${url}  外网节点已连通，端口映射生效。没设家长 PIN 的话，任何人都能打开，请先设置。`);
+        qr('公网二维码', url);
+      } else if (ok === false) {
+        console.log(`  公网可达  ✗ 外网连不上 ${ip}:${PORT}。需要在路由器 / 光猫里把端口 ${PORT} 转发到这台电脑（二级路由要两层都转；运营商没给公网 IPv4 时不通）。`);
+      } else {
+        console.log('  公网可达  ? 探测服务没有响应，没法确认；请用手机流量自己试一下上面的地址。');
+      }
+    });
   });
+}
+// Ask check-host.net's nodes (outside our network) to TCP-connect to ip:port. true = reachable, false = refused / timed out,
+// null = the probe service itself failed. Note: only tests the internal PORT; an external port that differs from it can't be detected.
+async function reachableFromOutside(ip, port) {
+  try {
+    const hdr = { accept: 'application/json', 'user-agent': 'curl/8' };
+    const r = await fetch(`https://check-host.net/check-tcp?host=${ip}:${port}&max_nodes=3`, { headers: hdr, signal: AbortSignal.timeout(8000) });
+    const id = (await r.json()).request_id;
+    if (!id) return null;
+    for (let i = 0; i < 6; i++) {
+      await new Promise(s => setTimeout(s, 3000));
+      const res = await (await fetch(`https://check-host.net/check-result/${id}`, { headers: hdr, signal: AbortSignal.timeout(8000) })).json();
+      const rows = Object.values(res).filter(Boolean).map(v => v[0]);
+      if (rows.some(x => x && x.address)) return true;
+      if (rows.length && rows.every(x => x && x.error)) return false;
+    }
+    return false;
+  } catch { return null; }
 }
 // Public IPv4, asked from a few lookup services at once; first answer wins. null when offline.
 async function publicIp() {
