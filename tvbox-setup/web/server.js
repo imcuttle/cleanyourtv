@@ -748,7 +748,7 @@ async function probeSites(sites) {
         const leaves = all.filter(c => !parents.has(str(c.type_id)));
         const k = classifyNames((leaves.length ? leaves : all).map(c => c.type_name))?.kind;
         if (!s.kids && !s.adult && (k === 'adult' || k === 'kids')) s[k] = 1;
-        s.ok = true; s.info = Number(b.total) > 0 ? b.total + '部' : (s.info || '能连上');
+        s.ok = true; s.info = (Number(b.total) > 0 ? b.total + '部' : (s.info || '能连上')) + (s.note ? ' · ' + s.note : '');
       } catch (e) { s.ok = false; s.info = '连不上：' + (e.message || '').slice(0, 40); }
       s.probed = true;
     }
@@ -779,7 +779,7 @@ async function probeLives(lives) {
 // Pasted text → 点播 sites / 直播 sources. Each link is fetched and classified by what it actually
 // returns (苹果CMS JSON, TVBox config, m3u/txt list, single stream); names come from the text on the
 // same line. Results are marked `exists` against the current config so the client can add only new ones.
-const VOD_HINT = /provide\/vod|\/api\.php|\/inc\/api|\/at\/(json|xml)/i;
+const VOD_HINT = /provide\/vod|\/api\.php|\/inc\/api|\/at\/(json|xml)|\/(xml|json)\.php/i;
 const LIVE_HINT = /\.(m3u8?|txt)(\?|$)/i;
 const STREAMISH = /\.(m3u8|flv|ts|mp4|mpd)(\?|$)|^(rtmp|rtsp):/i;
 
@@ -809,9 +809,37 @@ async function peek(url, max = 2e6) {
   return { text: Buffer.concat(chunks).toString('utf8'), final: r.url };
 }
 
+// 苹果CMS also serves the same data as XML (…/xml.php, …/at/xml): the browser client reads JSON, so an XML link is swapped for
+// its JSON twin (json.php, at/json, or the plain provide/vod link) — whichever of them really answers with a title list.
+const isCmsXml = t => /^\s*(<\?xml[^>]*>\s*)?<rss[\s>]/i.test(t) && /<list[\s>]/i.test(t);
+function jsonTwins(url) {
+  const out = [];
+  try {
+    const u = new URL(url);
+    const swap = p => { const x = new URL(u); x.pathname = p; return x.toString(); };
+    if (/\/xml\.php$/i.test(u.pathname)) out.push(swap(u.pathname.replace(/xml\.php$/i, 'json.php')));
+    if (/\/at\/xml\/?$/i.test(u.pathname)) out.push(swap(u.pathname.replace(/\/at\/xml\/?$/i, '/at/json/')), swap(u.pathname.replace(/\/at\/xml\/?$/i, '/')));
+    if (/\/provide\/vod\/?$/i.test(u.pathname)) out.push(u.toString());
+    if (!out.length) { out.push(swap(u.pathname.replace(/xml(\.\w+)?$/i, 'json$1'))); }
+  } catch {}
+  return [...new Set(out)].filter(x => x !== url);
+}
+async function xmlToJson(url, xmlText) {
+  const m = /recordcount="(\d+)"/i.exec(xmlText), count = m ? Number(m[1]) : 0;
+  for (const cand of jsonTwins(url)) {
+    try {
+      const p = await peek(cand);
+      const c = p.stream ? null : classifyText(p.text);
+      if (c?.kind === 'vod') return { api: cand, c };
+    } catch {}
+  }
+  return { api: '', count };
+}
+
 function classifyText(text) {
   const t = str(text).trim();
   if (!t) return null;
+  if (isCmsXml(t)) return { kind: 'cms-xml' };
   if (/^[{[]/.test(t)) {
     try {
       const o = parseJsonLoose(t);
@@ -864,7 +892,12 @@ async function recognize(input) {
         try { p = await peek(e.url); c = p.stream ? { kind: 'stream' } : classifyText(p.text); } catch (err) { p = { error: err.message }; }
       } else c = { kind: 'stream' };
       const why = p?.error ? '不通：' + p.error : '';
-      if (c?.kind === 'vod') return c.total > 0 || c.count > 0 ? { sites: [{ name: e.name || host, api: normApi(e.url), ok: true, info: `${c.total || c.count}部` }] } : { sites: [{ name: e.name || host, api: normApi(e.url), ok: false, empty: true, info: '0 部内容，不导入' }] };
+      if (c?.kind === 'cms-xml') {
+        const x = await xmlToJson(e.url, p.text);
+        if (!x.api) return { sites: [{ name: e.name || host, api: normApi(e.url), ok: false, info: `这是 XML 接口（${x.count} 条），没找到对应的 JSON 接口，浏览器版用不了` }] };
+        c = x.c; e.url = x.api; p = { ...p, note: '已换成 JSON 接口' };
+      }
+      if (c?.kind === 'vod') return c.total > 0 || c.count > 0 ? { sites: [{ name: e.name || host, api: normApi(e.url), ok: true, info: `${c.total || c.count}部`, ...(p?.note ? { note: p.note } : {}) }] } : { sites: [{ name: e.name || host, api: normApi(e.url), ok: false, empty: true, info: '0 部内容，不导入' }] };
       if (c?.kind === 'config') {
         const f = await configFrom(c.obj, p.final || e.url);
         const info = `来自配置 ${e.name || host}`;
