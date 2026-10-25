@@ -57,6 +57,12 @@ web/start.command        # macOS — or start.bat on Windows
 → http://localhost:9988 and http://<this machine>:9988 for the rest of the LAN
 ```
 
+**Access token.** The first start generates `TVBOX_TOKEN` into `web/.env` (git-ignored) and prints it in the
+log together with a scan-to-login QR code. Browsers ask for it once (a full-screen mask, no flash either way),
+then keep it for good (HttpOnly cookie + localStorage backup). One gate in front of every route guards
+`/api /hls /img /dl /media`; only the page's static files are public. A token can also ride on `?token=…`
+or `Authorization: Bearer …`. Rotate it: delete the line in `.env`, restart.
+
 The server runs one worker per CPU core (`node:cluster`, set `WORKERS=n` to override); downloads,
 config writes, ffmpeg and 豆瓣 rate-limiting live in one leader worker the others talk to over IPC.
 Static files are held in memory pre-gzipped, JSON responses are gzipped, identical upstream requests

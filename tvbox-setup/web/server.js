@@ -31,6 +31,9 @@ fs.mkdirSync(DL, { recursive: true });
 const CPUS = (os.availableParallelism ? os.availableParallelism() : os.cpus().length) || 1;
 const WORKERS = Math.max(1, Math.min(Number(process.env.WORKERS) || CPUS, 16));
 const MEDIA_OP = /^(local|hls)/; // rpc ops handled by the media process
+// 访问令牌 (web/.env 的 TVBOX_TOKEN，第一次启动自动生成)。必须在 fork 之前定下来：子进程继承 process.env，用的是同一个。
+const AUTH = require('./auth');
+const TOKEN = AUTH.ensureToken().token;
 if (cluster.isPrimary && WORKERS > 1) return primary();
 const IS_LEADER = !cluster.isWorker || process.env.TVBOX_LEADER === '1';
 // 本地媒体 (folder scans, poster frames, ffmpeg → HLS) runs in its own process that never serves HTTP,
@@ -86,12 +89,15 @@ function banner(n, ffmpeg, dl) {
   console.log('\n  TVBox 已启动，浏览器打开：\n');
   console.log(`    本机      http://localhost:${PORT}`);
   for (const ip of lan) console.log(`    局域网    http://${ip}:${PORT}`);
+  console.log(`\n  访问令牌  ${TOKEN}`);
+  console.log(`  （浏览器第一次打开要输入它，之后一直记住；存在 ${AUTH.ENV_FILE} 的 ${AUTH.KEY}，换令牌就删掉那一行再重启。下面的二维码已带令牌，扫码即登录）`);
   console.log(`\n  进程：${n} 个（CPU ${CPUS} 核，环境变量 WORKERS 可调）`);
   console.log(`  下载目录：${dl}`);
   console.log(`  直播封面：${ffmpeg ? 'ffmpeg 已找到' : '没有 ffmpeg，悬停时用浏览器截图'}`);
   console.log('  关闭这个窗口即停止服务。');
   // 二维码: 手机 / 电视扫一下就能打开。局域网的马上显示，公网的等查到 IP 再显示。
-  const qr = (title, url) => { try { console.log(`\n  ${title}  ${url}\n${toTerminal(url)}`); } catch {} };
+  const withTok = url => `${url}/?token=${encodeURIComponent(TOKEN)}`; // 二维码里带上令牌，手机扫一下就进去了
+  const qr = (title, url) => { try { console.log(`\n  ${title}  ${url}\n${toTerminal(withTok(url))}`); } catch {} };
   if (lan[0]) qr('局域网二维码（手机和这台电脑连同一个 Wi-Fi）', `http://${lan[0]}:${PORT}`);
   publicIp().then(ip => {
     if (!ip) return console.log('\n  公网：没查到公网 IP（离线或被墙），只能在局域网里访问。');
@@ -99,7 +105,7 @@ function banner(n, ffmpeg, dl) {
     console.log(`\n  公网      ${url}  （正在从外网探测是否可达…）`);
     reachableFromOutside(ip, PORT).then(ok => {
       if (ok === true) {
-        console.log(`  公网可达  ✓ ${url}  外网节点已连通，端口映射生效。没设家长 PIN 的话，任何人都能打开，请先设置。`);
+        console.log(`  公网可达  ✓ ${url}  外网节点已连通，端口映射生效。没有访问令牌的人打不开；令牌别发给别人。`);
         qr('公网二维码', url);
       } else if (ok === false) {
         console.log(`  公网可达  ✗ 外网连不上 ${ip}:${PORT}。需要在路由器 / 光猫里把端口 ${PORT} 转发到这台电脑（二级路由要两层都转；运营商没给公网 IPv4 时不通）。`);
@@ -2558,6 +2564,14 @@ async function serveStatic(p, req, res) {
   if (!file.startsWith(PUBLIC)) return send(res, 403, 'forbidden', 'text/plain');
   const st = await fsp.stat(file).catch(() => null);
   if (!st || !st.isFile()) return send(res, 404, 'not found', 'text/plain');
+  if (file === INDEX_HTML) {
+    // 入口页由服务端把「已登录 / 未登录」直接写进 <html data-auth>，首帧就是对的状态：不会先闪出内容再盖蒙层，也不会先闪蒙层再消失。
+    let c = staticCache.get(file);
+    if (!c || c.mtime !== st.mtimeMs) { c = { mtime: st.mtimeMs, text: await fsp.readFile(file, 'utf8') }; staticCache.set(file, c); }
+    const body = Buffer.from(c.text.replace(/<html\b/, `<html data-auth="${req.authed ? 1 : 0}"`));
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', Vary: 'Cookie', 'Content-Length': body.length });
+    return res.end(body);
+  }
   let c = staticCache.get(file);
   if (!c || c.mtime !== st.mtimeMs) {
     const buf = await fsp.readFile(file);
@@ -2574,8 +2588,54 @@ async function serveStatic(p, req, res) {
   res.end(body);
 }
 
+// ---- 访问令牌 ----
+// 一道统一的闸，放在所有路由前面：除了网页本身的静态文件，/api /hls /img /dl /media 全部要令牌，没有一个接口单独处理。
+// 令牌三种带法：Cookie（浏览器登录后服务端种下，HttpOnly、长期有效，<img> / <video> / hls 请求自动带上）、
+// Authorization: Bearer（网页的 fetch 拦截器带，用来登录和 Cookie 丢了时自动恢复）、?token=（扫码 / 外部播放器链接）。
+// 带对了令牌、而 Cookie 还不对，就顺手种一个 Cookie。
+const INDEX_HTML = path.join(PUBLIC, 'index.html');
+const COOKIE = 'tvbox_token';
+const tokenHash = crypto.createHash('sha256').update(TOKEN).digest();
+const tokenOk = v => typeof v === 'string' && v.length > 0 && v.length < 512 &&
+  crypto.timingSafeEqual(crypto.createHash('sha256').update(v).digest(), tokenHash);
+const cookieOf = (req, name) => {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) { try { return decodeURIComponent(part.slice(i + 1).trim()); } catch { return ''; } }
+  }
+  return '';
+};
+const failures = new Map(); // ip -> { n, reset }  给错令牌的次数（每个 worker 各记各的）
+setInterval(() => { const now = Date.now(); for (const [k, v] of failures) if (v.reset < now) failures.delete(k); }, 60000).unref();
+// -> { ok, tooMany, fresh }  fresh = 令牌是 header / query 带的，Cookie 还没有
+function checkAuth(req, u) {
+  if (tokenOk(cookieOf(req, COOKIE))) return { ok: true };
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
+  const given = m ? m[1].trim() : u.searchParams.get('token');
+  if (!given) return { ok: false };
+  const ip = req.socket.remoteAddress || '';
+  const f = failures.get(ip);
+  if (f && f.n >= 10 && f.reset > Date.now()) return { ok: false, tooMany: true };
+  if (tokenOk(given)) return { ok: true, fresh: true };
+  const x = f && f.reset > Date.now() ? f : { n: 0, reset: Date.now() + 60000 };
+  x.n++; failures.set(ip, x);
+  return { ok: false, bad: true };
+}
+
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
+  const guarded = /^\/(api|hls|img|dl|media)(\/|$)/.test(u.pathname);
+  const a = checkAuth(req, u);
+  req.authed = a.ok;
+  if (a.fresh) {
+    const secure = req.socket.encrypted || /^https\b/i.test(req.headers['x-forwarded-proto'] || '');
+    res.setHeader('Set-Cookie', `${COOKIE}=${encodeURIComponent(TOKEN)}; Path=/; Max-Age=315360000; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`);
+  }
+  if (guarded && !a.ok) {
+    res.setHeader('X-Auth-Required', '1');
+    if (a.tooMany) res.setHeader('Retry-After', '60');
+    return send(res, a.tooMany ? 429 : 401, { error: a.tooMany ? '令牌错误次数太多，请 1 分钟后再试' : '需要访问令牌', auth: true });
+  }
   try {
     if (u.pathname.startsWith('/api/')) return await api(u.pathname.slice(5), u.searchParams, res, req);
     if (u.pathname === '/hls') return await relay(u.searchParams.get('u') || '', res, req);

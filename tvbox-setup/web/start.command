@@ -18,6 +18,8 @@ else
   NODE=.tools/node/bin/node
 fi
 command -v ffmpeg >/dev/null 2>&1 || echo "提示：装了 ffmpeg（brew install ffmpeg）后，直播封面和悬停预览由服务端生成，更快。"
+# 访问令牌：第一次启动在 .env 里生成 TVBOX_TOKEN（已有就沿用）。服务启动后会在这个窗口里再打印一次。
+TOKEN=$("$NODE" -e 'process.stdout.write(require("./auth").ensureToken().token)') || { echo "生成访问令牌失败"; read -r -p "按回车退出"; exit 1; }
 export PORT=${PORT:-9988}
-(sleep 1.5; open "http://localhost:$PORT") &
+(sleep 1.5; open "http://localhost:$PORT/?token=$TOKEN") &
 exec "$NODE" server.js
