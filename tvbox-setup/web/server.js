@@ -840,10 +840,10 @@ async function recognize(input) {
       ...embeddedVod.map(s => { const n = parseVodText(s.text).items.length;
         return { name: str(s.name) || '分享的片单', text: s.text.trim() + '\n', ok: n > 0, ...(n ? {} : { empty: true }), info: n ? `${n} 部（含片单文本）` : '片单里没有可播放的片，不导入', ...(Number(s.kids) ? { kids: 1 } : {}), ...(Number(s.adult) ? { adult: 1 } : {}) }; })];
     lives = [...f.lives.map(l => ({ ...l, info: '来自粘贴的配置' })),
-      ...embedded.map(l => ({ name: str(l.name) || '分享的频道', text: l.text.trim() + '\n', ok: true,
-        info: `${parseLive(l.text).groups.reduce((n, g) => n + g.channels.length, 0)} 个频道（含频道列表）` }))];
+      ...embedded.map(l => { const n = parseLive(l.text).groups.reduce((a, g) => a + g.channels.length, 0);
+        return { name: str(l.name) || '分享的频道', text: l.text.trim() + '\n', ok: n > 0, ...(n > 0 ? {} : { empty: true }), info: n > 0 ? `${n} 个频道（含频道列表）` : '0 个频道，不导入' }; })];
   } else if (direct?.kind === 'list') {
-    lives.push({ name: `剪贴板频道 ${direct.channels}台`, text: text.trim() + '\n', ok: true, info: `${direct.channels} 个频道` });
+    lives.push({ name: `剪贴板频道 ${direct.channels}台`, text: text.trim() + '\n', ok: direct.channels > 0, ...(direct.channels > 0 ? {} : { empty: true }), info: direct.channels > 0 ? `${direct.channels} 个频道` : '0 个频道，不导入' });
   } else {
     const found = new Map();
     for (const line of text.split(/\r?\n/)) {
@@ -864,17 +864,17 @@ async function recognize(input) {
         try { p = await peek(e.url); c = p.stream ? { kind: 'stream' } : classifyText(p.text); } catch (err) { p = { error: err.message }; }
       } else c = { kind: 'stream' };
       const why = p?.error ? '不通：' + p.error : '';
-      if (c?.kind === 'vod') return c.total > 0 || c.count > 0 ? { sites: [{ name: e.name || host, api: normApi(e.url), ok: true, info: `${c.total || c.count}部` }] } : { sites: [{ name: e.name || host, api: normApi(e.url), ok: false, info: '0 部内容，不导入' }] };
+      if (c?.kind === 'vod') return c.total > 0 || c.count > 0 ? { sites: [{ name: e.name || host, api: normApi(e.url), ok: true, info: `${c.total || c.count}部` }] } : { sites: [{ name: e.name || host, api: normApi(e.url), ok: false, empty: true, info: '0 部内容，不导入' }] };
       if (c?.kind === 'config') {
         const f = await configFrom(c.obj, p.final || e.url);
         const info = `来自配置 ${e.name || host}`;
         return { sites: f.sites.map(s => ({ ...s, info })), lives: f.lives.map(l => ({ ...l, info })) };
       }
-      if (c?.kind === 'list') return { lives: [{ name: e.name || host, url: e.url, ok: true, info: `${c.channels} 个频道` }] };
+      if (c?.kind === 'list') return { lives: [c.channels > 0 ? { name: e.name || host, url: e.url, ok: true, info: `${c.channels} 个频道` } : { name: e.name || host, url: e.url, ok: false, empty: true, info: '0 个频道，不导入' }] };
       if (c?.kind === 'stream') return { single: { ...e, ok: true } };
       if (VOD_HINT.test(e.url)) return { sites: [{ name: e.name || host, api: normApi(e.url), ok: false, info: why || '返回的不是苹果CMS JSON' }] };
       if (STREAMISH.test(e.url) && !/\.txt|\.m3u(\?|$)/i.test(e.url)) return { single: { ...e, ok: false, info: why } };
-      if (LIVE_HINT.test(e.url)) return { lives: [{ name: e.name || host, url: e.url, ok: false, info: why || '没解析出频道' }] };
+      if (LIVE_HINT.test(e.url)) return { lives: [{ name: e.name || host, url: e.url, ok: false, ...(why ? {} : { empty: true }), info: why || '0 个频道，不导入' }] };   // opened fine but nothing in it: not importable
       return { unknown: e.url };
     }));
     const singles = [];
@@ -2490,6 +2490,7 @@ rpcHandlers.config = async ({ op, body: b }) => {
       if (config.lives.some(l => l.url === 'local:' + f)) haveText.add(textKey(await fsp.readFile(path.join(LIVES, f), 'utf8').catch(() => '')));
     }
     for (const l of Array.isArray(b.lives) ? b.lives : []) {
+      if (l.empty) continue;
       if (l.text && haveText.has(textKey(l.text))) continue;
       if (l.text) {
         haveText.add(textKey(l.text));

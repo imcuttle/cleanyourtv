@@ -2633,10 +2633,10 @@ function stopPreview() {
   pv = null;
 }
 
-// ---------- shared multi-select: shift+click range, mouse rectangle ("圈选") ----------
-// zone: element that receives the pointer; box: where the checkbox clicks happen; rows(): selectable rows in order;
-// box_(row): the row's checkbox; changed(): called after every selection change; skip: targets that never start a rectangle.
-function multiPick({ zone, box, rows, box_, changed, skip, start = () => true }) {
+// ---------- shared multi-select: shift+click a checkbox selects the range since the last click ----------
+// (no drag-rectangle: it fights with selecting / copying text in the rows.)
+// box: where the checkbox clicks happen; rows(): selectable rows in order; box_(row): the row's checkbox; changed(): after a change.
+function multiPick({ box, rows, box_, changed }) {
   let anchor = null;
   box.addEventListener('click', e => {
     const c = e.target.closest('input[type=checkbox]'); if (!c) return;
@@ -2647,34 +2647,6 @@ function multiPick({ zone, box, rows, box_, changed, skip, start = () => true })
       changed();
     }
     anchor = row;
-  });
-  zone.addEventListener('pointerdown', e => {
-    if (e.pointerType !== 'mouse' || e.button !== 0 || e.target.closest(skip) || !start(e)) return;
-    const add = e.shiftKey || e.ctrlKey || e.metaKey, x0 = e.clientX, y0 = e.clientY;
-    const base = new Map(rows().map(r => [r, box_(r).checked]));
-    let band = null;
-    const move = ev => {
-      if (!band) {
-        if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return;
-        band = document.createElement('div'); band.className = 'marquee'; document.body.append(band);
-        document.body.classList.add('marqueeing'); getSelection()?.removeAllRanges();
-      }
-      const l = Math.min(x0, ev.clientX), t = Math.min(y0, ev.clientY), w = Math.abs(ev.clientX - x0), h = Math.abs(ev.clientY - y0);
-      band.style.cssText = `left:${l}px;top:${t}px;width:${w}px;height:${h}px`;
-      for (const r of rows()) {
-        const c = box_(r); if (c.disabled) continue;
-        const b = r.getBoundingClientRect();
-        c.checked = (b.left < l + w && b.right > l && b.top < t + h && b.bottom > t) ? true : add ? base.get(r) : false;
-      }
-      changed();
-      if (ev.clientY < 60) scrollBy(0, -14); else if (ev.clientY > innerHeight - 60) scrollBy(0, 14);
-    };
-    const up = () => {
-      removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up);
-      band?.remove(); document.body.classList.remove('marqueeing');
-      if (band) addEventListener('click', ev => { ev.preventDefault(); ev.stopPropagation(); }, { capture: true, once: true });
-    };
-    addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up);
   });
 }
 // Small dropdown for the bulk bars ("分类" / "更多"): fixed-position so the bars' own scrolling never clips it.
@@ -3270,11 +3242,8 @@ async function renderSettings() {
   };
   bindDrag($('#sites')); bindDrag($('#lives'));
   sumGroups();
-  // Multi-select in the lists: shift+click a checkbox for a range, drag a rectangle over rows on a PC.
-  for (const box of [$('#sites'), $('#lives')]) multiPick({
-    zone: box.parentElement, box, skip: 'input, button, textarea, select, a, label, summary, .drag',
-    rows: () => $$('.srow', box).filter(r => !r.hidden), box_: r => $('.sel', r), changed: refreshCount,
-    start: e => !!e.target.closest('.srow, #' + box.id) });
+  // Multi-select in the lists: shift+click a checkbox for a range.
+  for (const box of [$('#sites'), $('#lives')]) multiPick({ box, rows: () => $$('.srow', box).filter(r => !r.hidden), box_: r => $('.sel', r), changed: refreshCount });
   renumber(); refreshCount();
   $('#save').onclick = () => persist(current()).catch(err => toast(err.message));
   $('#saveRaw').onclick = () => { let c; try { c = JSON.parse($('#raw').value); } catch { return toast('JSON 格式不对'); } persist(c, true).catch(err => toast(err.message)); };
@@ -3381,7 +3350,7 @@ const looksLikeSource = t => /(https?|rtmp|rtsp):\/\/|#EXTINF|#genre#|"sites"\s*
 document.addEventListener('paste', e => {
   if (e.target instanceof Element && e.target.closest('input, textarea, [contenteditable]')) return;
   const t = e.clipboardData?.getData('text') || '';
-  if (looksLikeSource(t)) { e.preventDefault(); recognizeFlow(t, true); }
+  if (looksLikeSource(t)) { e.preventDefault(); recognizeFlow(t); }   // an explicit paste is always taken
 });
 addEventListener('focus', async () => {
   try {
@@ -3394,65 +3363,156 @@ addEventListener('focus', async () => {
   } catch {}
 });
 
-async function recognizeFlow(text, quiet) {
-  if ($('#clipModal')) return;
-  localStorage.clipSeen = clipKey(text);
+// One recognition task at a time. While its sheet is open, any new clipboard text (a paste, the window regaining focus, or the
+// background check below) is analysed too and merged into the same list, so the result is given once, for everything.
+let clipSess = null;
+// auto: the text was picked up by watching the clipboard (window focus / polling), not pasted or requested by the user.
+function recognizeFlow(text, auto) {
+  const key = clipKey(text);
+  localStorage.clipSeen = key;
+  if (clipSess?.settled() && auto) return;   // the result of this task has been given: watching the clipboard stops
+  if (!clipSess) clipSess = openClipSession();
+  clipSess.add(text, key);
+}
+function openClipSession() {
   const m = document.createElement('div');
-  m.className = 'modal'; m.id = 'clipModal';
-  m.innerHTML = `<div class="sheet editor"><div class="body"><h3>识别剪贴板</h3><div class="spinner"></div><p class="lan" id="clipStage" style="text-align:center">正在逐个打开链接确认类型，并检测点播源是否有内容、归哪一类…<br>源多的话要等十几秒，检测完才能添加，添加本身是即时的。</p></div></div>`;
-  document.body.append(m); document.body.style.overflow = 'hidden';
-  const close = () => { m.remove(); if (!$('#modal')) document.body.style.overflow = ''; };
-  m.onclick = e => { if (e.target === m) close(); };
-  let r;
-  try { r = await req('POST', '/api/recognize', { text }); } catch (e) { close(); return toast('识别失败：' + e.message); }
-  const all = [...r.sites.map(x => ({ ...x, kind: 'site' })), ...r.lives.map(x => ({ ...x, kind: 'live' }))];
-  const fresh = all.filter(x => !x.exists);
-  if (!all.length) { close(); return toast(r.unknown.length ? `剪贴板里 ${r.unknown.length} 个链接都不是点播/直播源` : '剪贴板里没识别到点播/直播源'); }
-  if (!fresh.length) { close(); return toast(`识别到 ${all.length} 个源，都已存在`); }
-  const tagOf = x => x.adult ? '<i class="ctag adult">成人</i>' : x.kids ? '<i class="ctag">少儿</i>' : '';
-  const rowHtml = (x, i) => `<label class="crow ${x.exists || x.empty ? 'dim' : ''}" data-i="${i}">
-      <input type="checkbox" class="csel" data-i="${i}" ${x.exists || x.empty ? 'disabled' : x.ok === false ? '' : 'checked'}>
-      <input class="cname" data-i="${i}" value="${esc(x.name)}" ${x.exists ? 'disabled' : ''}>
-      <span class="curl">${esc(x.kind === 'site' ? x.api || '分享的片单（存成本地文本）' : x.url || '粘贴的频道列表（存成本地文本）')}</span>
-      <span class="cstat ${x.exists ? '' : x.ok === true ? 'ok' : x.ok === false ? 'bad' : ''}">${x.exists ? '已存在' : esc(x.info || (x.ok === false ? '不通' : '未验证'))}<span class="ctags">${x.exists ? '' : tagOf(x)}</span></span></label>`;
-  const section = (title, kind) => {
-    const items = all.map((x, i) => [x, i]).filter(([x]) => x.kind === kind);
-    return items.length ? `<h4>${title} · 新 ${items.filter(([x]) => !x.exists).length} / 共 ${items.length}</h4>${items.map(([x, i]) => rowHtml(x, i)).join('')}` : '';
-  };
-  m.firstChild.innerHTML = `<div class="body"><h3>剪贴板里识别到 ${all.length} 个源</h3>
-    <p class="hint">已存在的自动去重；不通、没内容的默认不勾（0 内容的不能选）。可以 Shift 点选连续范围、按住鼠标拖出方框圈选，名称可以直接改，也可以批量设分类。</p>
+  m.className = 'modal clipmodal'; m.id = 'clipModal';
+  m.innerHTML = `<div class="sheet editor clipsheet"><div class="body clipbody">
+    <h3 id="clipTitle">识别剪贴板</h3>
+    <p class="hint">已存在的自动去重；不通、没内容的默认不勾（0 内容的不能选）。按住 Shift 点选可以连选一段；名称可以直接改，也能批量设分类。分析期间剪贴板有新内容会自动并进来，一起给出结果。</p>
     <div class="actions cbulk"><label class="flag"><input type="checkbox" data-cbulk="all">全选</label>
       <button class="small" data-cbulk="invert">反选</button><button class="small" data-cbulk="good">只选能用的</button>
       <span class="bwrap"><button class="small" data-cbulk="cat">设分类 ▾</button><div class="bmenu" hidden>
         <button data-cbulk="setkids">设为 少儿</button><button data-cbulk="setadult">设为 成人</button><button data-cbulk="setstd">设为 标准（去掉标记）</button></div></span>
+      <button class="small" data-cbulk="paste" title="读取当前剪贴板，并入这次识别">追加剪贴板</button>
       <span class="lan" data-cbulk="count"></span></div>
-    <div id="clipRows">${section('点播源', 'site')}${section('直播源', 'live')}</div>
-    ${r.unknown.length ? `<details class="lan"><summary>${r.unknown.length} 个链接没认出来</summary>${r.unknown.map(u => `<div class="curl">${esc(u)}</div>`).join('')}</details>` : ''}
-    <div class="actions"><button class="btn red" id="clipAdd"></button><button class="small" id="clipCancel">取消</button><span class="lan" id="clipMsg"></span></div></div>`;
-  let saving = false;
-  const boxes = () => $$('.crow:not(.dim) .csel', m);
-  const count = () => {
-    const n = boxes().filter(c => c.checked).length, tot = boxes().length;
-    $('#clipAdd').textContent = saving ? '保存中…' : n ? `添加选中的 ${n} 个` : '没有选中';
-    $('#clipAdd').disabled = saving || !n;
-    $('[data-cbulk=count]', m).textContent = `已选 ${n} / ${tot}`;
-    $('[data-cbulk=all]', m).checked = n > 0 && n === tot;
+    <div class="clipstatus" id="clipStatus"><div class="spinner mini"></div><span></span></div>
+    <div class="clipnote" id="clipNote" hidden></div>
+    <div id="clipRows" class="cliprows"></div>
+    <div id="clipUnknown"></div>
+    <div class="actions clipfoot"><button class="btn red" id="clipAdd" disabled>分析中…</button><button class="small" id="clipCancel">取消</button><span class="lan" id="clipMsg"></span></div></div></div>`;
+  document.body.append(m); document.body.style.overflow = 'hidden';
+  const all = [], keys = new Set(), unknown = new Set(), seen = new Set();
+  let pending = 0, saving = false, closed = false, texts = 0, updates = 0, done = false;   // done: the result has been handed over
+  const close = () => { closed = true; clearInterval(poll); closeBulkMenus(); m.remove(); clipSess = null; if (!$('#modal')) document.body.style.overflow = ''; };
+  // Same per-row controls as the settings list: 少儿 / 成人 checkboxes, then the status.
+  const flagsHtml = (x, i) => { const off = x.exists || x.empty ? 'disabled' : ''; return `<label class="flag"><input type="checkbox" class="ckids" data-i="${i}" ${x.kids ? 'checked' : ''} ${off}>少儿</label><label class="flag"><input type="checkbox" class="cadult" data-i="${i}" ${x.adult ? 'checked' : ''} ${off}>成人</label>`; };
+  const keyOf = x => x.kind === 'site' ? (x.text ? 't|' + x.text : x.members ? 'g|' + x.name + '|' + x.members.join(',') : 'a|' + x.api + '|' + (x.categories || []).join(','))
+    : (x.text ? 't|' + x.text : 'u|' + x.url);
+  const rowHtml = (x, i) => `<div class="crow ${x.exists || x.empty ? 'dim' : ''}" data-i="${i}">
+      <input type="checkbox" class="csel" data-i="${i}" ${x.exists || x.empty ? 'disabled' : x._sel ? 'checked' : ''}>
+      <input class="cname" data-i="${i}" value="${esc(x.name)}" ${x.exists ? 'disabled' : ''}>
+      <span class="curl">${esc(x.kind === 'site' ? x.api || '分享的片单（存成本地文本）' : x.url || '粘贴的频道列表（存成本地文本）')}</span>
+      <span class="cops">${flagsHtml(x, i)}<span class="cstat ${x.exists ? '' : x.ok === true ? 'ok' : x.ok === false ? 'bad' : ''}">${x.exists ? '已存在' : esc(x.info || (x.ok === false ? '不通' : '未验证'))}</span></span></div>`;
+  const section = (title, kind) => {
+    const items = all.map((x, i) => [x, i]).filter(([x]) => x.kind === kind);
+    return items.length ? `<h4>${title} · 新 ${items.filter(([x]) => !x.exists).length} / 共 ${items.length}</h4>${items.map(([x, i]) => rowHtml(x, i)).join('')}` : '';
   };
+  const boxes = () => $$('.crow:not(.dim) .csel', m);
+  const syncFromDom = () => $$('.csel', m).forEach(c => { const x = all[+c.dataset.i]; if (x && !c.disabled) x._sel = c.checked; });
+  const count = () => {
+    syncFromDom();
+    const n = boxes().filter(c => c.checked).length, tot = boxes().length;
+    const busy = pending > 0;
+    $('#clipAdd').textContent = saving ? '保存中…' : busy ? `分析中，还有 ${pending} 段…` : n ? `添加选中的 ${n} 个` : '没有选中';
+    $('#clipAdd').disabled = saving || busy || !n;   // nothing picked (or still analysing): the button cannot be pressed
+    $('[data-cbulk=count]', m).textContent = tot ? `已选 ${n} / ${tot}` : '';
+    $('[data-cbulk=all]', m).checked = n > 0 && n === tot;
+    const st = $('#clipStatus', m); st.hidden = !busy;
+    if (busy) $('span', st).textContent = all.length ? `又有 ${pending} 段内容在分析，完成后并进下面的列表…` : '正在逐个打开链接确认类型，并检测点播源是否有内容、归哪一类（源多要等十几秒）…';
+  };
+  const render = () => {
+    syncFromDom();
+    const box = $('#clipRows', m), top = box.scrollTop;
+    box.innerHTML = all.length ? section('点播源', 'site') + section('直播源', 'live') : '';
+    box.scrollTop = top;
+    $('#clipTitle', m).textContent = all.length ? `剪贴板里识别到 ${all.length} 个源${texts > 1 ? `（合并 ${texts} 段内容）` : ''}` : '识别剪贴板';
+    $('#clipUnknown', m).innerHTML = unknown.size ? `<details class="lan"><summary>${unknown.size} 个链接没认出来</summary>${[...unknown].map(u => `<div class="curl">${esc(u)}</div>`).join('')}</details>` : '';
+    count();
+  };
+  const merge = r => {
+    for (const x of [...r.sites.map(x => ({ ...x, kind: 'site' })), ...r.lives.map(x => ({ ...x, kind: 'live' }))]) {
+      const k = keyOf(x); if (keys.has(k)) continue;
+      if (/^0 ?(个频道|部|台)/.test(x.info || '')) { x.empty = true; x.ok = false; }   // 0 channels / 0 titles: never selectable, never default-selected
+      keys.add(k); x._sel = !x.exists && !x.empty && x.ok !== false; all.push(x);
+    }
+    r.unknown.forEach(u => unknown.add(u));
+  };
+  const settle = () => {
+    if (closed || pending) return render();
+    render();
+    // One batch, one result. From here on a changed clipboard is no longer picked up by itself — only an explicit
+    // paste (Ctrl/⌘+V) or 「追加剪贴板」 adds to the list.
+    if (all.length && all.some(x => !x.exists)) {
+      done = true; clearInterval(poll);
+      $('#clipStatus', m).hidden = true;
+      const note = $('#clipNote', m);
+      note.hidden = false; note.classList.remove('flash');
+      note.textContent = '已给出结果，不再自动识别剪贴板的变化。要追加内容，请按 Ctrl/⌘+V 粘贴，或点「追加剪贴板」。';
+    }
+    if (!all.length) { const n = unknown.size; close(); toast(n ? `剪贴板里 ${n} 个链接都不是点播/直播源` : '剪贴板里没识别到点播/直播源'); }
+    else if (!all.some(x => !x.exists)) { const n = all.length; close(); toast(`识别到 ${n} 个源，都已存在`); }
+  };
+  const add = (text, key) => {
+    if (closed) return;
+    if (saving) { delete localStorage.clipSeen; return toast('正在保存，保存完成后再粘贴一次就能识别新内容'); }
+    if (seen.has(key)) return toast('这段剪贴板内容已经在分析了');
+    const appended = done;   // added by hand after the result was already given
+    seen.add(key); texts++; pending++; done = false;
+    if (appended) {
+      const note = $('#clipNote', m);
+      note.hidden = false; note.classList.remove('flash'); void note.offsetWidth; note.classList.add('flash');
+      note.textContent = `已追加一段内容（共 ${texts} 段），分析完成后并入下面的列表`;
+    } else if (texts > 1) {
+      // The clipboard changed while this task is open: say so clearly, once as a toast and once as a banner that stays.
+      updates++;
+      const note = $('#clipNote', m);
+      note.hidden = false; note.classList.remove('flash'); void note.offsetWidth; note.classList.add('flash');
+      note.textContent = `检测到剪贴板内容变化 ${updates} 次：新内容已加入这次任务（共 ${texts} 段），全部分析完一起给出结果`;
+      toast('检测到剪贴板更新，已并入当前识别任务');
+    }
+    count();
+    req('POST', '/api/recognize', { text })
+      .then(merge, e => { toast('识别失败：' + e.message); })
+      .finally(() => { pending--; if (!closed) settle(); });
+  };
+  // Keeps watching while the sheet is open (only possible when the browser already allows reading the clipboard).
+  const poll = setInterval(async () => {
+    if (closed || done || saving || !document.hasFocus()) return;
+    try {
+      if ((await navigator.permissions.query({ name: 'clipboard-read' })).state !== 'granted') return;
+      const t = await navigator.clipboard.readText(), k = clipKey(t);
+      if (looksLikeSource(t) && !seen.has(k)) add(t, k);
+    } catch {}
+  }, 1500);
   const lock = on => {   // while saving nothing in the sheet can be changed, cancelled or submitted twice
     saving = on;
     $$('input, button', m).forEach(x => { if (on) { x.dataset.was = x.disabled ? '1' : ''; x.disabled = true; } else if (x.dataset.was !== undefined) { x.disabled = x.dataset.was === '1'; delete x.dataset.was; } });
     $('#clipMsg').textContent = on ? '正在写入，请稍等…' : '';
     count();
   };
-  count();
-  multiPick({ zone: m, box: $('#clipRows', m), skip: 'input, button, textarea, select, a, summary, .bmenu',
-    rows: () => $$('.crow:not(.dim)', m), box_: r => $('.csel', r), changed: count, start: e => !!e.target.closest('#clipRows') });
-  m.onchange = e => { if (!saving && e.target.classList.contains('csel')) count(); };
-  m.onclick = e => {
+  multiPick({ box: $('#clipRows', m), rows: () => $$('.crow:not(.dim)', m), box_: r => $('.csel', r), changed: count });
+  m.onchange = e => {
+    if (saving) return;
+    const t = e.target, x = all[+t.dataset.i];
+    if (t.classList.contains('csel')) count();
+    else if (x && (t.classList.contains('ckids') || t.classList.contains('cadult'))) {   // a single row's own 少儿 / 成人, like in the settings list
+      x[t.classList.contains('ckids') ? 'kids' : 'adult'] = t.checked ? 1 : 0;
+    }
+  };
+  m.oninput = e => { if (e.target.classList.contains('cname')) { const x = all[+e.target.dataset.i]; if (x) x.name = e.target.value; } };
+  m.onclick = async e => {
     if (e.target === m && !saving) return close();
     const op = e.target.dataset.cbulk; if (!op || saving) return;
     if (op === 'cat') return toggleBulkMenu(e.target);
     closeBulkMenus();
+    if (op === 'paste') {
+      try {
+        const t = await navigator.clipboard.readText();
+        if (!looksLikeSource(t)) return toast('剪贴板里没有源地址');
+        const k = clipKey(t); localStorage.clipSeen = k; return add(t, k);
+      } catch { return toast('浏览器不让直接读剪贴板（局域网 http 页面的限制），请直接按 Ctrl/⌘+V 粘贴'); }
+    }
     const rows = boxes();
     if (op === 'all') rows.forEach(c => { c.checked = e.target.checked; });
     else if (op === 'invert') rows.forEach(c => { c.checked = !c.checked; });
@@ -3461,9 +3521,9 @@ async function recognizeFlow(text, quiet) {
       const picked = rows.filter(c => c.checked);
       if (!picked.length) return toast('先勾选要设置的源');
       for (const c of picked) {
-        const x = all[+c.dataset.i];
+        const x = all[+c.dataset.i], row = c.closest('.crow');
         x.kids = op === 'setkids' ? 1 : 0; x.adult = op === 'setadult' ? 1 : 0;
-        $('.ctags', c.closest('.crow')).innerHTML = tagOf(x);
+        $('.ckids', row).checked = !!x.kids; $('.cadult', row).checked = !!x.adult;
       }
       toast(`已把 ${picked.length} 个设为${({ setkids: '少儿', setadult: '成人', setstd: '标准' })[op]}`);
     }
@@ -3471,8 +3531,9 @@ async function recognizeFlow(text, quiet) {
   };
   $('#clipCancel').onclick = () => { if (!saving) close(); };
   $('#clipAdd').onclick = async () => {
-    if (saving) return;
-    const pick = boxes().filter(c => c.checked).map(c => { const x = all[+c.dataset.i]; return { ...x, name: $(`.cname[data-i="${c.dataset.i}"]`, m).value.trim() || x.name }; });
+    if (saving || pending) return;
+    syncFromDom();
+    const pick = all.filter(x => x._sel && !x.exists && !x.empty).map(x => ({ ...x, name: (x.name || '').trim() || x.name }));
     if (!pick.length) return;
     if (settingsDirty && settingsOpen() && settingsSaver) {
       // adding refreshes the settings page: the pending edits have to be saved first, or they would be lost (or overwrite what is added)
@@ -3487,6 +3548,8 @@ async function recognizeFlow(text, quiet) {
       if (location.hash.startsWith('#/settings')) renderSettings();
     } catch (e) { lock(false); toast(e.message); }
   };
+  render();
+  return { add, close, settled: () => done };
 }
 
 loadSites().then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
