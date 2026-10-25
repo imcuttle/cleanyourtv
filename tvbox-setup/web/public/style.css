@@ -1064,7 +1064,4 @@ html.touchui #player.plopen { touch-action: auto; }
 .sharemenu button:hover, .sharemenu button:focus-visible { background: #ffffff1a; outline: none; }
 .sharemenu button b { font-size: 14px; }
 .sharemenu button small { color: var(--muted); font-size: 12px; line-height: 1.35; }
-/* 播放页的分享：桌面端是文字按钮「分享」；触屏沿用图标 + 小字的底栏样式 */
-html:not(.touchui) .pill[data-act=share] { width: auto; padding: 0 14px; border-radius: 21px; }
-html:not(.touchui) .pill[data-act=share] svg { display: none; }
-html:not(.touchui) .pill[data-act=share] .l { display: inline; font-size: 14px; font-weight: 600; }
+.btn.ico#shareBtn svg { fill: none; stroke: currentColor; }
