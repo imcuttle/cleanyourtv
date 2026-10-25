@@ -1295,3 +1295,10 @@ html.cs-big .card .img img { image-rendering: auto; }
 .fd-slide video { z-index: 1; }
 .fd-slide:not(.framed).hascover video { opacity: 0; }
 .fd-slide.framed video { opacity: 1; transition: opacity .2s; }
+.clipprog { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.clipprog span { word-break: break-all; }
+.clipprog .bar { display: block; height: 4px; border-radius: 2px; background: #ffffff1f; overflow: hidden; }
+.clipprog .bar[hidden] { display: none; }
+.clipprog .bar b { display: block; height: 100%; width: 0; background: #54b9c5; transition: width .25s; }
+.clipprog small { color: #9fd8df99; font-size: 12px; } .clipprog small:empty { display: none; }
+.clipnotes { margin: 4px 0; line-height: 1.6; }

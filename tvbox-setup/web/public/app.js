@@ -410,7 +410,10 @@ const javLead = name => {
   return at >= 0 && at <= 10 ? code : '';
 };
 // The picture a card ends up showing: javdb's cover when it has one for this 番号 (the card swaps it in), else the source's own.
-const cardPic = it => { const c = it && isJav(it) ? javCache[javCode(it.name)] : null; return (c && c.found && c.cover) || it?.pic || ''; };
+// javdb's cover replaces a title's picture only for 本地 media (frames cut from the file) or when the source gave no picture at all;
+// a remote source's own cover stays. javdb is still used for the score / cast / title either way.
+const javCoverWanted = it => !!it && (it.site === 'local' || !it.pic);
+const cardPic = it => { const c = it && isJav(it) && javCoverWanted(it) ? javCache[javCode(it.name)] : null; return (c && c.found && c.cover) || it?.pic || ''; };
 const isJav = it => !!(it && (it.adult || javLead(it.name)));
 const javCache = JSON.parse(localStorage.javdb || '{}');
 // Cached: found for 30 days; "javdb has no such code" for 3 days (a real answer). Errors / unreachable mirrors are never cached.
@@ -443,7 +446,7 @@ const javIO = new IntersectionObserver(es => es.forEach(e => {
   javMeta(code).then(r => {
     if (!el.isConnected) return;
     if (!r.found) { douban(); return; }
-    if (r.cover) {
+    if (r.cover && (el.dataset.site === 'local' || !el.querySelector('.img img'))) {
       const im = el.querySelector('.img img'); const ph = el.querySelector('.img');
       if (im) im.src = img(r.cover); else if (ph) ph.style.cssText = bg(r.cover);
     }
@@ -1178,7 +1181,7 @@ async function renderHome() {
       ${state.cats.length ? `<section class="row"><h2>全部分类</h2><div class="chips">${state.cats.map(c => `<a class="chip" href="#/cat/${encodeURIComponent(c.id)}/${encodeURIComponent(c.name)}">${esc(c.name)}</a>`).join('')}</div></section>` : ''}
     </div>`;
   hero(latest.list.slice(0, 6));
-  observeRatings(view);
+  observeRatings(view); observeJav(view);
   if (!kids && !own && !adultSite) {
     // Which 豆瓣 rows to show is a per-browser setting (设置 → 首页豆瓣分类); only the enabled ones are fetched.
     const on = dbRows(), kinds = DB_ROWS.filter(([k]) => on[k]);
@@ -1216,7 +1219,7 @@ function hero(items) {
       if (code) javMeta(code).then(r => {
         if (items[i] !== it) return;
         if (r.found) {
-          const p = el.querySelector('.poster'); if (p && r.cover) p.style.cssText = bgLayers(it.pic, r.cover, 'l');
+          const p = el.querySelector('.poster'); if (p && r.cover && javCoverWanted(it)) p.style.cssText = bgLayers(it.pic, r.cover, 'l');
           const t = el.querySelector('.dbtag'); if (t) { t.textContent = r.score ? 'JAVDB ' + r.score : ''; t.hidden = !r.score; }
         } else dbRate(it.name, it.year).then(dbTag);
       });
@@ -1753,7 +1756,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         const h1 = $('.info h1', m);
         if (h1 && r.title && r.title !== d.name) h1.textContent = r.title;
         const p = $('.top .poster', m);
-        if (p && r.cover) p.style.cssText = bgLayers(d.pic, r.cover, 'l');
+        if (p && r.cover && javCoverWanted(d)) p.style.cssText = bgLayers(d.pic, r.cover, 'l');
         if (r.actors?.length) {
           const ap = $$('.people', m).find(x => x.querySelector('.plabel')?.textContent === '演员');
           if (ap) ap.outerHTML = people('演员', 'actor', r.actors, 16);
@@ -3497,6 +3500,26 @@ addEventListener('focus', async () => {
 
 // One recognition task at a time. While its sheet is open, any new clipboard text (a paste, the window regaining focus, or the
 // background check below) is analysed too and merged into the same list, so the result is given once, for everything.
+// POST /api/recognize/stream: NDJSON lines {t:'progress'|'ping'|'result'|'error'}; onProgress gets each progress line.
+async function recognizeStream(text, onProgress, signal) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (sessionStorage.pin) headers['X-Pin'] = sessionStorage.pin;
+  const r = await fetch('/api/recognize/stream', { method: 'POST', headers, body: JSON.stringify({ text }), signal });
+  if (!r.ok || !r.body) { const j = await r.json().catch(() => ({})); throw new Error(j.error || `HTTP ${r.status}`); }
+  const rd = r.body.getReader(), dec = new TextDecoder();
+  let buf = '', result = null, error = '';
+  const line = t => { if (!t.trim()) return; let m; try { m = JSON.parse(t); } catch { return; } if (m.t === 'progress') onProgress(m); else if (m.t === 'result') result = m; else if (m.t === 'error') error = m.error; };
+  for (;;) {
+    const { done, value } = await rd.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    for (let nl; (nl = buf.indexOf('\n')) >= 0;) { line(buf.slice(0, nl)); buf = buf.slice(nl + 1); }
+  }
+  line(buf + dec.decode());
+  if (error) throw new Error(error);
+  if (!result) throw new Error('识别中断了（服务端没有返回结果）');
+  return result;
+}
 let clipSess = null;
 // auto: the text was picked up by watching the clipboard (window focus / polling), not pasted or requested by the user.
 function recognizeFlow(text, auto) {
@@ -3518,15 +3541,18 @@ function openClipSession() {
         <button data-cbulk="setkids">设为 少儿</button><button data-cbulk="setadult">设为 成人</button><button data-cbulk="setstd">设为 标准（去掉标记）</button></div></span>
       <button class="small" data-cbulk="paste" title="读取当前剪贴板，并入这次识别">追加剪贴板</button>
       <span class="lan" data-cbulk="count"></span></div>
-    <div class="clipstatus" id="clipStatus"><div class="spinner mini"></div><span></span></div>
+    <div class="clipstatus" id="clipStatus"><div class="spinner mini"></div><div class="clipprog"><span></span><i class="bar" hidden><b></b></i><small></small></div></div>
     <div class="clipnote" id="clipNote" hidden></div>
     <div id="clipRows" class="cliprows"></div>
     <div id="clipUnknown"></div>
     <div class="actions clipfoot"><button class="btn red" id="clipAdd" disabled>分析中…</button><button class="small" id="clipCancel">取消</button><span class="lan" id="clipMsg"></span></div></div></div>`;
   document.body.append(m); document.body.style.overflow = 'hidden';
-  const all = [], keys = new Set(), unknown = new Set(), seen = new Set();
-  let pending = 0, saving = false, closed = false, texts = 0, updates = 0, done = false;   // done: the result has been handed over
-  const close = () => { closed = true; clearInterval(poll); closeBulkMenus(); m.remove(); clipSess = null; if (!$('#modal')) document.body.style.overflow = ''; };
+  const all = [], keys = new Set(), unknown = new Set(), seen = new Set(), notes = new Set();
+  let pending = 0, saving = false, closed = false, texts = 0, updates = 0, done = false;
+  const prog = { msg: '', done: 0, total: 0, long: false, t0: Date.now() };
+  const ctl = new AbortController();
+  const tick = setInterval(() => { if (pending && !closed) count(); }, 1000);   // done: the result has been handed over
+  const close = () => { closed = true; clearInterval(poll); clearInterval(tick); ctl.abort(); closeBulkMenus(); m.remove(); clipSess = null; if (!$('#modal')) document.body.style.overflow = ''; };
   // Same per-row controls as the settings list: 少儿 / 成人 checkboxes, then the status.
   const flagsHtml = (x, i) => { const off = x.exists || x.empty ? 'disabled' : ''; return `<label class="flag"><input type="checkbox" class="ckids" data-i="${i}" ${x.kids ? 'checked' : ''} ${off}>少儿</label><label class="flag"><input type="checkbox" class="cadult" data-i="${i}" ${x.adult ? 'checked' : ''} ${off}>成人</label>`; };
   const keyOf = x => x.kind === 'site' ? (x.text ? 't|' + x.text : x.members ? 'g|' + x.name + '|' + x.members.join(',') : 'a|' + x.api + '|' + (x.categories || []).join(','))
@@ -3551,7 +3577,13 @@ function openClipSession() {
     $('[data-cbulk=count]', m).textContent = tot ? `已选 ${n} / ${tot}` : '';
     $('[data-cbulk=all]', m).checked = n > 0 && n === tot;
     const st = $('#clipStatus', m); st.hidden = !busy;
-    if (busy) $('span', st).textContent = all.length ? `又有 ${pending} 段内容在分析，完成后并进下面的列表…` : '正在逐个打开链接确认类型，并检测点播源是否有内容、归哪一类（源多要等十几秒）…';
+    if (busy) {
+      const sp = $('.clipprog span', st), bar = $('.clipprog .bar', st), sm = $('.clipprog small', st);
+      sp.textContent = prog.msg || (all.length ? `又有 ${pending} 段内容在分析，完成后并进下面的列表…` : '正在逐个打开链接确认类型，并检测点播源是否有内容、归哪一类（源多要等十几秒）…');
+      const frac = prog.total ? Math.min(1, (prog.done || 0) / prog.total) : 0;
+      bar.hidden = !prog.total; if (prog.total) $('b', bar).style.width = frac * 100 + '%';
+      sm.textContent = prog.long ? `已用 ${Math.round((Date.now() - prog.t0) / 1000)} 秒 · 大仓库可能要几分钟，可以先去做别的，这个窗口会一直等到完成；不想等就点「取消」` : '';
+    }
   };
   const render = () => {
     syncFromDom();
@@ -3559,7 +3591,8 @@ function openClipSession() {
     box.innerHTML = all.length ? section('点播源', 'site') + section('直播源', 'live') : '';
     box.scrollTop = top;
     $('#clipTitle', m).textContent = all.length ? `剪贴板里识别到 ${all.length} 个源${texts > 1 ? `（合并 ${texts} 段内容）` : ''}` : '识别剪贴板';
-    $('#clipUnknown', m).innerHTML = unknown.size ? `<details class="lan"><summary>${unknown.size} 个链接没认出来</summary>${[...unknown].map(u => `<div class="curl">${esc(u)}</div>`).join('')}</details>` : '';
+    $('#clipUnknown', m).innerHTML = (notes.size ? `<div class="lan clipnotes">${[...notes].map(n => `<div>· ${esc(n)}</div>`).join('')}</div>` : '')
+      + (unknown.size ? `<details class="lan"><summary>${unknown.size} 个链接没认出来</summary>${[...unknown].map(u => `<div class="curl">${esc(u)}</div>`).join('')}</details>` : '');
     count();
   };
   const merge = r => {
@@ -3604,8 +3637,14 @@ function openClipSession() {
       toast('检测到剪贴板更新，已并入当前识别任务');
     }
     count();
-    req('POST', '/api/recognize', { text })
-      .then(merge, e => { toast('识别失败：' + e.message); })
+    if (/github\.com|gitee\.com|gitlab\.com|codeberg\.org|githubusercontent\.com/i.test(text)) prog.long = true;
+    prog.t0 = prog.t0 || Date.now();
+    recognizeStream(text, m => {
+      prog.msg = m.msg;
+      if (m.phase === 'scan' || m.phase === 'probe') { prog.done = m.done || 0; prog.total = m.total || 0; } else if (m.phase) { prog.done = 0; prog.total = m.total && m.phase === 'files' ? 0 : 0; }
+      if (!closed) count();
+    }, ctl.signal)
+      .then(r => { prog.msg = ''; prog.done = prog.total = 0; if (r.notes?.length) r.notes.forEach(n => notes.add(n)); merge(r); }, e => { if (e.name !== 'AbortError') toast('识别失败：' + e.message); })
       .finally(() => { pending--; if (!closed) settle(); });
   };
   // Keeps watching while the sheet is open (only possible when the browser already allows reading the clipboard).

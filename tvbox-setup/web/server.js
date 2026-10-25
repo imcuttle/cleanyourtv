@@ -7,6 +7,14 @@
 //   - /dl/<id>/ downloaded episodes, playable by every device on the LAN
 //   - /media/   本地媒体: scanned local folders as a built-in source (also /api/local/vod for TVBox)
 'use strict';
+// 入口保护 (guard.js): this file, run directly, only starts a watcher that runs itself as a child and restarts it after a crash
+// or a hang. The child (TVBOX_SUPERVISED=1) then forks the cluster workers. TVBOX_NO_SUPERVISOR=1 turns the outer watcher off.
+if (require('cluster').isPrimary && !process.env.TVBOX_SUPERVISED && process.env.TVBOX_NO_SUPERVISOR !== '1' && require.main === module) {
+  require('./auth').ensureToken();                       // token is made once, before any child needs it
+  require('./guard').supervise(__filename);
+  return;
+}
+const GUARD = require('./guard');
 const http = require('http');
 const fs = require('fs');
 const fsp = fs.promises;
@@ -46,13 +54,27 @@ function primary() {
   cluster.schedulingPolicy = cluster.SCHED_RR; // even spread, also on Windows
   let leader = null, media = null, announced = false, stopping = false;
   const pending = new Map(); // rpc id -> requesting worker
+  const dog = new GUARD.Watchdog(w => { try { w.process.kill('SIGKILL'); } catch {} });
+  const recycling = new Set();
+  // Graceful replacement: tell the worker to stop taking new connections and finish what it has; start the new one first
+  // (web workers) so there is no gap; the old one is killed after a grace period if it still has not exited.
+  const recycle = (w, why) => {
+    if (stopping || recycling.has(w.id)) return;
+    recycling.add(w.id);
+    if (w.role === 'web') fork('web');
+    try { w.send({ t: 'drain', why }); } catch {}
+    setTimeout(() => { try { w.process.kill('SIGKILL'); } catch {} }, 20e3).unref();
+  };
   const fork = role => {
     const w = cluster.fork({ TVBOX_LEADER: role === 'leader' ? '1' : '0', TVBOX_MEDIA: role === 'media' ? '1' : '0' });
     w.role = role;
+    dog.beat(w);
     if (role === 'leader') leader = w;
     if (role === 'media') media = w;
     w.on('message', m => {
       if (!m || typeof m !== 'object') return;
+      if (m.t === 'hb') { dog.beat(w); w.stats = m.stats; return; }
+      if (m.t === 'recycle') return recycle(w, m.why);
       if (m.t === 'rpc') {
         const to = MEDIA_OP.test(m.op) ? media : leader;
         if (!to || !to.isConnected()) return w.send({ t: 'rpc-res', id: m.id, error: '服务重启中，稍后再试' });
@@ -73,13 +95,26 @@ function primary() {
   fork('leader');
   for (let i = 1; i < WORKERS; i++) fork('web');
   fork('media');
+  // A worker that keeps dying right after it starts is restarted with a growing delay (1s … 30s), not in a tight loop.
+  const fails = {};
   cluster.on('exit', (w, code, sig) => {
+    dog.forget(w);
     if (stopping) return;
-    if (w.role === 'leader') leader = null;
-    if (w.role === 'media') media = null;
-    console.log(`  进程 ${w.process.pid}（${w.role}）退出（${sig || code}），1 秒后重启`);
-    setTimeout(() => fork(w.role), 1000);
+    if (w.role === 'leader' && leader === w) leader = null;
+    if (w.role === 'media' && media === w) media = null;
+    const wasRecycled = recycling.delete(w.id);
+    if (wasRecycled && w.role === 'web') return console.log(`  进程 ${w.process.pid}（web）已平滑退出，新进程已接手`);
+    const f = fails[w.role] = fails[w.role] || { n: 0, at: 0 };
+    f.n = Date.now() - f.at > 60e3 ? 1 : f.n + 1; f.at = Date.now();
+    const wait = wasRecycled ? 300 : Math.min(30e3, 1000 * 2 ** Math.min(f.n - 1, 5));
+    console.log(`  进程 ${w.process.pid}（${w.role}）${wasRecycled ? '已平滑退出' : '退出（' + (sig || code) + '）'}，${wait >= 1000 ? Math.round(wait / 1000) + ' 秒' : '马上'}后重启${f.n > 5 ? '（连续异常，请检查日志）' : ''}`);
+    setTimeout(() => fork(w.role), wait);
   });
+  dog.start(() => Object.values(cluster.workers).filter(w => w.isConnected()));
+  // tell the outer watcher the primary itself is alive; ask it for a full restart if every worker is gone for good
+  setInterval(() => { try { process.send?.({ t: 'hb' }); } catch {} }, 5000).unref();
+  process.on('uncaughtException', e => console.error('  [保护] 主进程异常（已拦截，继续运行）：', e && e.stack || e));
+  process.on('unhandledRejection', e => console.error('  [保护] 主进程未处理的 Promise 错误（已拦截）：', e && e.stack || e));
   for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { stopping = true; for (const w of Object.values(cluster.workers)) w.kill(); process.exit(0); });
 }
 
@@ -785,7 +820,9 @@ async function probeSites(sites, onProgress = () => {}) {
     while (next < todo.length) {
       const s = todo[next++];
       try {
-        const b = await cmsGet({ name: '', api: s.api }, { ac: 'list' }, true, 10000);
+        let b, err;
+        for (let k = 0; k < 2 && !b; k++) { try { b = await cmsGet({ name: '', api: s.api }, { ac: 'list' }, true, k ? 14000 : 9000); } catch (e) { err = e; } }   // one retry: a busy scan must not condemn a working source
+        if (!b) throw err;
         if (!(Number(b.total) > 0) && !(b.list || []).length) { s.ok = false; s.empty = true; s.info = '0 部内容，不导入'; continue; }
         const all = b.class || [], parents = new Set(all.map(c => str(c.type_pid)));
         const leaves = all.filter(c => !parents.has(str(c.type_id)));
@@ -2592,6 +2629,9 @@ async function api(route, q, res, req) {
     try { emit({ t: 'result', ...(await recognize(body.text, emit)) }); } catch (e) { emit({ t: 'error', error: e.message || String(e) }); }
     clearInterval(beat); return res.end();
   }
+  if (process.env.TVBOX_TEST_HOOKS === '1' && route === '_busy') { const t = Date.now() + (Number(q.get('ms')) || 3000); while (Date.now() < t); return send(res, 200, { ok: 1 }); }
+  if (process.env.TVBOX_TEST_HOOKS === '1' && route === '_throw') { setTimeout(() => { throw new Error('test boom'); }, 10); return send(res, 200, { ok: 1 }); }
+  if (route === 'health') return send(res, 200, { pid: process.pid, uptime: Math.round(process.uptime()), ...GUARD.stats, limits: global.__tvboxGuard?.limits || null });
   if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ffmpeg: !!FFMPEG, loopback: isLoopback(req) });
 
   // ---- 本地媒体: folders, scan, and the CMS API for TVBox / FongMi ----
@@ -3158,6 +3198,32 @@ function checkAuth(req, u) {
   return { ok: false, bad: true };
 }
 
+// ---- worker protection: heartbeat to the primary, memory / event-loop self check, drain on request, crash handlers ----
+{
+  const role = !cluster.isWorker ? '' : process.env.TVBOX_LEADER === '1' ? 'leader' : process.env.TVBOX_MEDIA === '1' ? 'media' : 'web';
+  let draining = false;
+  const drain = why => {
+    if (draining) return; draining = true;
+    console.log(`  [保护] ${role || 'main'} 进程 ${process.pid} 开始退出：${why}`);
+    try { server.close(); } catch {}                         // no new connections; the ones in flight finish
+    const done = () => process.exit(0);
+    const t = setInterval(() => { if (!openConns) done(); }, 500); t.unref?.();
+    setTimeout(done, 15e3).unref();
+  };
+  let openConns = 0;
+  const watch = GUARD.selfWatch({ role, recycle: why => {
+    if (cluster.isWorker) { try { process.send({ t: 'recycle', why }); } catch { drain(why); } }
+    else if (process.env.TVBOX_SUPERVISED) { try { process.send({ t: 'restart', why }); } catch {} }   // single-process mode: ask the outer watcher
+    else console.log('  [保护] 单进程且没有看守进程，只记录：' + why);
+  } });
+  if (cluster.isWorker) {
+    setInterval(() => { try { process.send({ t: 'hb', stats: GUARD.stats }); } catch {} }, 3000).unref();
+    process.on('message', m => { if (m && m.t === 'drain') drain(m.why || ''); });
+  }
+  process.on('uncaughtException', e => { console.error(`  [保护] ${role || 'main'} 未捕获的异常：`, e && e.stack || e); if (/EADDRINUSE|ENOMEM|out of memory/i.test(String(e && (e.code || e.message)))) process.exit(1); });
+  process.on('unhandledRejection', e => console.error(`  [保护] ${role || 'main'} 未处理的 Promise 错误（已拦截）：`, e && e.stack || e));
+  global.__tvboxGuard = { limits: watch.limits, track: s => { openConns++; s.on('close', () => { openConns--; }); } };
+}
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   const guarded = /^\/(api|hls|img|dl|media)(\/|$)/.test(u.pathname);
@@ -3185,6 +3251,7 @@ const server = http.createServer(async (req, res) => {
     else res.destroy();
   }
 });
+server.on('connection', s => global.__tvboxGuard.track(s));
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 if (!MEDIA_ONLY) server.listen(PORT, HOST, () => {

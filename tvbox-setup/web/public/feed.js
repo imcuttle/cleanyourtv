@@ -215,7 +215,7 @@ function bind(s, i) {
   if (!it) { s.bg.style.cssText = ''; s.cover.style.cssText = ''; s.el.classList.remove('hascover'); return; }
   paintCover(s, it);
   // 成人: javdb knows the right cover for a 番号 (what the card swaps in) — repaint once it is known, cached after the first time
-  if (it.adult && state.level === 'all') { const code = javCode(it.name); if (code) javMeta(code).then(r => { if (s.it === it && r.found && r.cover) paintCover(s, it); }); }
+  if (it.adult && state.level === 'all') { const code = javCode(it.name); if (code) javMeta(code).then(r => { if (s.it === it && r.found && r.cover && javCoverWanted(it)) paintCover(s, it); }); }
   s.el.classList.remove('framed');
   s.h2.textContent = it.name; s.meta.textContent = ''; s.blurb.textContent = '';
   if (it._d) return ready(s, it._d);

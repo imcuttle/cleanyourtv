@@ -65,6 +65,14 @@ then keep it for good (HttpOnly cookie + localStorage backup). One gate in front
 
 The server runs one worker per CPU core (`node:cluster`, set `WORKERS=n` to override); downloads,
 config writes, ffmpeg and 豆瓣 rate-limiting live in one leader worker the others talk to over IPC.
+
+Self-protection (`web/guard.js`): `node server.js` first starts a thin watcher that runs the real server as a child and restarts it
+after a crash or when its heartbeat stops (backoff 1 s → 30 s). Inside, the primary watches the workers: a worker whose heartbeat
+stops for 30 s is killed and restarted; a worker over its memory limit or whose event loop stays slow is replaced gracefully (the
+new one starts first, the old one stops taking connections and finishes what it has), so users see no failed requests. Uncaught
+errors are logged instead of killing a worker. `GET /api/health` shows the current memory / loop lag. Tunables (env or `.env`):
+`TVBOX_MAX_RSS_MB` (default 20 % of RAM, 512–2048), `TVBOX_LAG_MS` (1500) and `TVBOX_LAG_WINDOWS` (4 × 5 s), `TVBOX_HANG_MS`
+(30000), `TVBOX_MIN_LIFE_MS` (60000), `TVBOX_NO_SUPERVISOR=1` to run without the outer watcher.
 Static files are held in memory pre-gzipped, JSON responses are gzipped, identical upstream requests
 in flight are shared, and the stream relay drops its upstream fetch when the browser goes away. On
 the page side every read belongs to the current view — switching pages aborts what is still pending,
