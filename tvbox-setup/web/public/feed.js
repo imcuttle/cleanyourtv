@@ -125,17 +125,19 @@ function layoutLand(s) {
 function mkSlide() {
   const el = document.createElement('section');
   el.className = 'fd-slide empty';
-  el.innerHTML = `<div class="fd-bg"></div><video playsinline webkit-playsinline preload="auto"></video><div class="fd-shade"></div>
+  el.innerHTML = `<div class="fd-bg"></div><div class="fd-cover"></div><video playsinline webkit-playsinline preload="auto"></video><div class="fd-shade"></div>
     <div class="fd-wait"></div><div class="fd-pause">${I.play}</div>
     <button class="fd-full" data-a="full" aria-label="全屏观看">${I.fs}<span>全屏观看</span></button>
     <div class="fd-info"><h2></h2><div class="m"></div><p></p></div><div class="fd-msg"></div>`;
   slidesBox.append(el);
-  const s = { el, video: el.querySelector('video'), bg: el.querySelector('.fd-bg'), h2: el.querySelector('h2'), meta: el.querySelector('.m'), blurb: el.querySelector('p'), msg: el.querySelector('.fd-msg'),
+  const s = { el, video: el.querySelector('video'), bg: el.querySelector('.fd-bg'), cover: el.querySelector('.fd-cover'), h2: el.querySelector('h2'), meta: el.querySelector('.m'), blurb: el.querySelector('p'), msg: el.querySelector('.fd-msg'),
     i: -1, it: null, d: null, line: 0, ep: 0, eps: [], startAt: 0, hls: null, via: false, loading: false, pre: false, err: false, watched: 0, lastT: 0, judged: true, lastSave: 0 };
   const v = s.video;
   { const vol = parseFloat(localStorage.playerVolume); if (Number.isFinite(vol)) v.volume = Math.min(1, Math.max(0, vol)); }   // same level as the main player
   for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize']) v.addEventListener(ev, () => layoutLand(s));   // HLS 的画面尺寸有时晚一点才知道
   v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); });
+  const framed = () => { if (v.readyState >= 2 && v.videoWidth) el.classList.add('framed'); };
+  for (const ev of ['loadeddata', 'canplay', 'playing', 'seeked', 'timeupdate']) v.addEventListener(ev, framed);
   v.addEventListener('waiting', () => { if (s === cur()) el.classList.add('wait'); });
   v.addEventListener('canplay', () => el.classList.remove('wait'));
   v.addEventListener('progress', () => { if (s === cur() && aheadOf(v) >= 6) kick(); });
@@ -178,7 +180,7 @@ function teardown(s) {
   const v = s.video;
   v.onerror = null; v.onloadedmetadata = null;
   v.pause(); v.removeAttribute('src'); v.removeAttribute('poster'); v.load();
-  s.lastT = 0; s.el.classList.remove('wait', 'paused', 'land');   // 换片: 上一部的横屏上提不带到下一部
+  s.lastT = 0; s.el.classList.remove('wait', 'paused', 'land', 'framed');   // 换片: 上一部的横屏上提不带到下一部
 }
 
 // What to play for a title: its saved place if it has one, else the first episode of the first line.
@@ -197,22 +199,31 @@ function paintInfo(s) {
   s.blurb.textContent = d.blurb || it.blurb || '';
   fitBlurb(s);
 }
+// Background + cover of a slide use the SAME picture the title's card shows (for 成人 titles that is javdb's cover when there is one).
+function paintCover(s, it) {
+  const pic = cardPic(it);
+  s.bg.style.cssText = bg(dbSize(pic, 's') || pic);
+  s.cover.style.cssText = pic && it.adult ? (dbSize(pic, 'l') || dbSize(pic, 'm') ? `background-image:${cssUrl(dbSize(pic, 'm') || pic)},${cssUrl(dbSize(pic, 's') || pic)}` : bg(pic)) : '';
+  s.el.classList.toggle('hascover', !!pic && !!it.adult);
+}
 function bind(s, i) {
   teardown(s);
   const it = F.items[i] || null;
   Object.assign(s, { i, it, d: null, err: false, watched: 0, judged: !it, loading: false, via: false, pre: false });
   s.msg.textContent = '';
   s.el.classList.toggle('empty', !it);
-  if (!it) { s.bg.style.cssText = ''; return; }
-  const pic = it.pic || '';
-  s.bg.style.cssText = bg(dbSize(pic, 's') || pic);
+  if (!it) { s.bg.style.cssText = ''; s.cover.style.cssText = ''; s.el.classList.remove('hascover'); return; }
+  paintCover(s, it);
+  // 成人: javdb knows the right cover for a 番号 (what the card swaps in) — repaint once it is known, cached after the first time
+  if (it.adult && state.level === 'all') { const code = javCode(it.name); if (code) javMeta(code).then(r => { if (s.it === it && r.found && r.cover) paintCover(s, it); }); }
+  s.el.classList.remove('framed');
   s.h2.textContent = it.name; s.meta.textContent = ''; s.blurb.textContent = '';
   if (it._d) return ready(s, it._d);
   validate(it).then(d => { if (s.it !== it) return; if (!d) { s.err = true; s.msg.textContent = '这部暂时播不了'; return; } it._d = d; ready(s, d); });
 }
 function ready(s, d) {
   s.d = d; pickStart(s); paintInfo(s);
-  const pic = s.it.pic || '';
+  const pic = cardPic(s.it);
   if (pic) s.video.poster = img(dbSize(pic, 'm') || pic);
   attach(s);
   if (s === cur()) syncRail(); else if (cur()?.d && aheadOf(cur().video) >= 6) startPre(s);

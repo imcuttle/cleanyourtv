@@ -1280,3 +1280,18 @@ html.cs-big .card .img img { image-rendering: auto; }
   html.wide-cards .grid { grid-template-columns: repeat(auto-fill, minmax(calc(150px * var(--cs)), 1fr)); }
 }
 .mseg.cssz button { min-width: 2.2em; }
+
+/* player: the card's cover stands in for the picture until the first frame arrives */
+.pcover { position: absolute; inset: 0; z-index: 1; pointer-events: none; background: #000; transition: opacity .25s; }
+.pcover[hidden] { display: none; }
+.pcover.gone { opacity: 0; }
+.pcbg { position: absolute; inset: -6%; background-size: cover; background-position: center; filter: blur(30px) brightness(.5) saturate(1.15); }
+.pcimg { position: absolute; inset: 7% 0; background-size: contain; background-position: center; background-repeat: no-repeat; filter: drop-shadow(0 12px 40px #000a); }
+#player .pbar, #player .ctrl, #player .pcenter, #player .pmsg { z-index: 3; }
+
+/* 沉浸: until the first frame, the title's cover is the picture (contain, sharp) instead of a black screen */
+.fd-cover { position: absolute; inset: 0; background-size: contain; background-position: center; background-repeat: no-repeat; opacity: 0; transition: opacity .25s; pointer-events: none; }
+.fd-slide.hascover:not(.framed):not(.empty) .fd-cover { opacity: 1; }
+.fd-slide video { z-index: 1; }
+.fd-slide:not(.framed).hascover video { opacity: 0; }
+.fd-slide.framed video { opacity: 1; transition: opacity .2s; }

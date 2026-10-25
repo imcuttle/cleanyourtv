@@ -409,6 +409,8 @@ const javLead = name => {
   const at = n.search(re);
   return at >= 0 && at <= 10 ? code : '';
 };
+// The picture a card ends up showing: javdb's cover when it has one for this 番号 (the card swaps it in), else the source's own.
+const cardPic = it => { const c = it && isJav(it) ? javCache[javCode(it.name)] : null; return (c && c.found && c.cover) || it?.pic || ''; };
 const isJav = it => !!(it && (it.adult || javLead(it.name)));
 const javCache = JSON.parse(localStorage.javdb || '{}');
 // Cached: found for 30 days; "javdb has no such code" for 3 days (a real answer). Errors / unreachable mirrors are never cached.
@@ -2004,6 +2006,18 @@ function paintVodActs() {
 function setL(act, text) { const b = $(`[data-act=${act}]`); if (!b) return; const l = $('.l', b); if (l) l.textContent = text; b.title = text; }
 function paintStar(on) { const b = $('[data-act=star]'); b.classList.toggle('on', on); setL('star', on ? '已收藏' : '收藏'); }
 function msg(t) { $('.pmsg').textContent = t || ''; }
+// 成人源 only: until the first frame is on screen the card's cover is shown (blurred backdrop + the sharp picture), not a black screen.
+// Hidden again by the first 'playing' / 'loadeddata' frame, and for live channels / local files without a cover.
+const pcover = $('.pcover');
+function showCover(url) {
+  if (!pcover) return;
+  if (!url) { pcover.hidden = true; return; }
+  const small = dbSize(url, 's') || url, big = dbSize(url, 'l') || url;
+  $('.pcbg', pcover).style.cssText = bg(small);
+  $('.pcimg', pcover).style.cssText = big === small ? bg(small) : `background-image:${cssUrl(big)},${cssUrl(small)}`;
+  pcover.classList.remove('gone'); pcover.hidden = false;
+}
+function hideCover() { if (!pcover || pcover.hidden) return; pcover.classList.add('gone'); setTimeout(() => { if (pcover.classList.contains('gone')) pcover.hidden = true; }, 260); }
 function load(url, startAt, viaProxy, isLocal) {
   if (hls) { hls.destroy(); hls = null; }
   const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : url;
@@ -2012,6 +2026,7 @@ function load(url, startAt, viaProxy, isLocal) {
   playingSrc = { src, hls: !direct };
   pvReset();
   msg('加载中…');
+  showCover(cur?.kind === 'vod' && cur.d?.adult ? cardPic(cur.d) : '');   // adult sources only
   const seek = () => { if (startAt) video.currentTime = startAt; video.play().catch(() => msg('点一下播放')); };
   const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集/换个源试试'); };
   if (window.Hls && Hls.isSupported() && !direct) {
@@ -2026,6 +2041,9 @@ function load(url, startAt, viaProxy, isLocal) {
   }
 }
 video.addEventListener('playing', () => msg(''));
+video.addEventListener('timeupdate', () => { if (video.currentTime > 0 && video.readyState >= 2) hideCover(); });
+video.addEventListener('playing', hideCover);
+video.addEventListener('error', hideCover);
 video.addEventListener('waiting', () => msg('缓冲中…'));
 video.addEventListener('ended', () => { if (cur && cur.ep < cur.eps.length - 1) step(1); });
 let lastSave = 0;
@@ -2071,7 +2089,7 @@ function closePlayer() {
   video.pause(); video.removeAttribute('src'); video.load();
   if (ms) { try { ms.metadata = null; ms.playbackState = 'none'; } catch {} }
   if (pipOn) { pipOn = false; player.classList.remove('pip'); document.exitPictureInPicture?.().catch(() => {}); }
-  player.hidden = true; togglePlist(false); msg(''); setLock(false); setBright(1);
+  player.hidden = true; togglePlist(false); msg(''); setLock(false); setBright(1); if (pcover) pcover.hidden = true;
   if (!$('#modal')) document.body.style.overflow = '';
   $('#modal')?.refresh?.();
   cur = null;
