@@ -1302,3 +1302,5 @@ html.cs-big .card .img img { image-rendering: auto; }
 .clipprog .bar b { display: block; height: 100%; width: 0; background: #54b9c5; transition: width .25s; }
 .clipprog small { color: #9fd8df99; font-size: 12px; } .clipprog small:empty { display: none; }
 .clipnotes { margin: 4px 0; line-height: 1.6; }
+.sheet .top .poster.sk { opacity: 1; }
+.sheet .top .info h1 { min-height: 1.2em; }

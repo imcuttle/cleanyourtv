@@ -1669,7 +1669,15 @@ async function openDetail(site, id, autoplay = false, replace = false) {
   closeDetail();
   const m = document.createElement('div');
   m.className = 'modal'; m.id = 'modal';
-  m.innerHTML = `<div class="sheet">${spinner}</div>`;
+  // The card that was clicked already has its picture loaded: show it at once (cover + title) instead of a bare spinner, and keep
+  // that very node when the details arrive, so the cover never blinks out and back in.
+  const known = cardItems.get(site + '|' + id);
+  m.innerHTML = known && known.pic
+    ? `<div class="sheet"><div class="top"><div class="bg" style="${bg(dbSize(known.pic, 's') || known.pic)}"></div><div class="poster sk" style="${bgHi(known.pic, 'm')}"></div>
+        <button class="close">✕</button><div class="info"><h1>${esc(known.name || '')}</h1></div></div><div class="body">${spinner}</div></div>`
+    : `<div class="sheet">${spinner}</div>`;
+  m.querySelector('.close') && (m.querySelector('.close').onclick = () => history.back());
+  const skPoster = m.querySelector('.poster.sk');
   m.onclick = e => { if (e.target === m) history.back(); };
   m.ctl = new AbortController();
   document.body.append(m); document.body.style.overflow = 'hidden';
@@ -1715,6 +1723,16 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         <h3>其他源</h3><div class="alts" id="alts"><span class="lan">在所有源里搜索中…</span></div>
       </div>`;
     m.querySelector('.close').onclick = () => history.back();
+    // The cover node lives for the whole sheet: the skeleton's node (already painted from the card) is moved into every render,
+    // so opening a card never shows the picture blinking out and back in.
+    { const np = $('.top .poster', m);
+      if (!m._poster) m._poster = skPoster || np;
+      if (np && np !== m._poster) {
+        const keep = m._poster;
+        for (const a of [...keep.attributes]) if (a.name !== 'style') keep.removeAttribute(a.name);
+        for (const a of [...np.attributes]) keep.setAttribute(a.name, a.value);       // class / data-pv / the real (possibly sharper) style
+        np.replaceWith(keep);
+      } }
     $$('[data-line]', m).forEach(b => b.onclick = () => { line = +b.dataset.line; render(); });
     $$('[data-ep]', m).forEach(b => b.onclick = e => { if (!plainClick(e)) return; e.preventDefault(); play(d, line, +b.dataset.ep); });
     // In 下载 mode a chip starts that episode; tapping it again pauses / resumes it.
