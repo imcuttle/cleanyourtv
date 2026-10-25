@@ -93,7 +93,7 @@ const saveLikes = () => { localStorage.feedLikes = JSON.stringify([...likes].sli
 
 // ---------- state ----------
 const F = { recN: 0, names: new Set(), gen: 0, mode: 'rec', extra: null, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
-  pool: [], pcount: {}, cats: null, catsSite: '', catPg: 0, catCount: 1, once: false, dir: 1,
+  pool: [], pcount: {}, cats: null, catsSite: '', catUsed: new Set(), catCount: 1, once: false, dir: 1,
   muted: localStorage.feedMuted === '1', userPaused: false };
 const AHEAD = 6;                                    // titles kept validated (detail fetched) beyond the current one
 
@@ -392,25 +392,48 @@ async function recMore(gen) {
   if (!out.length && seen.size) { seen.clear(); localStorage.feedSeen = '[]'; }   // everything seen: start over
   return out;
 }
+const poolAdd = list => {
+  const keys = new Set(F.pool.map(keyOf)), names = new Set(F.pool.map(nameOf));
+  for (const it of list) if (!F.keys.has(keyOf(it)) && !F.names.has(nameOf(it)) && !keys.has(keyOf(it)) && !names.has(nameOf(it))) { F.pool.push(it); keys.add(keyOf(it)); names.add(nameOf(it)); }
+};
+const drainPool = n => { const out = []; while (out.length < n && F.pool.length) out.push(out.length % 2 ? takeBest(F.pool) : takeRandom(F.pool)); return out; };
 async function moreCands(gen) {
   const m = F.mode, fresh = list => list.filter(it => !F.keys.has(keyOf(it)));
   if (m === 'rec') return fresh(await recMore(gen));
+  // 分类 / 搜索 的沉浸按钮: 随机播放 + 按喜好推荐 (一随机、一按口味, 交替); 从卡片右键进入的 'list' 则严格按列表顺序
   if (m === 'cat') {
-    if (F.catPg >= F.catCount) return [];
-    const x = F.extra, j = await api('list', { site: x.site, t: x.t, pg: F.catPg + 1 }, null);
-    F.catPg = j.page; F.catCount = j.pagecount;
-    return fresh(j.list);
+    const x = F.extra;
+    while (F.pool.length < 6 && F.catUsed.size < F.catCount) {
+      let pg = 1;
+      if (F.catUsed.size) do pg = 1 + Math.floor(Math.random() * F.catCount); while (F.catUsed.has(pg));
+      F.catUsed.add(pg);
+      const j = await api('list', { site: x.site, t: x.t, pg }, null);
+      if (gen !== F.gen) return [];
+      F.catCount = j.pagecount || 1;
+      poolAdd(j.list || []);
+    }
+    return drainPool(6);
+  }
+  if (m === 'search') {
+    if (!F.once) {
+      F.once = true;
+      const j = await api('search', { wd: F.extra.q, ...(F.extra.scope ? { site: F.extra.scope } : {}) }, null);
+      if (gen !== F.gen) return [];
+      poolAdd(j.results || []);
+    }
+    return drainPool(6);
+  }
+  if (m === 'fav' || m === 'hist') {
+    if (!F.once) {
+      F.once = true;
+      const ok = it => state.sites.some(s => s.key === it.site);
+      poolAdd((m === 'fav' ? favs : hist).list().filter(ok));
+    }
+    return drainPool(6);
   }
   if (F.once) return [];
   F.once = true;
-  const ok = it => state.sites.some(s => s.key === it.site);
-  if (m === 'fav') return fresh(favs.list().filter(ok));
-  if (m === 'hist') return fresh(hist.list().filter(ok));
-  if (m === 'search') {
-    const j = await api('search', { wd: F.extra.q, ...(F.extra.scope ? { site: F.extra.scope } : {}) }, null), nq = normName(F.extra.q);
-    const rank = it => it.name === F.extra.q ? 0 : normName(it.name).includes(nq) ? 1 : 2;
-    return fresh(j.results.sort((a, b) => rank(a) - rank(b)));
-  }
+  if (m === 'list') { const a = F.extra.items, k = F.extra.start || 0; return fresh(a.slice(k).concat(a.slice(0, k))); }
   return [];
 }
 // Keeps `AHEAD` validated titles in front of the viewer. Three details are fetched at a time and appended in order
@@ -484,6 +507,7 @@ function modeLabel() {
   if (F.mode === 'rec') return '推荐';
   if (F.mode === 'cat') return '分类 · ' + (x?.name || '全部');
   if (F.mode === 'search') return '搜索 · ' + (x?.q || '');
+  if (F.mode === 'list') return x?.label || '列表';
   return { fav: '我的收藏', hist: '继续观看' }[F.mode];
 }
 function startMode(mode, extra) {
@@ -491,7 +515,7 @@ function startMode(mode, extra) {
   F.names = new Set();
   ring.forEach(s => { teardown(s); Object.assign(s, { i: -1, it: null, d: null }); s.el.classList.add('empty'); });
   Object.assign(F, { gen: F.gen + 1, mode, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
-    pool: [], once: false, catPg: 0, catCount: 1, userPaused: false });
+    pool: [], once: false, catUsed: new Set(), catCount: 1, userPaused: false });
   if (extra) F.extra = extra;
   root.classList.add('booting'); bootEl.classList.remove('empty'); bootEl.querySelector('span').textContent = '正在为你挑选…';
   closeOverlays();
@@ -502,7 +526,7 @@ function startMode(mode, extra) {
 function renderMenu() {
   const x = F.extra, kids = kidsMode();
   const entries = [['rec', '推荐 · ' + (state.sites.find(s => s.key === state.site)?.name || '')]];
-  if (x && (x.mode === 'cat' || x.mode === 'search')) entries.push([x.mode, x.mode === 'cat' ? '分类 · ' + (x.name || '全部') : '搜索 · ' + x.q]);
+  if (x && (x.mode === 'cat' || x.mode === 'search' || x.mode === 'list')) entries.push([x.mode, x.mode === 'cat' ? '分类 · ' + (x.name || '全部') : x.mode === 'search' ? '搜索 · ' + x.q : x.label || '列表']);
   if (!kids) entries.push(['fav', '我的收藏']);
   entries.push(['hist', '继续观看']);
   menuEl.innerHTML = entries.map(([k, n]) => `<button data-m="${k}" class="${k === F.mode ? 'on' : ''}">${esc(n)}</button>`).join('') + '<hr><button data-m="reset" class="dim">重置推荐偏好</button>';
@@ -768,7 +792,7 @@ function openFeed(o = {}) {
   root.hidden = false; document.body.style.overflow = 'hidden';
   root.style.setProperty('--dy', '0px'); root.style.setProperty('--p', 0); root.style.setProperty('--b', 0);
   setMuted(F.muted, false);
-  F.extra = o.mode === 'cat' || o.mode === 'search' ? o : null;
+  F.extra = o.mode === 'cat' || o.mode === 'search' || o.mode === 'list' ? o : null;
   startMode(mode);
   lastP = lastB = -1; cancelAnimationFrame(raf); raf = requestAnimationFrame(tick);
 }

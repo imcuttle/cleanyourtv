@@ -855,6 +855,7 @@ const playHref = (site, id, line, ep) => `#/play/${encodeURIComponent(site)}/${e
 // Plain clicks are handled in-page; ⌘/Ctrl/Shift/Alt/middle click fall through to the browser (new tab / window).
 const plainClick = e => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
 function card(it, opts = {}) {
+  if (!it.douban && it.site) cardItems.set(it.site + '|' + it.id, it);
   const h = it.site && hist.get(it.site, it.id);
   const pct = h && h.dur ? Math.min(100, (h.t / h.dur) * 100) : 0;
   const href = it.douban ? `#/find/${encodeURIComponent(it.name)}` : vodHref(it.site, it.id);
@@ -881,14 +882,93 @@ document.addEventListener('click', e => {
   }
   if (!plainClick(e)) return;
   e.preventDefault();
-  // Single click → detail (after 240 ms, so a second click can turn it into 直接播放); double click → play / resume at once.
-  clearTimeout(cardClickT);
-  if (cardClickEl === c && e.detail >= 2) { cardClickEl = null; return playDirect(c); }
-  cardClickEl = c;
-  cardClickT = setTimeout(() => { cardClickEl = null; if (c.dataset.db !== undefined) openByName(c.dataset.db); else openDetail(c.dataset.site, c.dataset.id); }, 240);
+  if (c.dataset.db !== undefined) openByName(c.dataset.db); else openDetail(c.dataset.site, c.dataset.id);
 });
-let cardClickT = 0, cardClickEl = null;
-// Double-click on a card: no detail sheet. Resumes where this title was left (or starts at the first episode).
+// ---------- 卡片菜单: 右键 (PC) / 长按 (手机) → 影片播放 (原模式) | 沉浸播放 (沉浸模式) ----------
+// 沉浸播放从这张卡片开始, 按它所在列表 (一行 / 一个网格) 的顺序往下放; 分类 / 搜索页顶部的沉浸按钮才是随机 + 按喜好推荐。
+// 电脑右键 = 鼠标位置的小菜单; 手机长按 = 底部上拉浮窗 (同点播源 / 直播源的底部抽屉: 虚化遮罩, 点遮罩收起)
+let ctxEl = null, ctxCard = null, ctxSheet = false, ctxAt = 0, lpT = 0, lpXY = null, lpFired = 0;
+function closeCardMenu() {
+  if (!ctxEl) return;
+  ctxEl.remove(); ctxEl = null;
+  if (ctxSheet) { sheetScrim.hidden = true; document.body.classList.remove('sheet-open', 'card-sheet'); ctxSheet = false; }
+  ctxCard?.classList.remove('lp'); ctxCard = null;
+}
+function openCardMenu(c, x, y, sheet) {
+  closeCardMenu();
+  ctxCard = c; c.classList.add('lp'); ctxAt = Date.now();
+  const m = ctxEl = document.createElement('div');
+  m.className = 'ctxm' + (sheet ? ' csheet' : '');
+  m.innerHTML = `${sheet ? `<div class="chead">${esc(c.querySelector('.name')?.textContent || '')}</div>` : ''}<button data-ctx="play">${IC.play}影片播放</button><button data-ctx="feed">${IC.feed}沉浸播放</button>`;
+  document.body.append(m);
+  if (sheet) { ctxSheet = true; sheetScrim.hidden = false; document.body.classList.add('sheet-open', 'card-sheet'); }
+  else {
+    const r = m.getBoundingClientRect();
+    m.style.left = Math.max(8, Math.min(x, innerWidth - r.width - 8)) + 'px';
+    m.style.top = Math.max(8, Math.min(y, innerHeight - r.height - 8)) + 'px';
+  }
+  m.addEventListener('click', e => {
+    const b = e.target.closest('[data-ctx]'); if (!b) return;
+    e.stopPropagation();
+    closeCardMenu();
+    if (b.dataset.ctx === 'play') playDirect(c); else feedFromCard(c);
+  });
+}
+async function feedFromCard(c) {
+  const box = c.closest('.scroller, .grid') || c.parentElement;
+  const label = c.closest('.row')?.querySelector('h2')?.textContent.trim() || $('#view h1')?.textContent.trim() || '列表';
+  let items = [...box.querySelectorAll('.card')].map(el => el === c || el.dataset.db === undefined ? [el, cardItems.get(el.dataset.site + '|' + el.dataset.id)] : null).filter(p => p && (p[0] === c || p[1]));
+  let start = Math.max(0, items.findIndex(p => p[0] === c));
+  items = items.map(p => p[1]);
+  if (c.dataset.db !== undefined) {                       // 豆瓣 card: 先在源里找到这部
+    const t = toast('正在打开沉浸播放…', true);
+    try {
+      const hit = await findTitle(c.dataset.db, new AbortController().signal);
+      t.remove();
+      if (!hit) return toast(`没找到「${c.dataset.db}」`);
+      items[start] = hit;
+    } catch (err) { t.remove(); if (!isAbort(err)) toast(err.message); return; }
+  }
+  items = items.filter(Boolean);
+  if (!items.length) return;
+  start = Math.min(start, items.length - 1);
+  window.openFeed({ mode: 'list', items, start, label });
+}
+const cardOf = e => e.target.closest?.('#view .card');
+document.addEventListener('contextmenu', e => {
+  const c = cardOf(e); if (!c || e.target.closest('.rm')) return;
+  e.preventDefault();
+  openCardMenu(c, e.clientX, e.clientY);
+});
+document.addEventListener('touchstart', e => {
+  clearTimeout(lpT);
+  if (e.touches.length !== 1) return;
+  const c = cardOf(e); if (!c || e.target.closest('.rm')) return;
+  const t = e.touches[0]; lpXY = [t.clientX, t.clientY];
+  lpT = setTimeout(() => {
+    lpFired = Date.now();
+    if (navigator.vibrate) navigator.vibrate(10);
+    openCardMenu(c, 0, 0, true);
+  }, 500);
+}, { passive: true });
+document.addEventListener('touchmove', e => {
+  if (!lpT) return;
+  const t = e.touches[0];
+  if (Math.hypot(t.clientX - lpXY[0], t.clientY - lpXY[1]) > 10) clearTimeout(lpT);
+}, { passive: true });
+for (const ev of ['touchend', 'touchcancel']) document.addEventListener(ev, () => clearTimeout(lpT), { passive: true });
+// 长按松手后浏览器会补一个 click: 吞掉, 不然会打开详情
+document.addEventListener('click', e => {
+  if (Date.now() - lpFired < 700 && cardOf(e)) { e.preventDefault(); e.stopImmediatePropagation(); lpFired = 0; }
+}, true);
+// 手机浮窗只由遮罩的 click 收起: 在 pointerdown 就收的话, 随后的 click 会穿透到背后的卡片
+document.addEventListener('pointerdown', e => { if (ctxEl && !ctxSheet && !e.target.closest('.ctxm')) closeCardMenu(); }, true);
+addEventListener('scroll', () => { if (!ctxSheet) closeCardMenu(); }, true);
+sheetScrim.addEventListener('click', e => { if (!ctxSheet) return; e.preventDefault(); e.stopPropagation(); if (Date.now() - ctxAt > 400) closeCardMenu(); });   // 长按松手补的那一下 click 不算
+addEventListener('resize', () => { if (!ctxSheet) closeCardMenu(); });
+addEventListener('keydown', e => { if (e.key === 'Escape') closeCardMenu(); });
+const cardItems = new Map();
+// 卡片菜单「影片播放」: no detail sheet. Resumes where this title was left (or starts at the first episode).
 async function playDirect(c) {
   const t = toast('正在打开播放…', true);
   try {
