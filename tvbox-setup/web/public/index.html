@@ -14,7 +14,7 @@
 <link rel="icon" href="icon.svg">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=20261026b">
+<link rel="stylesheet" href="style.css?v=20261026n">
 <style>
 /* 访问令牌蒙层。html 的 data-auth 属性由服务端写：1 已登录（蒙层从头到尾不存在）、0 未登录（首帧就是登录框）；
    pending = 正在用浏览器里记住的令牌自动登录（只显示 logo，不闪登录框）。没有这个属性 = 离线缓存的页面，按 pending 处理。 */
@@ -235,7 +235,7 @@ html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
 
 <script>if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));</script>
 <script src="vendor/hls.min.js"></script>
-<script src="app.js?v=20261026b"></script>
-<script src="feed.js?v=20261026b"></script>
+<script src="app.js?v=20261026n"></script>
+<script src="feed.js?v=20261026n"></script>
 </body>
 </html>

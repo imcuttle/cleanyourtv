@@ -99,14 +99,28 @@ const AHEAD = 6;                                    // titles kept validated (de
 
 // ---------- slides ----------
 // 横屏视频 (竖屏手机上): 画面往上提一些 (同抖音), 下面出一个「全屏观看」按钮
+// 简介的行数: 竖屏 / 非横屏视频固定 2 行; 横屏视频 (画面上提, 下面空出一大块) 按可用高度多显示几行, 只要不压到视频和「全屏观看」按钮
+function fitBlurb(s) {
+  const info = s.el.querySelector('.fd-info'), p = s.blurb;
+  let lines = 2;
+  if (s.el.classList.contains('land') && p.textContent && !s.el.classList.contains('empty')) {
+    const H = root.clientHeight, bottom = parseFloat(getComputedStyle(info).bottom) || 0;
+    const top = (parseFloat(s.el.style.getPropertyValue('--lbtn')) || 0) + 28 + 10;      // 按钮下沿再留一点空隙
+    const room = H - bottom - top - s.h2.offsetHeight - s.meta.offsetHeight - 14;        // 14 = 标题和元信息下面的间距
+    lines = Math.max(2, Math.min(12, Math.floor(room / 19.5)));
+  }
+  p.style.webkitLineClamp = String(lines);
+}
 function layoutLand(s) {
   const v = s.video, W = root.clientWidth, H = root.clientHeight;
-  const land = !!v.videoWidth && v.videoWidth > v.videoHeight * 1.15 && H > W * 1.2;
+  if (!v.videoWidth || !W) return;   // 还不知道尺寸 (或沉浸层没显示): 保持原状, 不要把已有的上提取消掉
+  const land = v.videoWidth > v.videoHeight * 1.15 && H > W * 1.2;
   s.el.classList.toggle('land', land);
-  if (!land) return;
-  const vh = W * v.videoHeight / v.videoWidth, shift = H * .1;
+  if (!land) { fitBlurb(s); return; }
+  const vh = W * v.videoHeight / v.videoWidth, shift = H * .09;
   s.el.style.setProperty('--lshift', shift + 'px');
-  s.el.style.setProperty('--lbtn', Math.round(H / 2 - shift + vh / 2 + 14) + 'px');
+  s.el.style.setProperty('--lbtn', Math.round(H / 2 - shift + vh / 2 + 18) + 'px');
+  fitBlurb(s);
 }
 function mkSlide() {
   const el = document.createElement('section');
@@ -119,7 +133,7 @@ function mkSlide() {
   const s = { el, video: el.querySelector('video'), bg: el.querySelector('.fd-bg'), h2: el.querySelector('h2'), meta: el.querySelector('.m'), blurb: el.querySelector('p'), msg: el.querySelector('.fd-msg'),
     i: -1, it: null, d: null, line: 0, ep: 0, eps: [], startAt: 0, hls: null, via: false, loading: false, pre: false, err: false, watched: 0, lastT: 0, judged: true, lastSave: 0 };
   const v = s.video;
-  v.addEventListener('loadedmetadata', () => layoutLand(s));
+  for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize']) v.addEventListener(ev, () => layoutLand(s));   // HLS 的画面尺寸有时晚一点才知道
   v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); });
   v.addEventListener('waiting', () => { if (s === cur()) el.classList.add('wait'); });
   v.addEventListener('canplay', () => el.classList.remove('wait'));
@@ -163,7 +177,7 @@ function teardown(s) {
   const v = s.video;
   v.onerror = null; v.onloadedmetadata = null;
   v.pause(); v.removeAttribute('src'); v.removeAttribute('poster'); v.load();
-  s.lastT = 0; s.el.classList.remove('wait', 'paused');
+  s.lastT = 0; s.el.classList.remove('wait', 'paused', 'land');   // 换片: 上一部的横屏上提不带到下一部
 }
 
 // What to play for a title: its saved place if it has one, else the first episode of the first line.
@@ -180,6 +194,7 @@ function paintInfo(s) {
   const epn = s.eps.length > 1 ? `${s.eps[s.ep].name} · 共 ${s.eps.length} 集` : '';
   s.meta.textContent = [epn, d.type || it.type, d.year || it.year, d.siteName || it.siteName].filter(Boolean).join(' · ');
   s.blurb.textContent = d.blurb || it.blurb || '';
+  fitBlurb(s);
 }
 function bind(s, i) {
   teardown(s);
@@ -544,7 +559,7 @@ function heartAt(x, y) {
 }
 function act(a) {
   const s = cur();
-  if (a === 'close') return history.back();
+  if (a === 'close') { guardUntil = 0; return history.back(); }   // 主动退出: 不要被「拖动误触返回」的保护拦下
   if (a === 'mode') { if (menuEl.hidden) { renderMenu(); menuEl.hidden = false; sheetEl.hidden = true; } else menuEl.hidden = true; return; }
   if (a === 'mute') { setMuted(!F.muted); if (!F.muted) tryPlay(s); return; }
   if (a === 'up') return go(-1);
@@ -568,6 +583,13 @@ root.addEventListener('click', e => {
 });
 
 // ---------- gestures ----------
+// iOS (13.4+) 的主屏幕应用: 手指从屏幕左 / 右边缘起手的横向滑动会被系统当作「返回 / 前进」。
+// 在边缘的 touchstart 里 preventDefault 能把它拦下来 (必须 passive:false)。只在沉浸模式里、且没有弹层时拦。
+root.addEventListener('touchstart', e => {
+  if (root.hidden || $('#modal') || !player.hidden) return;
+  const t = e.touches[0]; if (!t || e.target.closest('button, input, .fd-sheet, .fd-menu')) return;   // 按钮要保留点击
+  if (t.clientX <= 24 || t.clientX >= innerWidth - 24) { if (e.cancelable) e.preventDefault(); }
+}, { passive: false });
 let g = null, lastTap = { t: 0, x: 0, y: 0 }, tapTimer = 0;
 const H = () => root.clientHeight, W = () => root.clientWidth;
 const IGNORE = 'button, .fd-prog, .fd-sheet, .fd-menu';
@@ -578,7 +600,7 @@ root.addEventListener('pointerdown', e => {
   if (e.target.closest(IGNORE)) return;
   if (scrub) return;
   // nothing starts in the home-bar / screen-edge zones: iOS owns swipes there
-  if (e.pointerType === 'touch' && (e.clientY > innerHeight - 24 || e.clientX < 16 || e.clientX > innerWidth - 16)) return;
+  if (e.pointerType === 'touch' && e.clientY > innerHeight - 24) return;
   if (!menuEl.hidden || !sheetEl.hidden) { closeOverlays(); return; }
   if (g) return;
   const s = cur();
@@ -634,10 +656,15 @@ function endGesture(e, cancelled) {
     heartAt(x.x, x.y); doLike(true);
   } else { lastTap = { t: now, x: x.x, y: x.y }; tapTimer = setTimeout(togglePause, 280); }
 }
-root.addEventListener('pointerup', e => endGesture(e, false));
-root.addEventListener('pointercancel', e => endGesture(e, true));
+root.addEventListener('pointerup', e => { armGuard(); endGesture(e, false); });
+root.addEventListener('pointercancel', e => { armGuard(); endGesture(e, true); });
 
 // progress bar: drag to seek
+// iPhone 主屏幕应用: 手指在进度条 / 屏幕上横向拖到边缘时, 系统可能把它当作「边缘返回」手势并触发 popstate。
+// 拖动进行中、或刚结束 0.8 秒内收到的 popstate 一律视为误触: 补回历史记录, 留在沉浸模式。
+let guardUntil = 0;
+const touching = () => !!(scrub || g) || performance.now() < guardUntil;
+const armGuard = () => { guardUntil = performance.now() + 800; };
 let scrub = null;
 // 拖动时画面跟着实时跳转: 节流 (上一次 seek 没完成就不再发), 手指抬起时再精确落到最终位置
 let seekBusy = false, seekWant = null;
@@ -650,7 +677,7 @@ function liveSeek(t) {
     const tm = setTimeout(done, 400); v.addEventListener('seeked', done); };
   go();
 }
-const fracOf = e => { const r = prog.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
+const fracOf = e => { const r = prog.querySelector('.rail').getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
 function scrubTo(e) {
   const v = cur().video; scrub.frac = fracOf(e);
   root.style.setProperty('--p', scrub.frac);
@@ -668,8 +695,8 @@ const scrubEnd = (e, ok) => {
   const v = cur().video; seekWant = null; v.currentTime = ok ? scrub.frac * v.duration : scrub.t0;
   scrub = null; root.classList.remove('scrubbing'); tipEl.hidden = true;
 };
-prog.addEventListener('pointerup', e => scrubEnd(e, true));
-prog.addEventListener('pointercancel', e => scrubEnd(e, false));
+prog.addEventListener('pointerup', e => { armGuard(); scrubEnd(e, true); });
+prog.addEventListener('pointercancel', e => { armGuard(); scrubEnd(e, false); });
 
 // wheel / trackpad: one title per gesture; inertia after the swipe is swallowed
 let wAcc = 0, wLocked = false, wLockAt = 0, wTimer = 0;
@@ -693,7 +720,7 @@ addEventListener('keydown', e => {
   const s = cur(), v = s?.video;
   const k = e.key;
   const used = () => { e.preventDefault(); e.stopImmediatePropagation(); };
-  if (k === 'Escape') { if (!menuEl.hidden || !sheetEl.hidden) { used(); return closeOverlays(); } if (document.fullscreenElement) return; used(); return history.back(); }
+  if (k === 'Escape') { if (!menuEl.hidden || !sheetEl.hidden) { used(); return closeOverlays(); } if (document.fullscreenElement) return; used(); guardUntil = 0; return history.back(); }
   if (k === 'ArrowDown' || k === 'j' || k === 'PageDown') { used(); return go(1); }
   if (k === 'ArrowUp' || k === 'k' || k === 'PageUp') { used(); return go(-1); }
   if (k === 'ArrowRight' && v?.duration) { used(); v.currentTime = Math.min(v.duration, v.currentTime + 5); return; }
@@ -757,6 +784,7 @@ function hideFeed() {
 const flushProfile = () => { if (P) localStorage.feedProf = JSON.stringify(P); };
 addEventListener('popstate', () => {
   if (root.hidden) return;
+  if (touching() && !$('#modal') && player.hidden) { history.pushState({ feed: 1 }, ''); return; }   // 拖动时误触发的系统返回
   const st = history.state || {};
   if (!st.feed && !st.modal && !st.player) return hideFeed();
   setTimeout(() => { if (!root.hidden && !covered()) tryPlay(cur()); }, 0);      // back from the detail sheet / player

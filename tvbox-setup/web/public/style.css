@@ -1177,18 +1177,30 @@ nav .mine { display: none; }
 }
 
 /* 沉浸看片 (触屏): 进度条两端留出 iOS 边缘返回手势的位置, 手指从最左 / 最右拖也不会触发返回 */
+
+/* 沉浸看片 (触屏): 进度条的触摸区铺满屏幕宽度 (最左 / 最右也能起手拖动, 由 feed.js 拦下 iOS 的边缘返回手势), 进度条本身两端缩进 */
 @media (hover: none), (pointer: coarse) {
-  .fd-prog { left: max(18px, env(safe-area-inset-left)); right: max(18px, env(safe-area-inset-right)); }
+  .fd-prog { left: 0; right: 0; }
+  .fd-prog .rail { left: max(18px, env(safe-area-inset-left)); right: max(18px, env(safe-area-inset-right)); }
+}
+
+/* 沉浸看片 (触屏): 保留完整的底部安全区 (iPhone 的 Home 横条区域, 从那里横向滑会切换 App), 进度条和文字都放在它上面 */
+@media (hover: none), (pointer: coarse) {
+  #feed { --fsb: env(safe-area-inset-bottom); }
+  .fd-prog { bottom: var(--fsb); height: 52px; }
+  .fd-prog .rail { bottom: 14px; }
+  .fd-info { bottom: calc(40px + var(--fsb)); }
+  .fd-rail { bottom: calc(96px + var(--fsb)); }   /* 右侧按钮组: 比标题简介高出一截 (同抖音) */
+  .fd-hint { bottom: calc(86px + var(--fsb)); }
 }
 
 /* 沉浸看片: 横屏视频上提 + 「全屏观看」按钮 (同抖音) */
 .fd-full { display: none; }
 .fd-slide.land video { transform: translateY(calc(-1 * var(--lshift, 0px))); }
-.fd-slide.land:not(.empty) .fd-full { display: flex; position: absolute; z-index: 3; left: 50%; top: var(--lbtn); transform: translateX(-50%); align-items: center; gap: 6px; padding: 7px 14px 7px 11px;
-  border-radius: 18px; border: 1px solid #ffffff40; background: #ffffff1f; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-size: 13px; color: #fff; white-space: nowrap; }
-.fd-full svg { width: 16px; height: 16px; }
+.fd-slide.land:not(.empty) .fd-full { display: flex; position: absolute; z-index: 3; left: 50%; top: var(--lbtn); transform: translateX(-50%); align-items: center; gap: 3px; padding: 2px 8px 2px 6px;
+  border-radius: 11px; border: 1px solid #ffffff14; background: #ffffff0f; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-size: 10px; line-height: 1.2; color: #fff; white-space: nowrap; }
+.fd-full svg { width: 10px; height: 10px; }
 @media (hover: none), (pointer: coarse) {
-  .fd-rail { bottom: calc(118px + var(--fsb)); }
 }
 /* 横屏视频上提后, 暂停图标 / 缓冲圈 / 提示文字跟着画面中心一起上提 */
 .fd-slide.land .fd-pause, .fd-slide.land .fd-wait { transform: translateY(calc(-1 * var(--lshift, 0px))); }
