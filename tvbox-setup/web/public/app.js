@@ -22,8 +22,9 @@ const bgLayers = (pic, dbpic, size = 'l') => {
 };
 // Card <img>: small first; once it is on screen, fade the sharp size in over it.
 const posterImg = (u, sharp = 'm') => {
+  if (sharp && sharpWanted()) sharp = 'l';
   const hi = sharp && dbSize(u, sharp);
-  return `<img src="${esc(img(dbSize(u, 's') || u))}"${hi ? ` data-hi="${esc(img(hi))}"` : ''} loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="sharpen(this)" onerror="this.parentNode.classList.add('noimg');this.remove()">`;
+  return `<img src="${esc(img(dbSize(u, 's') || u))}" data-src0="${esc(u)}"${hi ? ` data-hi="${esc(img(hi))}"` : ''} loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onload="sharpen(this)" onerror="this.parentNode.classList.add('noimg');this.remove()">`;
 };
 function sharpen(el) {
   el.classList.add('ok');
@@ -79,6 +80,56 @@ const applyCardMode = () => {
   document.documentElement.classList.toggle('wide-cards', cardMode() === 'wide');
   const b = $('#cardBtn'); if (b) { b.classList.toggle('on', cardMode() === 'wide'); b.title = cardMode() === 'wide' ? '当前：宽卡，点一下换竖版封面' : '当前：竖版，点一下换宽卡'; }
 };
+// 卡片大小: ⌘/Ctrl + / − / 0 (and the − + buttons in the cover menu) scale every card, the grid columns follow. Remembered.
+// The page itself is never zoomed. Past 1.35× the covers switch to the sharp size, so a big card does not look blurry.
+const CS_MIN = 0.6, CS_MAX = 2.2, CS_STEP = 0.1;
+const cardScale = () => { const v = parseFloat(localStorage.cardScale); return Number.isFinite(v) ? Math.min(CS_MAX, Math.max(CS_MIN, v)) : 1; };
+const sharpWanted = () => cardScale() >= 1.35;
+const applyCardScale = () => {
+  const v = cardScale();
+  document.documentElement.style.setProperty('--cs', String(v));
+  document.documentElement.classList.toggle('cs-big', sharpWanted());
+  $$('[data-cs=val]').forEach(e => { e.textContent = Math.round(v * 100) + '%'; });
+};
+let csHiT = 0;
+const setCardScale = (v, quiet) => {
+  v = Math.round(Math.min(CS_MAX, Math.max(CS_MIN, v)) * 100) / 100;
+  const wasBig = sharpWanted();
+  localStorage.cardScale = String(v); applyCardScale();
+  if (sharpWanted() !== wasBig) { clearTimeout(csHiT); csHiT = setTimeout(upgradeCovers, 120); }
+  else if (sharpWanted()) { clearTimeout(csHiT); csHiT = setTimeout(upgradeCovers, 300); }
+  if (!quiet) toast('卡片大小 ' + Math.round(v * 100) + '%');
+};
+// Already-painted covers get the sharp version (only 豆瓣 posters have bigger sizes; others are shown as they are).
+function upgradeCovers() {
+  if (!sharpWanted()) return;
+  $$('#view .card .img img.ok').forEach(el => {
+    if (el.dataset.big || !el.dataset.src0) return;
+    const hi = dbSize(el.dataset.src0, 'l'); if (!hi) return;
+    el.dataset.big = '1';
+    const h = new Image(); h.referrerPolicy = 'no-referrer';
+    h.onload = () => { el.src = h.src; }; h.src = img(hi);
+  });
+}
+addEventListener('keydown', e => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+  const k = e.key;
+  const plus = k === '+' || k === '=' || k === 'Add', minus = k === '-' || k === '_' || k === 'Subtract', zero = k === '0';
+  if (!plus && !minus && !zero) return;
+  if (e.target instanceof Element && e.target.closest('input, textarea, [contenteditable]') && zero) return;
+  if (!$('#view') || (typeof playerOpen === 'function' && playerOpen())) return;     // only on pages with cards
+  e.preventDefault();
+  setCardScale(zero ? 1 : cardScale() + (plus ? CS_STEP : -CS_STEP));
+}, true);
+// pinch / Ctrl+wheel on a trackpad would zoom the page: use it for the cards instead (the browser reports pinch as ctrl+wheel)
+addEventListener('wheel', e => {
+  if (!e.ctrlKey || !$('#view') || (typeof playerOpen === 'function' && playerOpen())) return;
+  e.preventDefault();
+  if (!csWheel.t) { csWheel.t = setTimeout(() => { csWheel.t = 0; csWheel.acc = 0; }, 120); }
+  csWheel.acc += -e.deltaY;
+  if (Math.abs(csWheel.acc) >= 30) { setCardScale(cardScale() + Math.sign(csWheel.acc) * CS_STEP, true); csWheel.acc = 0; }
+}, { passive: false });
+const csWheel = { t: 0, acc: 0 };
 const setCardMode = m => { localStorage.cardMode = m; applyCardMode(); $$('[data-cardmode]').forEach(x => x.classList.toggle('on', x.dataset.cardmode === m)); };
 applyCardMode();
 
@@ -414,7 +465,7 @@ function filterMenu() {
 function renderMenu() {
   $('#siteMenu').innerHTML = `<div class="msearch"><input id="menuQ" class="find" type="search" placeholder="搜点播源" autocomplete="off" value="${esc(menuQ)}"></div><div class="mhead">点播源 · <span class="mcount"></span><span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + state.sites.filter(s => !s.inGroup).map(s =>
     `<button data-k="${esc(s.key)}" data-n="${esc((s.name + ' ' + s.key).toLowerCase())}" class="${s.key === state.site ? 'on' : ''}${isDead(s) ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, isBusy(s))}${s.key === 'local' || s.local || state.level !== 'all' ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('')
-    + `<div class="mempty" hidden>没有匹配的点播源</div><div class="mfoot"><span>封面</span><div class="mseg"><button type="button" data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版</button><button type="button" data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div></div>`;
+    + `<div class="mempty" hidden>没有匹配的点播源</div><div class="mfoot"><span>封面</span><div class="mseg"><button type="button" data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版</button><button type="button" data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div></div><div class="mfoot"><span>大小</span><div class="mseg cssz"><button type="button" data-csz="-" title="缩小 (⌘/Ctrl −)">−</button><button type="button" data-csz="0" data-cs="val" title="还原 (⌘/Ctrl 0)">${Math.round(cardScale() * 100)}%</button><button type="button" data-csz="+" title="放大 (⌘/Ctrl +)">+</button></div></div>`;
   filterMenu();
 }
 function watchMenu() {
@@ -513,6 +564,8 @@ $('#siteMenu').onkeydown = e => {
 $('#siteMenu').onclick = async e => {
   const cm = e.target.closest('[data-cardmode]');
   if (cm) { e.stopPropagation(); setCardMode(cm.dataset.cardmode); return; }
+  const csz = e.target.closest('[data-csz]');
+  if (csz) { e.stopPropagation(); setCardScale(csz.dataset.csz === '0' ? 1 : cardScale() + (csz.dataset.csz === '+' ? CS_STEP : -CS_STEP), true); return; }
   if (e.target.closest('[data-re]')) { e.stopPropagation(); return pingMenu(true); }
   const del = e.target.closest('[data-del]');
   if (del) {
@@ -2277,7 +2330,7 @@ addEventListener('keydown', e => {
     if (!e.target.matches?.('input, textarea')) { e.preventDefault(); return go(e.key === 'ArrowLeft' || e.key === '[' ? -1 : 1); }
   }
   if (e.key === 'Escape' && !player.hidden && !$('.plist').hidden) { e.preventDefault(); return togglePlist(false); }
-  if (e.target.matches('input, textarea')) return;
+  if (e.target.matches?.('input, textarea')) return;
   if (e.key === 'Escape' && (playerOpen() || $('#modal'))) history.back();
   if (!playerOpen()) return;
   if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
@@ -2757,7 +2810,8 @@ async function renderSettings() {
       <div class="actions"><button class="small" id="setPin">${safety.hasPin ? '修改 / 清除 PIN' : '设置家长 PIN'}</button>${safety.hasPin ? '<span class="lan">切到更宽松的级别、改 PIN 都要输入 PIN；切到更严的级别不用；只有在「全部」下才能清除 PIN。</span>' : ''}</div>
     </section>
     <section><h2>封面卡片</h2><p class="hint">竖版：2:3 海报；宽卡：16:9，一屏能放更多标题，详情页和首页大图同步变成宽版。也可以点右上角的卡片图标快速切换。</p>
-      <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版海报</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div></section>
+      <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版海报</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div>
+      <div class="actions"><span class="lan">卡片大小</span><button class="small" data-csz="-">−</button><button class="small" data-csz="0" data-cs="val">${Math.round(cardScale() * 100)}%</button><button class="small" data-csz="+">+</button><span class="lan">也可以按 ⌘/Ctrl 加 + / − / 0，触控板双指捏合也行；放大到 135% 以上封面会换成高清图。</span></div></section>
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
     ${locked ? `<section class="locklote"><h2>源设置已锁定</h2><p class="hint">当前安全级别是「${LEVELS[safety.level]}」。点播源、直播源、少儿 / 成人分类、导入和本地媒体文件夹只能在「全部」下修改，免得误改成人分类。想改的话，先在上面把安全级别切到「全部」${safety.hasPin ? '（需要家长 PIN）' : ''}。</p></section>` : ''}
@@ -3023,6 +3077,7 @@ async function renderSettings() {
   view.onclick = async e => {
     const cm = e.target.dataset.cardmode;
     if (cm) return setCardMode(cm);
+    if (e.target.dataset.csz) return setCardScale(e.target.dataset.csz === '0' ? 1 : cardScale() + (e.target.dataset.csz === '+' ? CS_STEP : -CS_STEP), true);
     const lv = e.target.dataset.level;
     if (lv) {
       if (!leaveSettingsOk()) return;   // the page is rebuilt with the new level
@@ -3589,7 +3644,7 @@ function openClipSession() {
 
 loadSites().then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
 
-applyCardMode();
+applyCardMode(); applyCardScale();
 
 setInterval(() => { if (cur?.kind === 'vod' && !player.hidden && state.downloads.some(j => ACTIVE.includes(j.status))) refreshDownloads().then(paintVodActs); }, 2000);
 

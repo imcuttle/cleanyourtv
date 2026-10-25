@@ -1263,3 +1263,20 @@ body.card-sheet header { z-index: 20; }   /* 底部 tab 栏在 header 里: 让�
 .crow .cstat { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
 .cbulk { gap: 8px; } .cbulk .flag { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; }
 @media (max-width: 760px) { .crow { grid-template-columns: 17px 1fr; } .crow .curl, .crow .cops { grid-column: 1 / -1; } .crow .cops { justify-content: flex-start; flex-wrap: wrap; } .crow .cops .cstat { text-align: left; } }
+
+/* ---------- 卡片大小 (--cs, 0.6 – 2.2): every card, grid column and row of covers scales together ---------- */
+:root { --cs: 1; }
+.card { width: calc(clamp(110px, 12vw, 190px) * var(--cs)); }
+.grid { grid-template-columns: repeat(auto-fill, minmax(calc(clamp(110px, 12vw, 180px) * var(--cs)), 1fr)); }
+html.wide-cards .card { width: calc(clamp(190px, 21vw, 300px) * var(--cs)); }
+html.wide-cards .grid { grid-template-columns: repeat(auto-fill, minmax(calc(clamp(180px, 21vw, 280px) * var(--cs)), 1fr)); }
+.grid .card, html.wide-cards .grid .card { width: auto; }
+.card .name { font-size: calc(13px * min(var(--cs), 1.4)); } .card .sub { font-size: calc(11px * min(var(--cs), 1.4)); }
+html.cs-big .card .img img { image-rendering: auto; }
+@media (max-width: 760px) {
+  .card, .card.top { width: calc(108px * var(--cs)); }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(calc(100px * var(--cs)), 1fr)); }
+  html.wide-cards .card { width: calc(clamp(150px, 56vw, 230px) * var(--cs)); }
+  html.wide-cards .grid { grid-template-columns: repeat(auto-fill, minmax(calc(150px * var(--cs)), 1fr)); }
+}
+.mseg.cssz button { min-width: 2.2em; }

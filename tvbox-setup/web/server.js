@@ -778,9 +778,9 @@ async function classifyNew(sites) {
 
 // One request per source (8 at a time): is it empty / unreachable, and which kind is it. Used before saving so that
 // saving itself does no network work. Mutates the entries: ok/info for the row, adult/kids flags, empty/probed markers.
-async function probeSites(sites) {
-  const todo = sites.filter(s => s.api && !s.members && !s.categories && s.ok !== false);
-  let next = 0;
+async function probeSites(sites, onProgress = () => {}) {
+  const todo = sites.filter(s => s.api && !s.members && s.ok !== false);
+  let next = 0, fin = 0;
   await Promise.all(Array.from({ length: Math.min(8, todo.length) }, async () => {
     while (next < todo.length) {
       const s = todo[next++];
@@ -792,17 +792,17 @@ async function probeSites(sites) {
         const k = classifyNames((leaves.length ? leaves : all).map(c => c.type_name))?.kind;
         if (!s.kids && !s.adult && (k === 'adult' || k === 'kids')) s[k] = 1;
         s.ok = true; s.info = (Number(b.total) > 0 ? b.total + '部' : (s.info || '能连上')) + (s.note ? ' · ' + s.note : '');
-      } catch (e) { s.ok = false; s.info = '连不上：' + (e.message || '').slice(0, 40); }
-      s.probed = true;
+      } catch (e) { s.ok = false; s.info = '连不上：' + (e.message || '').replace(/^[^：]{0,30}：/, '').slice(0, 40); }
+      s.probed = true; onProgress(++fin, todo.length);
     }
   }));
 }
 
 // Live sources that came out of a pasted TVBox config were never opened: open them now (8 at a time) so the list says
 // reachable / how many channels / empty before anything is saved.
-async function probeLives(lives) {
+async function probeLives(lives, onProgress = () => {}) {
   const todo = lives.filter(l => l.url && /^https?:\/\//.test(l.url) && l.ok === undefined);
-  let next = 0;
+  let next = 0, fin = 0;
   await Promise.all(Array.from({ length: Math.min(8, todo.length) }, async () => {
     while (next < todo.length) {
       const l = todo[next++];
@@ -812,8 +812,8 @@ async function probeLives(lives) {
         if (c?.kind === 'list' && c.channels > 0) { l.ok = true; l.info = `${c.channels} 个频道`; }
         else if (c?.kind === 'stream') { l.ok = true; l.info = '直播流'; }
         else { l.ok = false; l.empty = true; l.info = '打开了但没有频道，不导入'; }
-      } catch (e) { l.ok = false; l.info = '连不上：' + (e.message || '').slice(0, 40); }
-      l.probed = true;
+      } catch (e) { l.ok = false; l.info = '连不上：' + (e.message || '').replace(/^[^：]{0,30}：/, '').slice(0, 40); }
+      l.probed = true; onProgress(++fin, todo.length);
     }
   }));
 }
@@ -897,10 +897,10 @@ function classifyText(text) {
   return null;
 }
 
-async function recognize(input) {
+async function recognize(input, emit = () => {}) {
   const text = str(input).slice(0, 2e6);
   let sites = [], lives = [];
-  const unknown = [];
+  const unknown = [], repoNotes = [];
   const direct = classifyText(text);
   if (direct?.kind === 'config') {
     // Exported source sets embed edited / local channel lists as {name, text}; keep those as pasted lists.
@@ -928,7 +928,15 @@ async function recognize(input) {
       }
     }
     const entries = [...found.values()].slice(0, 30);
-    const results = await Promise.all(entries.map(async e => {
+    // Repository links (GitHub / Gitee / GitLab / Codeberg): walk the repo instead of fetching the page.
+    const repoJobs = [];
+    for (const e of entries) { const rp = parseRepoUrl(e.url); if (rp) { e.repo = rp; repoJobs.push(e); } }
+    const repoIsFile = e => e.repo?.mode === 'file';
+    for (const e of repoJobs.filter(e => !repoIsFile(e))) {
+      try { const r = await recognizeRepo(e.repo, e.url, emit); sites.push(...r.sites); lives.push(...r.lives); r.unknown.forEach(u => unknown.push(u)); repoNotes.push(...r.notes); }
+      catch (err) { repoNotes.push(`${hostOf(e.url)}：${err.message}`); lives.push({ name: e.repo.repo, url: e.url, ok: false, info: err.message }); }
+    }
+    const results = await Promise.all(entries.filter(e => !e.repo || repoIsFile(e)).map(async e => {
       const host = hostOf(e.url);
       let p = null, c = null;
       if (/^https?:/i.test(e.url)) {
@@ -978,12 +986,279 @@ async function recognize(input) {
   const haveVodText = new Set();
   for (const s of config.sites) if (LOCAL_VOD.test(str(s.api))) haveVodText.add(textKey(await fsp.readFile(path.join(VODS, path.basename(s.api.slice(6))), 'utf8').catch(() => '')));
   const seenS = new Set(), seenL = new Set();
-  sites = sites.filter(s => { const k = s.text ? 't|' + textKey(s.text) : s.members ? 'g|' + s.name + '|' + s.members.join(',') : normApi(s.api) + '|' + (s.categories || []).join(','); return !seenS.has(k) && seenS.add(k); })
+  // Same link under different names or category whitelists (every repo file has its own copy of the popular ones) is one source:
+  // keep the first, and prefer the plain entry over a whitelisted one.
+  const plainApi = new Set(sites.filter(s => s.api && !s.categories && !s.members).map(s => normApi(s.api)));
+  sites = sites.filter(s => {
+    if (s.categories && !s.members && plainApi.has(normApi(s.api))) return false;   // the plain copy already covers it
+    const k = s.text ? 't|' + textKey(s.text) : s.members ? 'g|' + s.name + '|' + s.members.join(',') : normApi(s.api) + '|' + (s.categories || []).join(',');
+    return !seenS.has(k) && seenS.add(k);
+  })
     .map(s => s.text ? { ...s, exists: haveVodText.has(textKey(s.text)) } : s.members ? { ...s, exists: config.sites.some(g => g.members && g.name === s.name) } : { ...s, api: normApi(s.api), exists: !s.categories && haveApi.has(normApi(s.api)) });
   lives = lives.filter(l => { const k = l.text ? textKey(l.text) : normUrl(l.url); return !seenL.has(k) && seenL.add(k); })
     .map(l => ({ ...l, exists: l.text ? haveText.has(textKey(l.text)) : haveUrl.has(normUrl(l.url)) }));
-  await Promise.all([probeSites(sites.filter(s => !s.exists)), probeLives(lives.filter(l => !l.exists))]);
-  return { sites, lives, unknown };
+  const nS = sites.filter(s => !s.exists).length, nL = lives.filter(l => !l.exists).length;
+  if (nS + nL > 6) emit({ t: 'progress', msg: `去重完成：新点播源 ${nS}、新直播源 ${nL}（已存在的自动跳过），正在检测是否连得通、有没有内容…`, phase: 'probe' });
+  await Promise.all([probeSites(sites.filter(s => !s.exists), (d, n) => emit({ t: 'progress', msg: `检测点播源 ${d}/${n}`, phase: 'probe', done: d, total: n })), probeLives(lives.filter(l => !l.exists), (d, n) => emit({ t: 'progress', msg: `检测直播源 ${d}/${n}`, phase: 'probe', done: d, total: n }))]);
+  return { sites, lives, unknown, notes: repoNotes };
+}
+
+// ======================= code hosting repos =======================
+// A pasted link to a repository (GitHub / Gitee / GitLab / Codeberg…, a branch, tag or commit, a sub-folder or a single file) is
+// walked: every text-like file that could be a source set is fetched, classified by what it really contains (never by folder
+// layout), de-duplicated and probed like any other pasted link. Progress is streamed to the client (NDJSON).
+const GH_TOKEN = () => process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
+const GITEE_TOKEN = () => process.env.GITEE_TOKEN || '';
+const GITLAB_TOKEN = () => process.env.GITLAB_TOKEN || '';
+const REPO_HOSTS = {
+  'github.com': 'github', 'www.github.com': 'github',
+  'gitee.com': 'gitee', 'www.gitee.com': 'gitee',
+  'gitlab.com': 'gitlab', 'www.gitlab.com': 'gitlab',
+  'codeberg.org': 'forgejo', 'www.codeberg.org': 'forgejo',
+};
+const SKIP_DIR = /(^|\/)(\.git|\.github|node_modules|jar|jars|js|css|img|image|images|icons?|pic|pics|logo|logos|fonts?|assets|apk|so|dex|lib|libs|__MACOSX)(\/|$)/i;
+const SKIP_EXT = /\.(jar|apk|zip|rar|7z|gz|tgz|bz2|xz|png|jpe?g|gif|webp|bmp|ico|svg|woff2?|ttf|otf|eot|mp4|mkv|avi|mov|flv|ts|mp3|aac|flac|wav|exe|dll|so|dex|bin|dat|db|pdf|docx?|xlsx?|pptx?|js|css|html?|md|py|java|kt|sh|bat|lock|map|yml|yaml|toml|ini|cfg|gitignore|gitattributes|license|sql|csv)$/i;
+const TEXT_EXT = /\.(json|txt|m3u8?|xml|list|conf|text|php)$/i;
+const MAX_REPO_FILE = 3e6;     // bigger than this is not a source list
+const MAX_REPO_FILES = 400;    // files actually fetched per repository
+const rawHeaders = host => { const h = { 'User-Agent': UA }; return h; };
+
+// Which repo + ref + path does this URL point at? Branch names may contain "/", so the ref is resolved against the repo.
+function parseRepoUrl(u) {
+  let x; try { x = new URL(u); } catch { return null; }
+  const host = x.hostname.toLowerCase(), segs = x.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  if (host === 'raw.githubusercontent.com' && segs.length >= 4)
+    return { kind: 'github', host: 'github.com', owner: segs[0], repo: segs[1], rest: segs.slice(2), mode: 'file' };
+  const kind = REPO_HOSTS[host]; if (!kind || segs.length < 2) return null;
+  const owner = segs[0], repo = segs[1].replace(/\.git$/, '');
+  if (/^(topics|orgs|settings|marketplace|explore|search|about|features|pricing|enterprise|login|sponsors|collections|trending|events|notifications|new)$/i.test(owner)) return null;
+  const base = { kind, host: host.replace(/^www\./, ''), owner, repo };
+  const tail = segs.slice(2);
+  if (kind === 'gitlab') {                       // gitlab: …/-/tree|blob|raw/<ref>/<path>, projects may sit in sub-groups
+    const dash = segs.indexOf('-');
+    if (dash >= 2) { const project = segs.slice(0, dash); return { ...base, owner: project.slice(0, -1).join('/'), repo: project[project.length - 1], ...refPart(segs.slice(dash + 1)) }; }
+    return { ...base, rest: [], mode: 'repo' };
+  }
+  return { ...base, ...refPart(tail) };
+}
+function refPart(t) {
+  const m = /^(tree|blob|raw|src|-|commits?)$/.exec(t[0] || '');
+  if (!t.length) return { rest: [], mode: 'repo' };
+  if (t[0] === 'tree' || (t[0] === 'src' && ['branch', 'tag', 'commit'].includes(t[1]))) {
+    const skip = t[0] === 'src' ? 2 : 1; return { rest: t.slice(skip), mode: 'tree' };
+  }
+  if (t[0] === 'blob' || t[0] === 'raw') return { rest: t.slice(1), mode: 'file' };
+  if (t[0] === 'releases' || t[0] === 'issues' || t[0] === 'pulls' || t[0] === 'wiki') return { rest: [], mode: 'repo' };
+  return { rest: [], mode: 'repo' };
+}
+
+async function jget(url, headers = {}, ms = 15000) {
+  const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json', ...headers }, redirect: 'follow', signal: AbortSignal.timeout(ms) });
+  const text = await r.text();
+  let j = null; try { j = JSON.parse(text); } catch {}
+  return { status: r.status, json: j, text, headers: r.headers };
+}
+function apiBase(repo) {
+  const e = encodeURIComponent;
+  if (repo.kind === 'github') return { tree: ref => `https://api.github.com/repos/${e(repo.owner)}/${e(repo.repo)}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+    info: `https://api.github.com/repos/${e(repo.owner)}/${e(repo.repo)}`, commit: ref => `https://api.github.com/repos/${e(repo.owner)}/${e(repo.repo)}/commits/${encodeURIComponent(ref)}`,
+    headers: GH_TOKEN() ? { Authorization: 'Bearer ' + GH_TOKEN(), 'X-GitHub-Api-Version': '2022-11-28' } : {} };
+  if (repo.kind === 'gitee') return { tree: ref => `https://gitee.com/api/v5/repos/${e(repo.owner)}/${e(repo.repo)}/git/trees/${encodeURIComponent(ref)}?recursive=1${GITEE_TOKEN() ? '&access_token=' + GITEE_TOKEN() : ''}`,
+    info: `https://gitee.com/api/v5/repos/${e(repo.owner)}/${e(repo.repo)}${GITEE_TOKEN() ? '?access_token=' + GITEE_TOKEN() : ''}`, headers: {} };
+  if (repo.kind === 'forgejo') return { tree: ref => `https://${repo.host}/api/v1/repos/${e(repo.owner)}/${e(repo.repo)}/git/trees/${encodeURIComponent(ref)}?recursive=true&per_page=10000`,
+    info: `https://${repo.host}/api/v1/repos/${e(repo.owner)}/${e(repo.repo)}`, headers: {} };
+  const pid = encodeURIComponent(repo.owner + '/' + repo.repo);
+  return { info: `https://gitlab.com/api/v4/projects/${pid}`, treeGl: (ref, page) => `https://gitlab.com/api/v4/projects/${pid}/repository/tree?ref=${encodeURIComponent(ref)}&recursive=true&per_page=100&page=${page}`,
+    headers: GITLAB_TOKEN() ? { 'PRIVATE-TOKEN': GITLAB_TOKEN() } : {} };
+}
+function rawUrl(repo, ref, p) {
+  const path_ = p.split('/').map(encodeURIComponent).join('/'), o = encodeURIComponent(repo.owner), r = encodeURIComponent(repo.repo);
+  if (repo.kind === 'github') return `https://raw.githubusercontent.com/${o}/${r}/${encodeURIComponent(ref)}/${path_}`;
+  if (repo.kind === 'gitee') return `https://gitee.com/${o}/${r}/raw/${encodeURIComponent(ref)}/${path_}`;
+  if (repo.kind === 'forgejo') return `https://${repo.host}/${o}/${r}/raw/branch/${encodeURIComponent(ref)}/${path_}`;
+  return `https://gitlab.com/${repo.owner.split('/').map(encodeURIComponent).join('/')}/${r}/-/raw/${encodeURIComponent(ref)}/${path_}`;
+}
+
+// Walk the tree through the host's API. Returns { files: [{path,size}], ref, note }.
+async function listRepoApi(repo, ref, say) {
+  const A = apiBase(repo);
+  if (repo.kind === 'gitlab') {
+    const files = [];
+    for (let page = 1; page <= 40; page++) {
+      const r = await jget(A.treeGl(ref, page), A.headers);
+      if (r.status === 404) throw Object.assign(new Error('NOREF'), { code: 404 });
+      if (r.status >= 400 || !Array.isArray(r.json)) throw new Error(`GitLab 接口 HTTP ${r.status}`);
+      for (const x of r.json) if (x.type === 'blob') files.push({ path: x.path, size: 0 });
+      say(`正在读取目录… 已发现 ${files.length} 个文件`);
+      if (r.json.length < 100) break;
+    }
+    return { files, ref };
+  }
+  const r = await jget(A.tree(ref), A.headers);
+  if (r.status === 404 || r.status === 422) throw Object.assign(new Error('NOREF'), { code: 404 });
+  if (r.status === 403 || r.status === 429) throw Object.assign(new Error('RATE'), { code: 403, reset: r.headers.get('x-ratelimit-reset') });
+  if (r.status >= 400 || !r.json) throw new Error(`HTTP ${r.status}`);
+  const tree = Array.isArray(r.json.tree) ? r.json.tree : [];
+  return { files: tree.filter(x => x.type === 'blob').map(x => ({ path: x.path, size: Number(x.size) || 0 })), ref, truncated: !!r.json.truncated };
+}
+// GitHub without (or beyond) API quota: the folder pages carry their listing as embedded JSON; read them folder by folder.
+async function listGithubHtml(repo, ref, startDir, say) {
+  const files = [], queue = [startDir], seen = new Set();
+  let dirs = 0;
+  while (queue.length && dirs < 200) {
+    const dir = queue.shift(); if (seen.has(dir)) continue; seen.add(dir); dirs++;
+    const url = `https://github.com/${repo.owner}/${repo.repo}/tree/${ref.split('/').map(encodeURIComponent).join('/')}${dir ? '/' + dir.split('/').map(encodeURIComponent).join('/') : ''}`;
+    const r = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(20000) });
+    if (!r.ok) { if (dirs === 1) throw Object.assign(new Error('NOREF'), { code: 404 }); continue; }
+    const html = await r.text();
+    const m = /<script type="application\/json" data-target="react-app\.embeddedData">([\s\S]*?)<\/script>/.exec(html);
+    let items = null;
+    if (m) { try { const walk = o => { if (o && typeof o === 'object') { if (o.tree && Array.isArray(o.tree.items)) return o.tree.items; for (const v of Object.values(o)) { const f = walk(v); if (f) return f; } } return null; }; items = walk(JSON.parse(m[1])); } catch {} }
+    if (!items) { if (dirs === 1) throw new Error('网页结构变了，读不到目录'); continue; }
+    for (const it of items) { if (it.contentType === 'directory') { if (!SKIP_DIR.test(it.path + '/')) queue.push(it.path); } else files.push({ path: it.path, size: 0 }); }
+    say(`正在读取目录（网页方式）… 已读 ${dirs} 个文件夹，发现 ${files.length} 个文件`);
+  }
+  return { files, ref, note: '没有 API 额度，改用网页方式读目录（较慢，也读不到文件大小）' };
+}
+
+// Split "ref/and/path" into a real ref + path: try the longest ref candidate that exists.
+async function resolveRef(repo, say) {
+  const A = apiBase(repo), segs = repo.rest || [];
+  let def = '';
+  const info = await jget(A.info, A.headers).catch(() => null);
+  if (info?.status === 404 && repo.mode !== 'repo') throw new Error('仓库不存在或是私有仓库');
+  if (info?.json) def = info.json.default_branch || info.json.defaultBranch || '';
+  if (repo.mode === 'repo' || !segs.length) return { ref: def || 'HEAD', path: '', def, info: info?.json || null };
+  // Candidates from longest to shortest ref; the first that the host recognises wins.
+  for (let n = Math.min(segs.length, 6); n >= 1; n--) {
+    const ref = segs.slice(0, n).join('/'), p = segs.slice(n).join('/');
+    if (repo.kind === 'github' && info?.json) {
+      const c = await jget(A.commit(ref), A.headers).catch(() => null);
+      if (c?.status === 200) return { ref, path: p, def, info: info.json };
+      if (c?.status === 403 || c?.status === 429) break;   // no quota: fall back to the first guess below
+    } else if (repo.kind === 'gitlab') {
+      const c = await jget(`https://gitlab.com/api/v4/projects/${encodeURIComponent(repo.owner + '/' + repo.repo)}/repository/commits/${encodeURIComponent(ref)}`, A.headers).catch(() => null);
+      if (c?.status === 200) return { ref, path: p, def, info: info?.json || null };
+    } else if (repo.kind === 'gitee') {
+      const c = await jget(`https://gitee.com/api/v5/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/commits/${encodeURIComponent(ref)}${GITEE_TOKEN() ? '?access_token=' + GITEE_TOKEN() : ''}`).catch(() => null);
+      if (c?.status === 200) return { ref, path: p, def, info: info?.json || null };
+    } else {
+      const c = await jget(`https://${repo.host}/api/v1/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/git/commits/${encodeURIComponent(ref)}`).catch(() => null);
+      if (c?.status === 200) return { ref, path: p, def, info: info?.json || null };
+    }
+  }
+  // Could not verify (rate limited, offline API): assume the common shape ref = first segment (folder or file after it).
+  return { ref: segs[0], path: segs.slice(1).join('/'), def, info: info?.json || null, guessed: true };
+}
+
+// Is this file worth fetching? Folder layout is not a criterion; names and sizes only rule out the obviously useless.
+function repoCandidate(f, under) {
+  const p = f.path;
+  if (under && !(p === under || p.startsWith(under + '/'))) return false;
+  if (SKIP_DIR.test(p + '/') && !/\.(json|txt|m3u8?)$/i.test(p)) return false;
+  if (/(^|\/)(package(-lock)?\.json|tsconfig.*\.json|composer\.json|\.eslintrc.*|manifest\.json|config\.json\.example)$/i.test(p)) return false;
+  if (f.size && f.size > MAX_REPO_FILE) return false;
+  const base = p.split('/').pop();
+  if (TEXT_EXT.test(base)) return true;
+  if (SKIP_EXT.test(base)) return false;
+  return !/\./.test(base);          // extension-less files (TVBox people often name them "tv", "live", "bk") are worth a look
+}
+const repoPri = p => /(^|\/)(tv|live|vod|box|tvbox|config|source|sources|api|json|m3u8?|iptv|zb|bk|dianbo|zhibo)[^/]*$/i.test(p) ? 0 : /\.(json|m3u8?|txt)$/i.test(p) ? 1 : 2;
+
+// ---- classify one fetched file's content ----
+async function classifyRepoFile(rel, url, text) {
+  const t = str(text).trim();
+  if (!t || t.length < 12) return { skip: '空文件' };
+  if (/^<!doctype html|^<html/i.test(t)) return { skip: '网页' };
+  const c = classifyText(t);
+  const name = rel.split('/').pop().replace(/\.[^.]+$/, '');
+  if (!c) return { skip: '不是源列表' };
+  if (c.kind === 'cms-xml') return { skip: 'XML 接口，不是文件' };
+  return { c, name, url, text: t };
+}
+
+async function recognizeRepo(repo, url, emit) {
+  const say = (msg, extra = {}) => emit({ t: 'progress', msg, ...extra });
+  const out = { sites: [], lives: [], unknown: [], notes: [] };
+  const where = `${repo.host}/${repo.owner}/${repo.repo}`;
+  say(`识别为 ${repo.kind === 'github' ? 'GitHub' : repo.kind === 'gitee' ? 'Gitee' : repo.kind === 'gitlab' ? 'GitLab' : 'Codeberg'} 仓库：${where}`, { phase: 'repo' });
+  const R = await resolveRef(repo, say);
+  let ref = R.ref, under = R.path;
+  if (repo.mode === 'file' && under) { /* single file inside a repo */ }
+  say(`分支/版本：${ref}${under ? '，范围：' + under : ''}${R.guessed ? '（无法核对，按常见写法猜测）' : ''}`, { phase: 'ref' });
+
+  let files = [], note = '';
+  if (repo.mode === 'file') files = [{ path: under, size: 0 }];
+  else {
+    try { ({ files, note } = await listRepoApi(repo, ref, say)); }
+    catch (e) {
+      if (e.code === 404 && R.def && ref !== R.def && R.guessed) { ref = R.def; say(`找不到 ${R.ref}，改用默认分支 ${ref}`); ({ files, note } = await listRepoApi(repo, ref, say).catch(() => ({ files: [] }))); }
+      else if ((e.code === 403 || e.message === 'RATE') && repo.kind === 'github') {
+        out.notes.push('GitHub API 额度用完' + (GH_TOKEN() ? '（已带 token）' : '：设置环境变量 GITHUB_TOKEN 可提升到每小时 5000 次') + '，改用网页方式读目录');
+        say('GitHub API 被限流，改用网页方式读目录（较慢）…');
+        ({ files, note } = await listGithubHtml(repo, ref, under, say).catch(err => { throw new Error('读不到目录：' + err.message); }));
+      } else throw new Error(e.code === 404 ? `找不到 ${ref}（分支、标签或提交不存在，或者是私有仓库）` : '读取目录失败：' + e.message);
+    }
+    if (note) out.notes.push(note);
+  }
+  const totalFiles = files.length;
+  let cand = files.filter(f => repoCandidate(f, repo.mode === 'file' ? '' : under)).sort((a, b) => repoPri(a.path) - repoPri(b.path) || a.path.localeCompare(b.path));
+  let capped = 0;
+  if (cand.length > MAX_REPO_FILES) { capped = cand.length - MAX_REPO_FILES; cand = cand.slice(0, MAX_REPO_FILES); }
+  say(`目录共 ${totalFiles} 个文件，其中 ${cand.length} 个可能是源列表${capped ? `（再多 ${capped} 个已略过）` : ''}，开始逐个读取检查…`, { phase: 'files', total: cand.length });
+  if (!cand.length) { out.notes.push('这个仓库（或所选目录）里没有 json / txt / m3u 之类的文件'); return out; }
+
+  // fetch + classify, 6 at a time
+  const parts = [];
+  let next = 0, done = 0, bad = 0, lastSay = 0;
+  const skipped = { 网页: 0, 空文件: 0, 不是源列表: 0, 读取失败: 0 };
+  await Promise.all(Array.from({ length: Math.min(6, cand.length) }, async () => {
+    while (next < cand.length) {
+      const f = cand[next++], u = rawUrl(repo, ref, f.path);
+      try {
+        const r = await fetch(u, { headers: rawHeaders(), redirect: 'follow', signal: AbortSignal.timeout(15000) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const len = Number(r.headers.get('content-length')) || 0;
+        if (len > MAX_REPO_FILE) { r.body?.cancel().catch(() => {}); skipped.不是源列表++; }
+        else {
+          const buf = Buffer.from(await r.arrayBuffer());
+          if (buf.length <= MAX_REPO_FILE && !buf.subarray(0, 2048).includes(0)) {
+            const k = await classifyRepoFile(f.path, u, buf.toString('utf8'));
+            if (k.skip) skipped[k.skip] = (skipped[k.skip] || 0) + 1; else parts.push({ ...k, path: f.path });
+          } else skipped.不是源列表++;
+        }
+      } catch { skipped.读取失败++; bad++; }
+      done++;
+      if (Date.now() - lastSay > 400 || done === cand.length) { lastSay = Date.now(); say(`读取检查 ${done}/${cand.length} · 已识别 ${parts.length} 个源文件${bad ? ` · 失败 ${bad}` : ''}`, { phase: 'scan', done, total: cand.length, found: parts.length }); }
+    }
+  }));
+  const sk = Object.entries(skipped).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join('、');
+  say(`读取完成：${parts.length} 个文件含源${sk ? `（略过：${sk}）` : ''}，正在整理…`, { phase: 'parse' });
+
+  // turn each recognised file into sites / lives, exactly like a pasted link
+  let expand = 0;
+  for (const part of parts) {
+    const { c, name, url: u, text, path: rel } = part;
+    const label = rel.replace(/\.[^.]+$/, '');
+    if (c.kind === 'config') {
+      const embedded = (Array.isArray(c.obj.lives) ? c.obj.lives : []).filter(l => l && typeof l.text === 'string' && l.text.trim());
+      let f; try { f = await configFrom({ ...c.obj, sites: (c.obj.sites || []).filter(s => !(s && typeof s.text === 'string')), lives: (c.obj.lives || []).filter(l => !(l && l.text)) }, u); } catch { f = { sites: [], lives: [] }; }
+      const info = `来自 ${rel}`;
+      out.sites.push(...f.sites.map(s => ({ ...s, info })));
+      out.lives.push(...f.lives.map(l => ({ ...l, info })));
+      for (const l of embedded) { const n = parseLive(l.text).groups.reduce((a, g) => a + g.channels.length, 0); out.lives.push({ name: str(l.name) || label, text: l.text.trim() + '\n', ok: n > 0, ...(n ? {} : { empty: true }), info: n ? `${n} 个频道（${rel}）` : '0 个频道，不导入' }); }
+      expand++;
+    } else if (c.kind === 'list') {
+      // A channel list file: keep it as a link to the file itself, so it stays in step with the repo.
+      out.lives.push(c.channels > 0 ? { name: label, url: u, ok: true, info: `${c.channels} 个频道 · ${rel}` } : { name: label, url: u, ok: false, empty: true, info: `0 个频道，不导入 · ${rel}` });
+    } else if (c.kind === 'vod') {
+      // a CMS API response saved as a file is not a live API: ignore, but a file that just holds a link is handled by the generic path
+      out.unknown.push(u);
+    }
+  }
+  out.notes.push(`扫描了 ${cand.length} 个文件，${parts.length} 个含源`);
+  say(`整理完成：点播源 ${out.sites.length}、直播源 ${out.lives.length}（还要去重和检测可用性）…`, { phase: 'merge' });
+  return out;
 }
 
 // ======================= people =======================
@@ -2295,6 +2570,15 @@ async function api(route, q, res, req) {
     return send(res, 200, { results: await classifyApis(apis), ratio: CLS_RATIO });
   }
   if (route === 'recognize' && write) return send(res, 200, await recognize((await readBody(req)).text));
+  if (route === 'recognize/stream' && write) {
+    // Same as recognize, but streams progress lines (NDJSON) while it works; the last line is {t:'result', …}.
+    const body = await readBody(req);
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+    const emit = o => { if (!res.destroyed) res.write(JSON.stringify(o) + '\n'); };
+    const beat = setInterval(() => emit({ t: 'ping' }), 8000);
+    try { emit({ t: 'result', ...(await recognize(body.text, emit)) }); } catch (e) { emit({ t: 'error', error: e.message || String(e) }); }
+    clearInterval(beat); return res.end();
+  }
   if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ffmpeg: !!FFMPEG, loopback: isLoopback(req) });
 
   // ---- 本地媒体: folders, scan, and the CMS API for TVBox / FongMi ----
