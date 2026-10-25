@@ -727,7 +727,7 @@ nav a { white-space: nowrap; }
 .search .s-ico { width: 17px; height: 17px; flex: none; color: #ffffffa6; transition: color .15s; }
 .search:focus-within .s-ico { color: #fff; }
 .search input, .search input:focus { flex: 1; width: auto; min-width: 0; height: 100%; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; text-overflow: ellipsis; }
-.search input::-webkit-search-cancel-button { filter: invert(1); opacity: .55; cursor: pointer; }
+
 .search:not(:focus-within) .scope:not(.on) { background: #ffffff1f; }
 .scope { flex: none; height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 9px 0 11px; border: 0; border-radius: 14px;
   background: #ffffff1f; color: #e8e8e8; font-size: 12px; font-weight: 600; white-space: nowrap; transition: background .15s, color .15s; }
@@ -857,7 +857,7 @@ body.sov-open { overflow: hidden; }
 .sov-pill:focus-within { border-color: #fff; background: #ffffff2b; }
 .sov-pill .s-ico { width: 18px; height: 18px; flex: none; color: #ffffffa6; }
 .sov-pill input, .sov-pill input:focus { outline: none; flex: 1; min-width: 0; width: auto; height: 100%; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; font-size: 16px; text-overflow: ellipsis; }
-.sov-pill input::-webkit-search-cancel-button { filter: invert(1); opacity: .6; }
+
 .sov-cancel { flex: none; border: 0; background: none; color: #fff; font-size: 15px; font-weight: 600; padding: 8px 2px; }
 .sov-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px max(14px, env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); }
 .sov-sec { display: flex; align-items: center; justify-content: space-between; margin: 18px 2px 10px; font-size: 13px; font-weight: 700; color: var(--muted); letter-spacing: .5px; }
@@ -876,3 +876,21 @@ body.sov-open { overflow: hidden; }
 .sov-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sov-row em { flex: none; width: 32px; height: 32px; margin: -6px -4px -6px 0; display: grid; place-items: center; font-style: normal; font-size: 20px; color: #777; }
 .sov-empty { padding: 28px 4px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+
+/* ---------- 大屏搜索历史下拉 ---------- */
+.menu.shist { left: 0; right: auto; width: 100%; min-width: 280px; padding: 6px 6px 8px; }
+.menu.shist .mhead { display: flex; justify-content: space-between; align-items: center; }
+.menu.shist .mre { cursor: pointer; }
+.menu.shist .sov-row { padding: 9px 10px; border: 0; border-radius: 6px; font-size: 14px; cursor: pointer; }
+.menu.shist .sov-row:hover, .menu.shist .sov-row.sel { background: #ffffff1a; }
+.menu.shist .sov-row em { width: 26px; height: 26px; margin: -4px -2px -4px 0; border-radius: 50%; font-size: 17px; opacity: 0; transition: opacity .12s, background .12s; }
+.menu.shist .sov-row:hover em, .menu.shist .sov-row.sel em { opacity: 1; }
+.menu.shist .sov-row em:hover { background: #ffffff26; color: #fff; }
+@media (hover: none) { .menu.shist .sov-row em { opacity: 1; } }
+
+/* 搜索框清除按钮: the native one turned a muddy gold on dark; draw a neutral grey circled × instead */
+.search input::-webkit-search-cancel-button, .sov-pill input::-webkit-search-cancel-button {
+  -webkit-appearance: none; appearance: none; width: 16px; height: 16px; margin: 0 4px 0 6px; cursor: pointer; background: #ffffff8c;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 16A8 8 0 108 0a8 8 0 000 16zM5.2 4.1L8 6.9l2.8-2.8 1.1 1.1L9.1 8l2.8 2.8-1.1 1.1L8 9.1l-2.8 2.8-1.1-1.1L6.9 8 4.1 5.2z'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 16A8 8 0 108 0a8 8 0 000 16zM5.2 4.1L8 6.9l2.8-2.8 1.1 1.1L9.1 8l2.8 2.8-1.1 1.1L8 9.1l-2.8 2.8-1.1-1.1L6.9 8 4.1 5.2z'/%3E%3C/svg%3E") center/contain no-repeat; }
+.search input::-webkit-search-cancel-button:hover, .sov-pill input::-webkit-search-cancel-button:hover { background: #fff; }

@@ -519,13 +519,13 @@ function syncScope() {
 }
 const closeScope = () => { $('#scopeMenu').hidden = true; $('#scopeBtn').classList.remove('open'); $('#scopeBtn').setAttribute('aria-expanded', 'false'); };
 $('#scopeBtn').onclick = e => {
-  e.stopPropagation(); closeMenu();
+  e.stopPropagation(); closeMenu(); closeHist();
   const open = $('#scopeMenu').hidden;
   $('#scopeMenu').hidden = !open; $('#scopeBtn').classList.toggle('open', open); $('#scopeBtn').setAttribute('aria-expanded', String(open));
 };
 $('#scopeMenu').onclick = e => {
   const b = e.target.closest('[data-scope]'); if (!b) return;
-  searchScope.set(b.dataset.scope); closeScope(); $('#q').focus();
+  searchScope.set(b.dataset.scope); closeScope(); $('#q').focus(); closeHist();
   // Already looking at results: re-run them in the new scope.
   const q = $('#q').value.trim();
   if (location.hash.startsWith('#/search/') && q) location.hash = searchHash(q);
@@ -538,7 +538,7 @@ const recents = {
   del(q) { localStorage.recentSearches = JSON.stringify(this.all().filter(x => x !== q)); },
   clear() { localStorage.removeItem('recentSearches'); },
 };
-const runSearch = q => { q = q.trim(); if (!q) return; recents.add(q); closeScope(); closeSov(); $('#q').value = q; location.hash = searchHash(q); };
+const runSearch = q => { q = q.trim(); if (!q) return; recents.add(q); closeScope(); closeSov(); if (typeof closeHist === 'function') closeHist(); $('#q').value = q; location.hash = searchHash(q); };
 $('#searchForm').onsubmit = e => { e.preventDefault(); runSearch($('#q').value); };
 
 // 小屏: focusing the search box opens a full-screen search sheet (own input, scope switch, recent searches) instead of
@@ -567,7 +567,48 @@ function closeSov() {
   if (sov.hidden) return;
   sov.hidden = true; document.body.classList.remove('sov-open'); $('#q2').blur(); $('#q').blur();
 }
-$('#q').addEventListener('focus', () => { if (smallScreen.matches) openSov(); });
+$('#q').addEventListener('focus', () => { if (smallScreen.matches) openSov(); else openHist(); });
+
+// 大屏: focusing the search box drops down the recent searches right under it. One × removes one, 清空 removes all.
+const hist_ = $('#sHist');
+let histSel = -1;
+const histRows = () => $$('.sov-row', hist_);
+function paintHist() {
+  const all = recents.all(), typed = $('#q').value.trim().toLowerCase(), list = all.filter(x => !typed || x.toLowerCase().includes(typed));
+  histSel = -1;
+  if (!list.length) { hist_.hidden = true; return; }
+  hist_.innerHTML = `<div class="mhead">最近搜索<span class="mre" data-clear>清空</span></div>` + list.map(x =>
+    `<div class="sov-row" data-q="${esc(x)}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>${esc(x)}</span><em data-del title="删除这条">×</em></div>`).join('');
+  hist_.hidden = false;
+}
+function openHist() { if (smallScreen.matches) return; closeScope(); closeMenu(); paintHist(); }
+const closeHist = () => { hist_.hidden = true; histSel = -1; };
+$('#q').addEventListener('click', () => { if (!smallScreen.matches && hist_.hidden) openHist(); });
+$('#q').addEventListener('input', () => { if (!smallScreen.matches && document.activeElement === $('#q')) paintHist(); });
+$('#q').addEventListener('keydown', e => {
+  if (hist_.hidden && e.key === 'ArrowDown' && !smallScreen.matches) return paintHist();
+  if (hist_.hidden) return;
+  const rows = histRows();
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    histSel = e.key === 'ArrowDown' ? (histSel + 1) % rows.length : (histSel - 1 + rows.length) % rows.length;
+    rows.forEach((r, i) => r.classList.toggle('sel', i === histSel));
+    rows[histSel].scrollIntoView({ block: 'nearest' });
+    $('#q').value = rows[histSel].dataset.q;
+  } else if (e.key === 'Delete' && e.shiftKey && histSel >= 0) {
+    e.preventDefault(); recents.del(rows[histSel].dataset.q); $('#q').value = ''; paintHist();
+  } else if (e.key === 'Escape') closeHist();
+});
+// mousedown (not click) so the input keeps focus and its blur does not close the list before the click lands
+hist_.addEventListener('mousedown', e => e.preventDefault());
+hist_.addEventListener('click', e => {
+  if (e.target.closest('[data-clear]')) { recents.clear(); closeHist(); return; }
+  const row = e.target.closest('.sov-row'); if (!row) return;
+  if (e.target.closest('[data-del]')) { recents.del(row.dataset.q); paintHist(); return; }
+  closeHist(); runSearch(row.dataset.q);
+});
+document.addEventListener('mousedown', e => { if (!e.target.closest('#searchForm')) closeHist(); });
+$('#q').addEventListener('blur', () => setTimeout(() => { if (!hist_.matches(':hover')) closeHist(); }, 120));
 $('#q2').addEventListener('input', paintSov);
 $('#sOvForm').onsubmit = e => { e.preventDefault(); runSearch($('#q2').value); };
 $('#sOvCancel').onclick = closeSov;
