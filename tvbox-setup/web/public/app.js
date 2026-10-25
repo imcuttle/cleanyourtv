@@ -389,7 +389,18 @@ const saveHealth = () => { clearTimeout(healthSave); healthSave = setTimeout(() 
   const live = new Set(state.sites.map(x => x.api)); // forget sources that no longer exist
   localStorage.siteHealth = JSON.stringify(Object.fromEntries([...siteHealth].filter(([k, v]) => v.ok && live.has(k)))); }, 400); };
 const healthFresh = t => t && (t.ok || t.at >= healthEpoch);
-const healthCell = (s, busy) => busy ? '<b class="hs">测速中…</b>' : s.group ? `<b class="hs">聚合 ${s.group}</b>` : !s.api || s.local ? ''
+// A 聚合源 has no link of its own: it is tested through its members (not listed in the menu). Result: how many of them answer.
+const membersOf = g => (g.members || []).map(k => state.sites.find(x => x.key === k)).filter(m => m && m.api && !m.local);
+const groupHealth = g => {
+  const ms = membersOf(g), hs = ms.map(m => siteHealth.get(m.api));
+  if (!ms.length) return null;
+  const busy = ms.some(m => healthBusy.has(m.api));
+  const done = hs.filter(Boolean), okN = done.filter(h => h.ok).length;
+  return { busy, all: done.length === ms.length, okN, n: ms.length, ok: okN > 0 };
+};
+const isBusy = s => s.group ? !!groupHealth(s)?.busy : healthBusy.has(s.api);
+const isDead = s => { if (s.group) { const g = groupHealth(s); return !!g && !g.busy && g.all && !g.ok; } const h = siteHealth.get(s.api); return !!h && !h.ok && !healthBusy.has(s.api); };
+const healthCell = (s, busy) => busy ? '<b class="hs">测速中…</b>' : s.group ? (g => !g || !g.all ? `<b class="hs">聚合 ${s.group}</b>` : `<b class="hs ${g.ok ? (g.okN === g.n ? 'ok' : '') : 'bad'}" title="成员里能连上的">${g.okN}/${g.n} 可用</b>`)(groupHealth(s)) : !s.api || s.local ? ''
   : !siteHealth.get(s.api) ? '<b class="hs">…</b>' : siteHealth.get(s.api).ok ? `<b class="hs ok">${siteHealth.get(s.api).ms}ms</b>` : '<b class="hs bad">不通</b>';
 let menuQ = '';
 function filterMenu() {
@@ -401,9 +412,8 @@ function filterMenu() {
   if (!$('#siteMenu').hidden) requestAnimationFrame(() => pingMenu());
 }
 function renderMenu() {
-  const h = s => siteHealth.get(s.api);
   $('#siteMenu').innerHTML = `<div class="msearch"><input id="menuQ" class="find" type="search" placeholder="搜点播源" autocomplete="off" value="${esc(menuQ)}"></div><div class="mhead">点播源 · <span class="mcount"></span><span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + state.sites.filter(s => !s.inGroup).map(s =>
-    `<button data-k="${esc(s.key)}" data-n="${esc((s.name + ' ' + s.key).toLowerCase())}" class="${s.key === state.site ? 'on' : ''}${h(s) && !h(s).ok ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, healthBusy.has(s.api))}${s.key === 'local' || s.local || state.level !== 'all' ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('')
+    `<button data-k="${esc(s.key)}" data-n="${esc((s.name + ' ' + s.key).toLowerCase())}" class="${s.key === state.site ? 'on' : ''}${isDead(s) ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, isBusy(s))}${s.key === 'local' || s.local || state.level !== 'all' ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('')
     + `<div class="mempty" hidden>没有匹配的点播源</div><div class="mfoot"><span>封面</span><div class="mseg"><button type="button" data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版</button><button type="button" data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div></div>`;
   filterMenu();
 }
@@ -413,21 +423,23 @@ function watchMenu() {
   menuIO = new IntersectionObserver(es => es.forEach(en => {
     if (!en.isIntersecting) return;
     const s = state.sites.find(x => x.key === en.target.dataset.k);
-    if (s && s.api && !s.local) queueHealth(s);
+    if (s && ((s.api && !s.local) || s.group)) queueHealth(s);
   }), { root: $('#siteMenu') });
   $$('#siteMenu button[data-k]').forEach(b => menuIO.observe(b));
 }
 function markHealth(s) {
   const b = $(`#siteMenu button[data-k="${CSS.escape(s.key)}"]`); if (!b) return;
   const had = $('.hs', b), tmp = document.createElement('div');
-  tmp.innerHTML = healthCell(s, healthBusy.has(s.api));
+  tmp.innerHTML = healthCell(s, isBusy(s));
   const hs = tmp.firstElementChild;
   if (had) had.replaceWith(hs); else if (hs) b.insertBefore(hs, $('em.x', b));
-  b.classList.toggle('dead', !!siteHealth.get(s.api) && !siteHealth.get(s.api).ok && !healthBusy.has(s.api));
+  b.classList.toggle('dead', isDead(s));
 }
+const markGroupsOf = m => state.sites.filter(g => g.members?.includes(m.key)).forEach(markHealth);
 function queueHealth(s, force) {
+  if (s.group) { membersOf(s).forEach(m => queueHealth(m, force)); return markHealth(s); }
   if (healthBusy.has(s.api) || (!force && healthFresh(siteHealth.get(s.api)))) return;
-  healthBusy.add(s.api); healthQ.push(s); markHealth(s); drainHealth();
+  healthBusy.add(s.api); healthQ.push(s); markHealth(s); markGroupsOf(s); drainHealth();
 }
 function drainHealth() {
   while (healthRun < 4 && healthQ.length) {
@@ -440,7 +452,7 @@ function drainHealth() {
       }
       siteHealth.set(s.api, { ok: !!r.ok, ms: r.ms, total: r.total, at: Date.now() });
       healthBusy.delete(s.api); healthRun--; saveHealth();
-      markHealth(s);
+      markHealth(s); markGroupsOf(s);
       drainHealth();
     })();
   }
@@ -449,7 +461,7 @@ function drainHealth() {
 function visibleMenuSites() {
   const m = $('#siteMenu').getBoundingClientRect();
   return $$('#siteMenu button[data-k]').filter(b => { const r = b.getBoundingClientRect(); return r.height && r.bottom > m.top && r.top < m.bottom; })
-    .map(b => state.sites.find(x => x.key === b.dataset.k)).filter(s => s && s.api && !s.local);
+    .map(b => state.sites.find(x => x.key === b.dataset.k)).filter(s => s && ((s.api && !s.local) || s.group));
 }
 function pingMenu(force) {
   watchMenu();
@@ -459,7 +471,7 @@ function pingMenu(force) {
   todo.forEach(s => queueHealth(s, force));
   if (force) toast(`重测 ${todo.length} 个源`);
 }
-const testableSites = () => state.sites.filter(s => s.api && !s.local && !s.inGroup);
+const testableSites = () => state.sites.filter(s => ((s.api && !s.local) || s.group) && !s.inGroup);
 // Without opening the menu: every source that has no good result yet gets pinged in the background (4 at a time);
 // passing results are reused from the cache, failures are never cached.
 let autoPingT = 0;
@@ -2694,7 +2706,7 @@ async function renderSettings() {
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="" readonly>
-      <span class="ops"><span class="tagl">聚合源</span>${flags(x)}<button data-op="toggle"></button><button data-op="dissolve" title="解散：成员回到主列表，聚合源删除">解散</button><button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del" title="删除聚合源和它的所有成员">删除</button></span></div>`
+      <span class="ops"><span class="tagl">聚合源</span>${flags(x)}<span class="status"></span><button data-op="test" title="测速：逐个测成员，汇总能连上几个">测速</button><button data-op="toggle"></button><button data-op="dissolve" title="解散：成员回到主列表，聚合源删除">解散</button><button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del" title="删除聚合源和它的所有成员">删除</button></span></div>`
     : `<div class="srow${parent ? ' mem' : ''}" data-i="${i}" ${parent ? `data-parent="${esc(parent)}" hidden` : ''} ${x.key && kind === 'site' ? `data-key="${esc(x.key)}"` : ''} ${x.from ? `data-from="${esc(x.from)}"` : ''} ${x.categories ? `data-cats="${esc(JSON.stringify(x.categories))}"` : ''} ${cacheOf(x) ? `data-ok="${cacheOf(x).cls === 'status ok' ? 1 : 0}"${cacheOf(x).total !== undefined ? ` data-total="${cacheOf(x).total}"` : ''}` : ''}>
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
@@ -2859,13 +2871,26 @@ async function renderSettings() {
     const st = $('.status', r); if (!st) return;
     const c = testCache.get($('.url', r)?.value.trim());
     st.className = c ? c.cls : 'status'; st.textContent = c ? c.text : ''; st.title = c ? c.title : '';
+    if (!c) { delete r.dataset.ok; delete r.dataset.total; }
+    sumGroups();
   };
+  // 聚合源 row: summary of its member rows (how many answer), kept in step with the pool as results come in.
+  const sumGroups = () => $$('#sites .srow.grp').forEach(g => {
+    const st = $('.status', g); if (!st) return;
+    const ms = blockOf(g).slice(1);
+    const reset = () => { st.className = 'status'; st.textContent = ''; st.title = ''; };
+    if (!ms.length) return reset();
+    if (ms.some(m => /测试中|重试|排队/.test($('.status', m)?.textContent || ''))) { st.className = 'status'; st.textContent = `测试中 ${ms.filter(m => m.dataset.ok !== undefined).length}/${ms.length}`; return; }
+    const tested = ms.filter(m => m.dataset.ok !== undefined), okN = tested.filter(m => m.dataset.ok === '1').length;
+    if (tested.length < ms.length) return reset();
+    st.className = 'status ' + (okN ? 'ok' : 'bad'); st.textContent = `${okN}/${ms.length} 可用`; st.title = '成员里能连上的';
+  });
   const test = async (r, gen = testGen) => {
     const st = $('.status', r), url = $('.url', r).value.trim(), live = r.parentElement.id === 'lives';
     if (!url || r.dataset.members) return;
     const stale = () => gen !== testGen || !r.isConnected;
     if (stale()) return restoreRow(r);
-    st.className = 'status'; st.textContent = '测试中…';
+    st.className = 'status'; st.textContent = '测试中…'; sumGroups();
     let res;
     for (let k = 0; k <= RETRIES; k++) {
       if (stale()) return restoreRow(r);
@@ -2878,6 +2903,7 @@ async function renderSettings() {
     st.className = cls; st.textContent = res.text; st.title = res.title;
     r.dataset.ok = res.ok ? '1' : '0';
     if (res.total !== undefined) r.dataset.total = res.total; else delete r.dataset.total;
+    sumGroups();
     if (res.ok) testCache.set(url, { cls, text: res.text, title: res.title, total: res.total }); else testCache.delete(url);
   };
   // One pool for sites and lives together: at most 4 requests in flight, so page loads and /api/local are never starved
@@ -2893,7 +2919,7 @@ async function renderSettings() {
   const testMany = rows => Promise.all(rows.map(r => new Promise(done => {
     const st = $('.status', r);
     if (st && $('.url', r).value.trim() && !r.dataset.members) { st.className = 'status'; st.textContent = '排队中'; st.title = ''; }
-    testQ.push({ r, gen: testGen, done }); pump();
+    testQ.push({ r, gen: testGen, done }); sumGroups(); pump();
   })));
   // 点播源: the title list becomes a text file on the server (a web source starts from a snapshot of its first pages).
   const editVodText = async r => {
@@ -2987,7 +3013,11 @@ async function renderSettings() {
     if (e.target.classList.contains('sel')) return refreshCount();
     const op = e.target.dataset.op; if (!op) return;
     const r = e.target.closest('.srow');
-    if (op === 'test') { testGen++; return test(r); }
+    if (op === 'test') {
+      testGen++;
+      if (r.dataset.members) { const ms = blockOf(r).slice(1); return ms.length ? testMany(ms) : toast('这个聚合源没有成员'); }
+      return test(r);
+    }
     if (op === 'edit') return editText(r);
     if (op === 'del') return dropRows([r]);
     if (op === 'toggle') { r.dataset.open = r.dataset.open ? '' : '1'; return syncGroups(); }
@@ -3205,6 +3235,7 @@ async function renderSettings() {
     });
   };
   bindDrag($('#sites')); bindDrag($('#lives'));
+  sumGroups();
   // Multi-select in the lists: shift+click a checkbox for a range, drag a rectangle over rows on a PC.
   for (const box of [$('#sites'), $('#lives')]) multiPick({
     zone: box.parentElement, box, skip: 'input, button, textarea, select, a, label, summary, .drag',
