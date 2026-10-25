@@ -2206,6 +2206,7 @@ async function api(route, q, res, req) {
     return leader('config', { op, body: await readBody(req) });
   }
   if (route === 'check') {
+    deadUntil.clear(); // a user-run test starts clean: no 聚合源 member stays skipped because of an earlier failure
     const t = Date.now();
     try {
       const b = await cmsGet({ name: '', api: q.get('api') }, { ac: 'list' }, true);
