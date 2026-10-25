@@ -2846,7 +2846,9 @@ async function renderSettings() {
   // Speed test: bounded concurrency (so hundreds of sources don't flood the network), auto retry on failure,
   // results cached per url so they survive deleting / reordering / re-rendering.
   const RETRIES = 2;
-  let testGen = 0;
+  // Each row carries its own run token (r._tok): starting a test on one row only supersedes that row's earlier run.
+  // Only 「停止测速」 (stopEpoch) cancels everything that is queued or running.
+  let testSeq = 0, stopEpoch = 0;
   const TEST_TIMEOUT = 22e3; // the server gives up on a source after 15 s; a request that hangs must never hold a slot of the pool
   const testOnce = async (url, name, live) => {
     const signal = AbortSignal.timeout(TEST_TIMEOUT);
@@ -2876,20 +2878,23 @@ async function renderSettings() {
     if (tested.length < ms.length) return reset();
     st.className = 'status ' + (okN ? 'ok' : 'bad'); st.textContent = `${okN}/${ms.length} 可用`; st.title = '成员里能连上的';
   });
-  const test = async (r, gen = testGen) => {
+  const claim = r => (r._tok = ++testSeq);
+  const test = async (r, tok = claim(r), epoch = stopEpoch) => {
     const st = $('.status', r), url = $('.url', r).value.trim(), live = r.parentElement.id === 'lives';
     if (!url || r.dataset.members) return;
-    const stale = () => gen !== testGen || !r.isConnected;
-    if (stale()) return restoreRow(r);
+    const superseded = () => r._tok !== tok;                      // a newer run of this same row owns the status now
+    const stale = () => superseded() || epoch !== stopEpoch || !r.isConnected;
+    const bail = () => { if (!superseded()) restoreRow(r); };
+    if (stale()) return bail();
     st.className = 'status'; st.textContent = '测试中…'; sumGroups();
     let res;
     for (let k = 0; k <= RETRIES; k++) {
-      if (stale()) return restoreRow(r);
-      if (k) { st.textContent = `重试 ${k}/${RETRIES}…`; await new Promise(ok => setTimeout(ok, 600 * k)); if (stale()) return restoreRow(r); }
+      if (stale()) return bail();
+      if (k) { st.textContent = `重试 ${k}/${RETRIES}…`; await new Promise(ok => setTimeout(ok, 600 * k)); if (stale()) return bail(); }
       res = await testOnce(url, $('.nm', r).value.trim(), live);
       if (res.ok) break;
     }
-    if (stale()) return restoreRow(r);
+    if (stale()) return bail();
     const cls = 'status ' + (res.ok ? 'ok' : 'bad');
     st.className = cls; st.textContent = res.text; st.title = res.title;
     r.dataset.ok = res.ok ? '1' : '0';
@@ -2898,19 +2903,19 @@ async function renderSettings() {
     if (res.ok) testCache.set(url, { cls, text: res.text, title: res.title, total: res.total }); else testCache.delete(url);
   };
   // One pool for sites and lives together: at most 4 requests in flight, so page loads and /api/local are never starved
-  // (browsers allow only 6 connections per host). Entries from an older generation drain instantly (test() bails out).
+  // (browsers allow only 6 connections per host). Entries that were superseded or stopped drain instantly (test() bails out).
   const TEST_MAX = 4, testQ = []; let testRun = 0;
   const pump = () => {
     while (testRun < TEST_MAX && testQ.length) {
-      const { r, gen, done } = testQ.shift(); testRun++;
-      test(r, gen).catch(() => {}).finally(() => { testRun--; done(); pump(); });
+      const { r, tok, epoch, done } = testQ.shift(); testRun++;
+      test(r, tok, epoch).catch(() => {}).finally(() => { testRun--; done(); pump(); });
     }
   };
   // Every row of the run says 排队中 right away; the pool turns them into 测试中… four at a time.
   const testMany = rows => Promise.all(rows.map(r => new Promise(done => {
     const st = $('.status', r);
     if (st && $('.url', r).value.trim() && !r.dataset.members) { st.className = 'status'; st.textContent = '排队中'; st.title = ''; }
-    testQ.push({ r, gen: testGen, done }); sumGroups(); pump();
+    testQ.push({ r, tok: claim(r), epoch: stopEpoch, done }); sumGroups(); pump();
   })));
   // 点播源: the title list becomes a text file on the server (a web source starts from a snapshot of its first pages).
   const editVodText = async r => {
@@ -3006,7 +3011,6 @@ async function renderSettings() {
     const op = e.target.dataset.op; if (!op) return;
     const r = e.target.closest('.srow');
     if (op === 'test') {
-      testGen++;
       if (r.dataset.members) { const ms = blockOf(r).slice(1); return ms.length ? testMany(ms) : toast('这个聚合源没有成员'); }
       return test(r);
     }
@@ -3120,11 +3124,11 @@ async function renderSettings() {
     if (op === 'retry') {
       const bad = rows.filter(r => r.dataset.ok === '0');
       if (!bad.length) return toast('没有不通的源');
-      testGen++; return testMany(bad);
+      return testMany(bad);
     }
     if (op === 'delbad') {
       const todo = rows.filter(r => !r.dataset.ok && !r.dataset.members && $('.url', r).value.trim());
-      if (todo.length) { toast(`还有 ${todo.length} 个没测过，先测速…`); testGen++; await testMany(todo); }
+      if (todo.length) { toast(`还有 ${todo.length} 个没测过，先测速…`); await testMany(todo); }
       const bad = $$('.srow', box).filter(r => r.dataset.ok === '0');
       if (!bad.length) return toast('没有不通的源');
       if (confirm(`删除 ${bad.length} 个不通的源？（已自动重试 ${RETRIES} 次；点「保存」后生效）`)) dropRows(bad);
@@ -3132,7 +3136,7 @@ async function renderSettings() {
     }
     if (op === 'delempty') {
       const todo = rows.filter(r => r.dataset.ok === undefined && !r.dataset.members && !r.dataset.cats && $('.url', r).value.trim());
-      if (todo.length) { toast(`还有 ${todo.length} 个没测过，先测速…`); testGen++; await testMany(todo); }
+      if (todo.length) { toast(`还有 ${todo.length} 个没测过，先测速…`); await testMany(todo); }
       const empty = $$('.srow', box).filter(r => r.dataset.ok === '1' && r.dataset.total === '0');
       if (!empty.length) return toast('没有 0 部内容的点播源');
       if (confirm(`删除 ${empty.length} 个 0 部内容的点播源？（点「保存」后生效）`)) dropRows(empty);
@@ -3197,9 +3201,9 @@ async function renderSettings() {
   if ($('#installBtn')) $('#installBtn').onclick = async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; $('#installBtn').hidden = true; };
   $('#addSite').onclick = () => $('.nm', addRow('site', { name: '', api: '' })).focus();
   $('#addLive').onclick = () => $('.nm', addRow('live', { name: '', url: '' })).focus();
-  $('#testAll').onclick = () => { testGen++; testMany($$('#sites .srow')); };
-  $('#testLives').onclick = () => { testGen++; testMany($$('#lives .srow')); };
-  $('#stopTest').onclick = () => { testGen++; $$('.srow').forEach(r => { if (/测试中|重试|排队/.test($('.status', r)?.textContent || '')) restoreRow(r); }); };
+  $('#testAll').onclick = () => { testMany($$('#sites .srow')); };
+  $('#testLives').onclick = () => { testMany($$('#lives .srow')); };
+  $('#stopTest').onclick = () => { stopEpoch++; $$('.srow').forEach(r => { if (/测试中|重试|排队/.test($('.status', r)?.textContent || '')) restoreRow(r); }); };
   // Drag to reorder (mouse and touch): hold the ⋮⋮ handle. A top-level row travels with its members; a member only moves inside
   // its own group. The page scrolls by itself near the top / bottom edge.
   const bindDrag = box => {
