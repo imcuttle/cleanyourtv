@@ -2,8 +2,6 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $('#view');
-// No pinch zoom (Safari reports it as gesture events).
-for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) addEventListener(ev, e => e.preventDefault());
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // 豆瓣/javdb image CDNs refuse requests without their Referer → go through the server's /img relay.
 const img = u => /^https?:\/\/[^/]*(doubanio|jdbstatic|javdb)\.com\//.test(u || '') ? '/img?u=' + encodeURIComponent(u) : (u || '');
@@ -233,7 +231,7 @@ function toast(msg, sticky) {
 // 在本机用 localhost 打开时，链接里换成局域网地址，不然发给别人是打不开的。
 // 链接里不带访问令牌：对方第一次打开输入一次令牌（深链接会保留，输完直接进到这部片）。
 const LOCAL_HOST = /^(localhost|127\.|\[?::1\]?$)/;
-const shareUrl = hash => (LOCAL_HOST.test(location.hostname) && serverInfo?.urls?.[0] || location.origin) + '/' + hash;
+const shareUrl = hash => location.origin + '/' + hash;   // 按当前打开的地址 (host) 生成，不替换成别的网卡地址
 async function copyText(t) {
   try { await navigator.clipboard.writeText(t); return true; } catch {}
   // http 的局域网地址不是安全上下文，没有 clipboard API：用选中文本 + execCommand 兜底
@@ -243,34 +241,11 @@ async function copyText(t) {
   let ok = false; try { ok = document.execCommand('copy'); } catch {}
   ta.remove(); return ok;
 }
-let closeShare = () => {};
-function shareMenu(anchor, hash, label) {
-  closeShare();
-  infoP().catch(() => {});   // 点选项时要同步拿到局域网地址（Safari 里 await 之后复制会被拒）
-  const m = document.createElement('div');
-  m.className = 'sharemenu'; m.setAttribute('role', 'menu');
-  m.innerHTML = `<div class="sh-h">分享「${esc(label)}」</div>
-    <button type="button" data-k="plain"><b>复制链接</b><small>链接里不含令牌，对方打开后输入一次访问令牌</small></button>
-    ${navigator.share ? '<button type="button" data-k="sys"><b>系统分享…</b></button>' : ''}`;
-  document.body.append(m);
-  const r = anchor.getBoundingClientRect(), w = m.offsetWidth, h = m.offsetHeight;
-  m.style.left = Math.min(Math.max(8, r.right - w), innerWidth - w - 8) + 'px';
-  m.style.top = (r.bottom + 8 + h > innerHeight - 8 ? Math.max(8, r.top - h - 8) : r.bottom + 8) + 'px';
-  const off = [];
-  const on = (t, ev, fn, o) => { t.addEventListener(ev, fn, o); off.push(() => t.removeEventListener(ev, fn, o)); };
-  closeShare = () => { off.forEach(f => f()); m.remove(); closeShare = () => {}; };
-  on(document, 'pointerdown', e => { if (!m.contains(e.target) && !anchor.contains(e.target)) closeShare(); }, true);
-  on(document, 'keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); closeShare(); } }, true);
-  on(window, 'hashchange', () => closeShare()); on(window, 'popstate', () => closeShare()); on(window, 'resize', () => closeShare());
-  m.onclick = async e => {
-    const b = e.target.closest('button[data-k]'); if (!b) return;
-    const k = b.dataset.k, url = shareUrl(hash);
-    closeShare();
-    if (k === 'sys') return navigator.share({ title: label, url }).catch(() => {});
-    if (await copyText(url)) toast('链接已复制');
-    else prompt('复制这个链接：', url);
-  };
-  m.querySelector('button')?.focus({ preventScroll: true });
+// 分享 = 直接复制链接（链接里不含令牌，对方打开后输入一次访问令牌）
+async function shareNow(hash) {
+  const url = shareUrl(hash);
+  if (await copyText(url)) toast('链接已复制');
+  else prompt('复制这个链接：', url);
 }
 const spinner = '<div class="spinner"></div>';
 const fmtSize = b => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : b > 1e7 ? (b / 1e6).toFixed(0) + ' MB' : (b / 1e6).toFixed(1) + ' MB';
@@ -508,6 +483,7 @@ async function loadSites() {
   $('.picker').hidden = !state.sites.length;
   $('#levelTag').hidden = j.level === 'standard';
   $('[data-nav=favorites]').hidden = j.level === 'kids';
+  document.documentElement.classList.toggle('kidslevel', j.level === 'kids');
   $('[data-nav=charts]').hidden = j.level === 'kids';
   chartCat = null;
   $('#levelTag').textContent = j.level === 'kids' ? '少儿' : '无限';
@@ -552,7 +528,15 @@ const closeMenu = () => { $('#siteMenu').hidden = true; $('#siteBtn').classList.
 const sheetScrim = $('#sheetScrim');
 {
   const sheets = () => [$('#siteMenu'), $('#liveMenu')].filter(Boolean);
-  const sync = () => { const on = matchMedia('(max-width: 760px)').matches && sheets().some(m => !m.hidden); sheetScrim.hidden = !on; document.body.classList.toggle('sheet-open', on); };
+  // The 直播源 sheet is built inside #view (a fixed layer below the scrim), so on a phone it moves to <body> while open and goes back when closed.
+  const dockLive = () => {
+    const m = $('#liveMenu'); if (!m) return;
+    const mobile = matchMedia('(max-width: 760px)').matches;
+    if (!m.hidden && mobile && m.parentElement !== document.body) document.body.append(m);
+    else if ((m.hidden || !mobile) && m.parentElement === document.body) { const home = $('#view .lpick'); if (home) home.append(m); else m.remove(); }
+  };
+  const sync = () => { dockLive(); const on = matchMedia('(max-width: 760px)').matches && sheets().some(m => !m.hidden); sheetScrim.hidden = !on; document.body.classList.toggle('sheet-open', on); document.body.classList.toggle('live-sheet', on && !!$('#liveMenu') && !$('#liveMenu').hidden); };
+  addEventListener('hashchange', () => { const m = $('#liveMenu'); if (m && m.parentElement === document.body) { m.hidden = true; $('#liveBtn')?.classList.remove('open'); } });
   const mo = new MutationObserver(sync);
   const watch = () => sheets().forEach(m => { if (!m._w) { m._w = 1; mo.observe(m, { attributes: true, attributeFilter: ['hidden'] }); } });
   watch(); new MutationObserver(watch).observe(document.body, { childList: true, subtree: true });
@@ -707,7 +691,12 @@ smallScreen.addEventListener('change', () => { if (!smallScreen.matches) closeSo
 addEventListener('hashchange', closeSov);
 syncScope();
 // The page scrolls inside #view (not the window), so the scrollbar belongs to the content and the header / tab bar stay put.
-view.addEventListener('scroll', () => $('#top').classList.toggle('solid', view.scrollTop > 30), { passive: true });
+{
+  const top = $('#top'); let hs = -1;
+  const paintTop = () => { const v = Math.min(1, Math.max(0, view.scrollTop / 90)); if (Math.abs(v - hs) < .01) return; hs = v; top.style.setProperty('--hs', v.toFixed(3)); top.classList.toggle('solid', v > .3); };
+  view.addEventListener('scroll', paintTop, { passive: true });
+  new MutationObserver(paintTop).observe(view, { childList: true });
+}
 addEventListener('hashchange', () => route({ nav: true }));
 
 let heroTimer, pageTimer;
@@ -801,6 +790,7 @@ async function route(opts = {}) {
     }).catch(e => { if (!isAbort(e)) throw e; });
   }
   $$('nav a').forEach(n => n.classList.toggle('on', n.dataset.nav === (page || 'home')));
+  $('#mineTab')?.classList.toggle('on', ['favorites', 'downloads', 'settings'].includes(page));
   restoreCtl?.();
   const restoreY = entryScroll();
   scrollGuard = true;                                     // don't let the jump to the top overwrite the saved offset
@@ -1028,7 +1018,7 @@ function hero(items) {
       <div class="info"><h1>${esc(it.name)}</h1>
         <div class="meta"><span class="dbtag" hidden></span>${esc([it.year, it.area, it.type, it.remarks].filter(x => x && x !== '0').join('  ·  '))}</div>
         <p>${esc(it.blurb)}</p>
-        <div class="btns"><button class="btn play">▶ 播放</button><button class="btn more">ⓘ 详细信息</button></div></div>
+        <div class="btns"><button class="btn play">▶ 播放</button><button class="btn more">ⓘ 详情</button></div></div>
       <div class="dots">${items.map((_, k) => `<i class="${k === i ? 'on' : ''}" data-k="${k}"></i>`).join('')}</div>`;
     el.querySelector('.play').onclick = () => openDetail(it.site, it.id, true);
     el.querySelector('.more').onclick = () => openDetail(it.site, it.id);
@@ -1059,7 +1049,7 @@ function renderHistory() {
   const list = hist.list();
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
   view.innerHTML = `<div class="page"><div class="pagehead"><h1>观看历史</h1>
-      ${list.length ? '<button class="small feedgo" data-feed="hist">▶ 沉浸观看</button><button class="small" data-clear="hist">清空全部</button>' : ''}</div>
+      ${list.length ? `<button class="small ibs feedgo" data-feed="hist" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button><button class="small ibs" data-clear="hist" title="清空全部" aria-label="清空全部">${IC.trash}</button>` : ''}</div>
     <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有观看记录。</p>
     ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'hist', sub: `${names[it.site] || it.siteName} · ${it.epName || ''}` })).join('')}</div>` : ''}</div>`;
   observeRatings(view);
@@ -1069,8 +1059,8 @@ function renderFavorites() {
   if (kidsMode()) { view.innerHTML = '<div class="page"><h1>我的收藏</h1><p class="empty">儿童模式下收藏不可见。</p></div>'; return; }
   const list = favs.list();
   view.innerHTML = `<div class="page"><div class="pagehead"><h1>我的收藏</h1>
-      ${list.length ? '<button class="small feedgo" data-feed="fav">▶ 沉浸观看</button><button class="small" data-clear="fav">清空全部</button>' : ''}</div>
-    <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有收藏。打开影片，点「＋ 收藏」。</p>
+      ${list.length ? `<button class="small ibs feedgo" data-feed="fav" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button><button class="small ibs" data-clear="fav" title="清空全部" aria-label="清空全部">${IC.trash}</button>` : ''}</div>
+    <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有收藏。打开影片，点封面页的「♡」。</p>
     ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'fav', sub: [it.siteName, it.type].filter(Boolean).join(' · ') })).join('')}</div>` : ''}</div>`;
   observeRatings(view);
 }
@@ -1128,7 +1118,7 @@ async function renderPerson(role, name, scopeKey = '') {
 async function renderCategory(t, name, siteKey) {
   const site = state.sites.some(x => x.key === siteKey) ? siteKey : state.site;
   const other = site !== state.site ? state.sites.find(x => x.key === site)?.name : '';
-  const head = `<div class="page"><div class="pagehead"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><button class="small feedgo" data-feed="cat" data-t="${esc(t || '')}" data-name="${esc(name || '全部')}" data-site="${esc(site)}">▶ 沉浸观看</button></div><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
+  const head = `<div class="page"><div class="pagehead"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><button class="small ibs feedgo" data-feed="cat" data-t="${esc(t || '')}" data-name="${esc(name || '全部')}" data-site="${esc(site)}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button></div><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
   let pg = 0, count = 1, busy = false;
   const seen = new Set();
   const sk = history.state?.sk;
@@ -1229,7 +1219,7 @@ async function renderSearch(q, scopeKey = '') {
   };
   const status = shown => `${scoped ? `仅「${esc(scoped.name)}」` : `${nSrc} 个源`}，${shown} 部影片${shown < res.length ? `（合并了 ${res.length - shown} 条重复）` : ''}${people.length ? `，${people.length} 位演职员` : ''}${j.failed.length ? `；${esc(j.failed.join(' / '))} 未响应` : ''}`;
   const first = cards();
-  view.innerHTML = `<div class="page"><div class="pagehead"><h1>“${esc(q)}”</h1>${res.length ? `<button class="small feedgo" data-feed="search" data-q="${esc(q)}" data-scope="${esc(scoped ? scoped.key : '')}">▶ 沉浸观看</button>` : ''}</div>
+  view.innerHTML = `<div class="page"><div class="pagehead"><h1>“${esc(q)}”</h1>${res.length ? `<button class="small ibs feedgo" data-feed="search" data-q="${esc(q)}" data-scope="${esc(scoped ? scoped.key : '')}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button>` : ''}</div>
     <div class="stool">
       <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>仅 ${esc(curName)}</span></button></div>
       <label class="swt" title="同名同年的影片只显示一张，点开后在「其他源」里切换"><input type="checkbox" id="sMerge" ${searchMerge.on() ? 'checked' : ''}><i></i><span>合并同名资源</span></label>
@@ -1396,6 +1386,11 @@ const IC = {
   pause: svgI('M8 5v14M16 5v14'),
   play: svgI('M7 4.5v15l12-7.5z'),
   retry: svgI('M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5'),
+  feed: svgI('M5 3h14v18H5zM10 9.2v5.6l4.5-2.8z'),
+  trash: svgI('M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3'),
+  clear: svgI('M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3'),
+  top: svgI('M12 19V7M6 12.5l6-6 6 6M5 3.5h14'),
+  save: svgI('M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3M4 3h4M16 3h4'),
   wait: svgI('M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'),
 };
 
@@ -1406,6 +1401,7 @@ async function enqueue(d, line, eps) {
   $('#modal')?.pollDl?.();
 }
 
+const saveFiles = new Map();   // 已取到内存、等着弹分享面板的文件 (href -> File)
 async function renderDownloads() {
   const status = { queued: '排队中', downloading: '下载中', done: '已完成', error: '失败', paused: '已暂停' };
   const draw = async () => {
@@ -1416,8 +1412,8 @@ async function renderDownloads() {
     const anyActive = j.jobs.some(x => ACTIVE.includes(x.status)), anyPaused = j.jobs.some(x => ['paused', 'error'].includes(x.status));
     const totalSpeed = j.jobs.reduce((n, x) => n + (x.speed || 0), 0);
     view.innerHTML = `<div class="page"><div class="pagehead"><h1>下载</h1>
-        ${anyActive ? '<button class="small" data-op="pause" data-all>全部暂停</button>' : ''}
-        ${anyPaused ? '<button class="small" data-op="resume" data-all>全部开始</button>' : ''}
+        ${anyActive ? `<button class="small ibs" data-op="pause" data-all title="全部暂停" aria-label="全部暂停">${IC.pause}</button>` : ''}
+        ${anyPaused ? `<button class="small ibs" data-op="resume" data-all title="全部开始" aria-label="全部开始">${IC.play}</button>` : ''}
         ${totalSpeed ? `<span class="spd">${fmtSpeed(totalSpeed)}</span>` : ''}</div>
       <p class="lan">同时下载 ${j.maxJobs} 集，其余排队。保存在服务端 <code>${esc(j.dir)}</code>，局域网里任何设备都能播放。已用 ${fmtSize(total)}${j.free ? `，磁盘剩余 ${fmtSize(j.free)}` : ''}。</p>
       ${j.jobs.length ? `<div class="dls">${j.jobs.map(x => {
@@ -1428,18 +1424,45 @@ async function renderDownloads() {
             <div class="lan">${esc(x.siteName)} · ${status[x.status] || x.status}${x.status === 'queued' && x.qpos ? ` 第 ${x.qpos} 位` : ''}${['downloading', 'paused'].includes(x.status) ? ` ${pct}%` : ''} · ${fmtSize(x.bytes || 0)}${x.status === 'downloading' && x.speed ? ` · <b class="spd">${fmtSpeed(x.speed)}</b> · ${fmtEta(x.eta)}` : ''}${x.error ? ' · ' + esc(x.error) : ''}</div>
             <div class="bar"><i style="width:${x.status === 'done' ? 100 : pct}%"></i></div></div>
           <div class="dops">
-            ${x.status === 'done' ? `<button class="btn play sm" data-op="play">▶ 播放</button><a class="small" href="/dl/${esc(x.id)}/save" download>保存到本机</a>` : ''}
-            ${['queued', 'downloading'].includes(x.status) ? '<button class="small" data-op="pause">⏸ 暂停</button>' : ''}
-            ${['paused', 'error'].includes(x.status) ? `<button class="small" data-op="resume">▶ ${x.status === 'error' ? '重试' : '继续'}</button>` : ''}
-            ${(x.status === 'queued' && x.qpos > 1) || ['paused', 'error'].includes(x.status) ? '<button class="small" data-op="top" title="排到队首，下一个就下">⇡ 优先</button>' : ''}
-            <button class="small" data-op="del">删除</button></div></div>`;
-      }).join('')}</div>` : '<p class="empty">还没有下载。打开任意影片，点「⬇ 下载」再选集。</p>'}</div>`;
+            ${x.status === 'done' ? `<button class="small ibs ok" data-op="play" title="播放" aria-label="播放">${IC.play}</button><a class="small ibs" href="/dl/${esc(x.id)}/save" download title="保存到本机" aria-label="保存到本机">${IC.save}</a>` : ''}
+            ${['queued', 'downloading'].includes(x.status) ? `<button class="small ibs" data-op="pause" title="暂停" aria-label="暂停">${IC.pause}</button>` : ''}
+            ${['paused', 'error'].includes(x.status) ? `<button class="small ibs" data-op="resume" title="${x.status === 'error' ? '重试' : '继续'}" aria-label="${x.status === 'error' ? '重试' : '继续'}">${x.status === 'error' ? IC.retry : IC.play}</button>` : ''}
+            ${(x.status === 'queued' && x.qpos > 1) || ['paused', 'error'].includes(x.status) ? `<button class="small ibs" data-op="top" title="排到队首，下一个就下" aria-label="优先">${IC.top}</button>` : ''}
+            <button class="small ibs" data-op="del" title="删除" aria-label="删除">${IC.trash}</button></div></div>`;
+      }).join('')}</div>` : '<p class="empty">还没有下载。打开任意影片，点封面页的下载图标再选集。</p>'}</div>`;
   };
   await draw();
   view.onclick = async e => {
-    const op = e.target.dataset.op; if (!op) return;
-    if (e.target.dataset.all !== undefined) { await req('PATCH', `/api/downloads?id=*&action=${op}`); return draw(); }
-    const id = e.target.closest('.dl').dataset.id;
+    // iOS 主屏幕应用里 <a download> / window.open 都不行 (应用内预览页退不出来 / 白屏)：先把文件取到内存，再用系统分享面板存到「文件」。
+    // 分享要用户手势，而取文件要一会儿，所以分两下：第一下取文件，第二下弹分享。
+    const sv = e.target.closest('a[href$="/save"]');
+    if (sv && /iPad|iPhone|iPod/.test(navigator.userAgent) && (navigator.standalone || matchMedia('(display-mode: standalone)').matches)) {
+      e.preventDefault();
+      const href = sv.getAttribute('href'), x = state.downloads.find(j => href.includes('/' + j.id + '/'));
+      const have = saveFiles.get(href);
+      if (have) {
+        try { await navigator.share({ files: [have] }); saveFiles.delete(href); sv.classList.remove('ok'); }
+        catch (err) { if (err.name !== 'AbortError') toast('无法打开系统分享：' + err.message); }
+        return;
+      }
+      if (sv.dataset.busy) return;
+      if (!navigator.canShare) return toast('这个系统版本不支持从应用里保存文件，请用 Safari 打开本页下载');
+      if (x && x.bytes > 1.5e9) return toast(`文件有 ${fmtSize(x.bytes)}，太大了，应用里放不下。请用电脑或 Safari 打开本页下载`);
+      sv.dataset.busy = '1'; toast(`正在准备文件${x ? '（' + fmtSize(x.bytes) + '）' : ''}，请稍等…`);
+      try {
+        const r = await fetch(href); if (!r.ok) throw new Error('HTTP ' + r.status);
+        const name = decodeURIComponent((/filename\*=UTF-8''([^;]+)/.exec(r.headers.get('content-disposition') || '') || [])[1] || 'video.mp4');
+        const blob = await r.blob(), file = new File([blob], name, { type: blob.type || 'video/mp4' });
+        if (!navigator.canShare({ files: [file] })) throw new Error('系统不接受这个文件');
+        saveFiles.set(href, file); sv.classList.add('ok'); toast('文件已准备好，再点一次「保存」按钮，选「存储到文件」');
+      } catch (err) { toast('准备文件失败：' + err.message); }
+      finally { delete sv.dataset.busy; }
+      return;
+    }
+    const ob = e.target.closest('[data-op]'); if (!ob) return;
+    const op = ob.dataset.op;
+    if (ob.dataset.all !== undefined) { await req('PATCH', `/api/downloads?id=*&action=${op}`); return draw(); }
+    const id = ob.closest('.dl').dataset.id;
     const x = state.downloads.find(j => j.id === id);
     if (op === 'play') { cur = { kind: 'local', eps: [{ name: x.epName, url: x.play }], ep: 0, title: x.name }; return openPlayer(0); }
     if (op === 'del' && !confirm(`删除「${x.name} ${x.epName}」？`)) return;
@@ -1524,7 +1547,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
       $('#extPlay', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'play');
       $('#extReveal', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'reveal');
     }
-    $('#shareBtn', m).onclick = e => shareMenu(e.currentTarget, vodHref(site, id), d.name);
+    $('#shareBtn', m).onclick = () => shareNow(vodHref(site, id));
     if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
@@ -1698,13 +1721,17 @@ video.addEventListener('enterpictureinpicture', onEnterPip);
 video.addEventListener('leavepictureinpicture', onLeavePip);
 // iOS Safari older than the standard API: same thing through the presentation mode.
 video.addEventListener('webkitpresentationmodechanged', () => (video.webkitPresentationMode === 'picture-in-picture' ? onEnterPip : onLeavePip)());
-const pipSupported = () => !!(document.pictureInPictureEnabled || video.webkitSupportsPresentationMode?.('picture-in-picture'));
+// 浏览器 / 系统自带的小窗 (标准 API, 或 iOS 的 webkit 接口) 只要有就显示
+let pipFailed = false;
+const pipSupported = () => !pipFailed && !(/iPad|iPhone|iPod/.test(navigator.userAgent) && (navigator.standalone || matchMedia('(display-mode: standalone)').matches)) && !video.disablePictureInPicture && !!(document.pictureInPictureEnabled || typeof video.webkitSetPresentationMode === 'function');
+// 装到主屏幕 (触屏) 的应用本来就是全屏, 全屏按钮没有意义; 浏览器里、桌面的独立窗口里保留
+const hideFs = () => !fineCursor && (navigator.standalone || matchMedia('(display-mode: standalone)').matches);
 function togglePip() {
   if (pipOn || document.pictureInPictureElement || video.webkitPresentationMode === 'picture-in-picture') {
     return document.exitPictureInPicture ? document.exitPictureInPicture().catch(() => {}) : video.webkitSetPresentationMode('inline');
   }
   const p = video.requestPictureInPicture ? video.requestPictureInPicture() : (video.webkitSetPresentationMode('picture-in-picture'), Promise.resolve());
-  return p.catch(() => toast('这个浏览器不支持小窗播放'));
+  return p.catch(() => { pipFailed = true; $('[data-act=pip]').hidden = true; $('[data-c=pip]').hidden = true; toast('这个浏览器不支持小窗播放'); });
 }
 // 小窗 + 后台播放: leaving the app (home / another app / lock screen) while something plays shrinks it into the small window
 // where the browser allows it (Safari: autoPictureInPicture; Chrome: the Media Session hook below), and the lock-screen /
@@ -1741,6 +1768,11 @@ function play(d, line, ep) {
   const h = hist.get(d.site, d.id);
   openPlayer(h && h.line === line && h.ep === ep && h.dur - h.t > 30 ? h.t : 0);
 }
+// 沉浸看片的「全屏观看」: 从指定进度接着用普通播放器播放
+function playAt(d, line, ep, t) {
+  cur = { kind: 'vod', d, line, ep, eps: d.lines[line].episodes, title: d.name };
+  openPlayer(t);
+}
 function playLive(channels, idx) {
   cur = { kind: 'live', eps: channels.map(c => ({ name: c.name, url: c.url, logo: c.logo })), ep: idx };
   openPlayer(0);
@@ -1755,6 +1787,7 @@ function openPlayer(startAt) {
   $('[data-act=prev]').hidden = cur.ep <= 0;
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
+  $('[data-act=fs]').hidden = hideFs();
   $('[data-act=pip]').hidden = !pipSupported() || fineCursor;   // desktop has it in the control bar
   syncMedia();
   $('[data-act=star]').hidden = !live;
@@ -1824,9 +1857,9 @@ function step(n) { cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)
 function renderPlist() {
   const box = $('.plist'), live = cur.kind === 'live';
   box.classList.toggle('live', live);
-  box.innerHTML = `<div class="phead"><b>${live ? '频道' : '选集'}</b><span>${cur.ep + 1} / ${cur.eps.length}</span>
+  box.innerHTML = `<div class="phead"><i class="grab"></i><b>${live ? '频道' : '选集'}</b><span>${cur.ep + 1} / ${cur.eps.length}</span>
       <button class="icon sm" data-pclose title="关闭">✕</button></div>
-    ${cur.eps.length > 20 ? `<input class="pfind" type="search" placeholder="${live ? '搜频道' : '搜集数'}">` : ''}
+    ${live || cur.eps.length > 20 ? `<input class="pfind" type="search" enterkeyhint="search" autocomplete="off" placeholder="${live ? '搜频道' : '搜集数'}">` : ''}
     <div class="pitems">${cur.eps.map((e, i) => `<button data-i="${i}" class="${i === cur.ep ? 'on' : ''}">${live ? `<em>${i + 1}</em>` : ''}<span>${esc(e.name)}</span></button>`).join('')}</div>`;
   $('[data-pclose]', box).onclick = () => togglePlist(false);
   $$('.pitems button', box).forEach(b => b.onclick = () => { cur.ep = +b.dataset.i; togglePlist(false); openPlayer(0); });
@@ -1866,7 +1899,8 @@ player.addEventListener('click', e => {
     const c = cur.eps[cur.ep], live = cur.kind === 'live';
     const hash = live ? `#/tv/${encodeURIComponent(localStorage.live || '')}/${encodeURIComponent(c.url)}/${encodeURIComponent(c.name || '')}`
       : playHref(cur.d.site, cur.d.id, cur.line, cur.ep);
-    return shareMenu(e.target.closest('[data-act]'), hash, live ? c.name : cur.eps.length > 1 ? `${cur.title} ${c.name}` : cur.title);
+    $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false);
+    return shareNow(hash);
   }
   if (act === 'vfav') { toast(favs.toggle(cur.d) ? '已收藏' : '已取消收藏'); return paintVodActs(); }
   if (act === 'dl') {
@@ -1876,10 +1910,11 @@ player.addEventListener('click', e => {
     return enqueue(cur.d, cur.line, [cur.ep]).then(paintVodActs, err => toast(err.message));
   }
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); paintStar(liveFavs.has(c.url)); return; }
-  if (act === 'more') { const on = $('.pacts').classList.toggle('exp'); e.target.closest('[data-act]').setAttribute('aria-expanded', on); return; }
+  if (act === 'more') { const m = $('.pmore'); m.hidden = !m.hidden; e.target.closest('[data-act]').setAttribute('aria-expanded', !m.hidden); return; }
   if (act === 'rate') return cycleRate();
   if (act === 'fs') return toggleFs();
   if (act === 'lock') return setLock(true);
+  if (!$('.pmore').hidden && !e.target.closest('.pmore, [data-act=more]')) { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); }
   if (!$('.plist').hidden && !e.target.closest('.plist, .pbar, .pacts')) togglePlist(false);
 });
 function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && !scrubbing && !gesturing && !(fineCursor && ctrl.matches(':hover')) && player.classList.add('idle'), fineCursor ? 3000 : 4000); }
@@ -1900,8 +1935,11 @@ video.controls = false;
 let gesturing = false;
 document.documentElement.classList.toggle('touchui', !fineCursor);
 const pacts = $('.pacts');
-if (!fineCursor) ctrl.append(pacts);
+if (!fineCursor) { ctrl.append(pacts); $('.pmore').prepend($('[data-act=vfav]'), $('[data-act=star]'), $('[data-act=dl]')); }   // 触屏: 收藏 / 下载 / 分享 / 倍速都在「更多」里
+else pacts.insertBefore($('[data-act=share]'), $('[data-act=more]'));   // desktop: no 更多, share stays in the top bar
 $('[data-c=pip]').hidden = !pipSupported();
+$('[data-c=fs]').hidden = hideFs();
+video.addEventListener('loadedmetadata', () => { if (cur) $('[data-act=pip]').hidden = !pipSupported() || fineCursor; });
 const fmtT = s => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = String(s % 60).padStart(2, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`; };
 const isVodTime = () => Number.isFinite(video.duration) && video.duration > 0;
 function paintCtrl() {
@@ -2125,7 +2163,7 @@ addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') video.currentTime -= 10;
   if (e.key === 'n' || e.key === 'PageDown') step(1);
   if (e.key === 'p' || e.key === 'PageUp') step(-1);
-  if (e.key === 'f') toggleFs();
+  if (e.key === 'f' && !hideFs()) toggleFs();
   if (e.key === 'm') video.muted = !video.muted;
   if (cur?.kind === 'live' && e.key === 'ArrowDown') { e.preventDefault(); step(1); }
   if (cur?.kind === 'live' && e.key === 'ArrowUp') { e.preventDefault(); step(-1); }
@@ -2134,6 +2172,7 @@ addEventListener('keydown', e => {
 // ---------- live ----------
 let serverInfo = null;
 const infoP = () => serverInfo ? Promise.resolve(serverInfo) : get('/api/info', null).then(j => (serverInfo = j), () => ({ urls: [], ffmpeg: false }));
+infoP().catch(() => {});   // 提前拿局域网地址：分享要同步生成链接再复制（Safari 里 await 之后复制会被拒）
 // Covers: two at a time (ffmpeg can take seconds per channel), dropped when the page changes.
 const thumbQueue = []; let thumbActive = 0;
 function thumbPump() {
@@ -2253,6 +2292,7 @@ async function renderLive() {
   if (!state.lives.some(l => l.key === localStorage.live)) localStorage.live = state.lives[0].key;
   // The frame is built once; switching source only swaps #liveBody (no re-layout of the header, no jump).
   if (!$('#liveHead')) {
+    $$('body > #liveMenu').forEach(x => x.remove());
     view.innerHTML = `<div class="page"><div class="pagehead" id="liveHead"><h1>直播</h1>
       <div class="lpick"><button id="liveBtn" class="sitebtn lbtn" type="button"><span id="lmName"></span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <div id="liveMenu" class="menu lmenu" hidden>
@@ -3081,14 +3121,6 @@ addEventListener('focus', async () => {
   } catch {}
 });
 
-async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); return true; } catch {}
-  const ta = document.createElement('textarea');
-  ta.value = text; ta.style.cssText = 'position:fixed;top:0;opacity:0'; document.body.append(ta); ta.select();
-  let ok = false; try { ok = document.execCommand('copy'); } catch {}
-  ta.remove(); return ok;
-}
-
 async function recognizeFlow(text, quiet) {
   if ($('#clipModal')) return;
   localStorage.clipSeen = clipKey(text);
@@ -3137,3 +3169,23 @@ loadSites().then(() => route({ nav: true }), e => { view.innerHTML = `<div class
 applyCardMode();
 
 setInterval(() => { if (cur?.kind === 'vod' && !player.hidden && state.downloads.some(j => ACTIVE.includes(j.status))) refreshDownloads().then(paintVodActs); }, 2000);
+
+// ---------- 小屏底部「我的」: 收藏 / 下载 / 设置收进一个菜单 (二级菜单再进入各页) ----------
+{
+  const tab = $('#mineTab'); let menu = null;
+  const close = () => { menu?.remove(); menu = null; tab.setAttribute('aria-expanded', 'false'); };
+  const ICONS = { favorites: tab.ownerDocument.querySelector('[data-nav=favorites] svg').outerHTML, downloads: $('[data-nav=downloads] svg').outerHTML, settings: $('[data-nav=settings] svg').outerHTML };
+  tab.addEventListener('click', e => {
+    e.preventDefault(); e.stopPropagation();
+    if (menu) return close();
+    const kids = document.documentElement.classList.contains('kidslevel');
+    const rows = [['downloads', '下载'], ['settings', '设置']]; if (!kids) rows.unshift(['favorites', '收藏']);
+    menu = document.createElement('div'); menu.className = 'minemenu'; menu.setAttribute('role', 'menu');
+    menu.innerHTML = rows.map(([k, t]) => `<a href="#/${k}" role="menuitem" class="${location.hash.startsWith('#/' + k) ? 'on' : ''}">${ICONS[k]}<span>${t}</span></a>`).join('');
+    document.body.append(menu); tab.setAttribute('aria-expanded', 'true');
+    menu.addEventListener('click', () => setTimeout(close, 0));
+  });
+  document.addEventListener('click', e => { if (menu && !menu.contains(e.target)) close(); });
+  addEventListener('hashchange', close);
+  matchMedia('(max-width: 760px)').addEventListener('change', close);
+}

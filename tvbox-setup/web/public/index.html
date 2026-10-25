@@ -14,7 +14,7 @@
 <link rel="icon" href="icon.svg">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20261026a">
 <style>
 /* 访问令牌蒙层。html 的 data-auth 属性由服务端写：1 已登录（蒙层从头到尾不存在）、0 未登录（首帧就是登录框）；
    pending = 正在用浏览器里记住的令牌自动登录（只显示 logo，不闪登录框）。没有这个属性 = 离线缓存的页面，按 pending 处理。 */
@@ -140,6 +140,7 @@ html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
     <a href="#/favorites" data-nav="favorites"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21l-1.5-1.3C5.4 15.1 2 12 2 8.5A4.5 4.5 0 0 1 6.5 4c1.7 0 3.4.8 4.5 2.1C12.1 4.8 13.8 4 15.5 4A4.5 4.5 0 0 1 20 8.5c0 3.5-3.4 6.6-8.5 11.2z"/></svg><span>收藏</span></a>
     <a href="#/downloads" data-nav="downloads"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h2v9l3.5-3.5 1.4 1.4L12 16 6.1 9.9l1.4-1.4L11 12zM4 18h16v3H4z"/></svg><span>下载</span></a>
     <a href="#/settings" data-nav="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.7 1.7 1L11 21h4l.4-2.9c.6-.3 1.2-.6 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg><span>设置</span></a>
+    <a href="#/me" class="mine" data-nav="me" id="mineTab" role="button" aria-haspopup="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.2 4.2 0 1 0 0-8.4 4.2 4.2 0 0 0 0 8.4zM4 21c0-4.4 3.6-7.4 8-7.4s8 3 8 7.4z"/></svg><span>我的</span></a>
   </nav>
   <div class="right">
     <form id="searchForm" class="search" role="search">
@@ -189,25 +190,25 @@ html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
     <div class="pacts">
       <button class="pill" data-act="star" hidden title="收藏频道"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17.3l-5.8 3.4 1.5-6.6L2.6 9.6l6.7-.6L12 2.8l2.7 6.2 6.7.6-5.1 4.5 1.5 6.6z"/></svg><span class="l">收藏</span></button>
       <button class="pill" data-act="vfav" hidden title="收藏"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5l-1.2-1.1C5.9 15 3 12.4 3 9a4.5 4.5 0 0 1 8-2.8A4.5 4.5 0 0 1 21 9c0 3.4-2.9 6-7.8 10.4z"/></svg><span class="l">收藏</span></button>
-      <button class="pill" data-act="prev" title="上一集"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M19 5L9 12l10 7z"/></svg><span class="l">上一集</span></button>
-      <button class="pill" data-act="next" title="下一集"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M5 5l10 7-10 7z"/></svg><span class="l">下一集</span></button>
-      <button class="pill" data-act="list" title="选集"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h12M4 12h12M4 18h8M17 14l4 3-4 3z"/></svg><span class="l">选集</span></button>
-      <button class="pill mo" data-act="rate" title="倍速"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a9 9 0 1 0 9 9M12 13l5-5"/></svg><span class="l">1x</span></button>
-      <button class="pill mo morebtn" data-act="more" title="更多" aria-label="更多" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg><span class="l">更多</span></button>
-      <div class="psec">
-      <button class="pill" data-act="share" hidden title="分享链接"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2"/></svg><span class="l">分享</span></button>
       <button class="pill" data-act="dl" hidden title="下载"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 20h14"/></svg><span class="l">下载</span></button>
       <button class="pill" data-act="ext" hidden title="用系统默认播放器打开这个文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg><span class="l">播放器</span></button>
       <button class="pill" data-act="pip" hidden title="小窗播放：切到别的应用也不会停"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3zM12 12h7v5h-7z"/></svg><span class="l">小窗</span></button>
-      <button class="pill mo" data-act="lock" title="锁定屏幕"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3"/></svg><span class="l">锁定</span></button>
-      <button class="pill mo" data-act="fs" title="全屏"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg><span class="l">全屏</span></button>
+      <button class="pill" data-act="prev" title="上一集"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M19 5L9 12l10 7z"/></svg><span class="l">上一集</span></button>
+      <button class="pill" data-act="next" title="下一集"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M5 5l10 7-10 7z"/></svg><span class="l">下一集</span></button>
+      <button class="pill" data-act="list" title="选集"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h12M4 12h12M4 18h8M17 14l4 3-4 3z"/></svg><span class="l">选集</span></button>
+      <button class="pill" data-act="fs" title="全屏"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg><span class="l">全屏</span></button>
+      <button class="pill morebtn" data-act="more" title="更多" aria-label="更多" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg><span class="l">更多</span></button>
+      <div class="pmore" hidden>
+      <button class="pill" data-act="share" hidden title="分享链接"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2"/></svg><span class="l">分享</span></button>
+      <button class="pill" data-act="rate" title="倍速"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a9 9 0 1 0 9 9M12 13l5-5"/></svg><span class="l">1x</span></button>
       </div>
     </div>
   </div>
   <div class="pmsg"></div>
   <div class="pskip" hidden></div>
   <div class="phud" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path class="h-sun" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/><path class="h-vol" d="M4 9v6h4l5 5V4L8 9zM16 8.5a5 5 0 0 1 0 7"/></svg><div class="hbar"><i></i></div></div>
-  <button class="plock" hidden aria-label="解锁"><svg viewBox="0 0 24 24"><path d="M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3"/></svg></button>
+  <button class="plockbtn" data-act="lock" title="锁定屏幕" aria-label="锁定屏幕"><svg viewBox="0 0 24 24"><path d="M6 11h12v9H6zM8 11V8a4 4 0 0 1 7.6-1.7"/><path d="M12 15.2v1.6"/></svg></button>
+  <button class="plock" hidden aria-label="解锁"><svg viewBox="0 0 24 24"><path d="M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3"/><path d="M12 15.2v1.6"/></svg></button>
   <div class="pcenter">
     <button data-c="back" aria-label="后退 10 秒"><svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"/><text x="12" y="16.5">10</text></svg></button>
     <button data-c="play" aria-label="播放 / 暂停"><svg viewBox="0 0 24 24"><path class="i-play" d="M7 4.5v15l12-7.5z"/><path class="i-pause" d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg></button>
@@ -234,7 +235,7 @@ html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
 
 <script>if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));</script>
 <script src="vendor/hls.min.js"></script>
-<script src="app.js"></script>
-<script src="feed.js"></script>
+<script src="app.js?v=20261026a"></script>
+<script src="feed.js?v=20261026a"></script>
 </body>
 </html>

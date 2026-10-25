@@ -31,7 +31,6 @@ root.innerHTML = `
     <span class="fd-grow"></span>
     <button class="fd-mode" data-a="mode"><span></span>${I.caret}</button>
     <span class="fd-grow"></span>
-    <button class="fd-ic fd-fine" data-a="fs" title="全屏 (f)" aria-label="全屏">${I.fs}</button>
     <button class="fd-ic" data-a="mute" title="静音 (m)" aria-label="静音">${I.vol}</button>
   </div>
   <div class="fd-rail">
@@ -99,16 +98,28 @@ const F = { recN: 0, names: new Set(), gen: 0, mode: 'rec', extra: null, items: 
 const AHEAD = 6;                                    // titles kept validated (detail fetched) beyond the current one
 
 // ---------- slides ----------
+// 横屏视频 (竖屏手机上): 画面往上提一些 (同抖音), 下面出一个「全屏观看」按钮
+function layoutLand(s) {
+  const v = s.video, W = root.clientWidth, H = root.clientHeight;
+  const land = !!v.videoWidth && v.videoWidth > v.videoHeight * 1.15 && H > W * 1.2;
+  s.el.classList.toggle('land', land);
+  if (!land) return;
+  const vh = W * v.videoHeight / v.videoWidth, shift = H * .1;
+  s.el.style.setProperty('--lshift', shift + 'px');
+  s.el.style.setProperty('--lbtn', Math.round(H / 2 - shift + vh / 2 + 14) + 'px');
+}
 function mkSlide() {
   const el = document.createElement('section');
   el.className = 'fd-slide empty';
   el.innerHTML = `<div class="fd-bg"></div><video playsinline webkit-playsinline preload="auto"></video><div class="fd-shade"></div>
     <div class="fd-wait"></div><div class="fd-pause">${I.play}</div>
+    <button class="fd-full" data-a="full" aria-label="全屏观看">${I.fs}<span>全屏观看</span></button>
     <div class="fd-info"><h2></h2><div class="m"></div><p></p></div><div class="fd-msg"></div>`;
   slidesBox.append(el);
   const s = { el, video: el.querySelector('video'), bg: el.querySelector('.fd-bg'), h2: el.querySelector('h2'), meta: el.querySelector('.m'), blurb: el.querySelector('p'), msg: el.querySelector('.fd-msg'),
     i: -1, it: null, d: null, line: 0, ep: 0, eps: [], startAt: 0, hls: null, via: false, loading: false, pre: false, err: false, watched: 0, lastT: 0, judged: true, lastSave: 0 };
   const v = s.video;
+  v.addEventListener('loadedmetadata', () => layoutLand(s));
   v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); });
   v.addEventListener('waiting', () => { if (s === cur()) el.classList.add('wait'); });
   v.addEventListener('canplay', () => el.classList.remove('wait'));
@@ -125,6 +136,16 @@ function mkSlide() {
   return s;
 }
 const slides = [mkSlide(), mkSlide(), mkSlide()];
+// 缓冲圈不放在会滑动的画面里 (切换时会跟着上下移动): 全局只有一个, 钉在屏幕中央, 滑动中不显示
+const spin = document.createElement('div'); spin.className = 'fd-spin'; spin.hidden = true; root.append(spin);
+const paintSpin = () => {
+  const s = ring[1]; if (!s) return;
+  const show = s.el.classList.contains('wait') && !s.el.classList.contains('paused') && !s.el.classList.contains('empty') && !root.classList.contains('dragging') && !root.classList.contains('moving');
+  spin.hidden = !show;
+  spin.style.setProperty('--lshift', s.el.classList.contains('land') ? (s.el.style.getPropertyValue('--lshift') || '0px') : '0px');
+};
+{ const mo = new MutationObserver(paintSpin); [...slides.map(s => s.el), root].forEach(n => mo.observe(n, { attributes: true, attributeFilter: ['class'] })); }
+
 let ring = slides.slice();                          // [previous, current, next]
 const cur = () => ring[1];
 const covered = () => !!$('#modal') || !player.hidden;
@@ -430,6 +451,7 @@ function go(dir) {
   if (t >= F.items.length) { if (F.done) toast('没有更多了'); else { toast('正在加载…'); pump(); } return bounce(); }
   leave(cur());
   F.dir = dir; F.idx = t;
+  root.classList.add('moving'); clearTimeout(go.mt); go.mt = setTimeout(() => { root.classList.remove('moving'); paintSpin(); }, 380);
   const recycled = dir > 0 ? ring[0] : ring[2];
   if (dir > 0) ring.push(ring.shift()); else ring.unshift(ring.pop());
   recycled.el.classList.add('nt');
@@ -525,10 +547,15 @@ function act(a) {
   if (a === 'close') return history.back();
   if (a === 'mode') { if (menuEl.hidden) { renderMenu(); menuEl.hidden = false; sheetEl.hidden = true; } else menuEl.hidden = true; return; }
   if (a === 'mute') { setMuted(!F.muted); if (!F.muted) tryPlay(s); return; }
-  if (a === 'fs') return document.fullscreenElement ? document.exitFullscreen() : root.requestFullscreen?.().catch(() => {});
   if (a === 'up') return go(-1);
   if (a === 'down') return go(1);
   if (!s?.it) return;
+  if (a === 'full') {   // 「全屏观看」: 接着当前进度切到普通 (非沉浸) 播放器
+    if (!s.d || !s.eps.length) return;
+    const t = s.video.currentTime || 0;
+    s.video.pause(); saveHist(s);
+    return playAt(s.d, s.line, s.ep, t);
+  }
   if (a === 'like') return doLike(!likes.has(keyOf(s.it)));
   if (a === 'fav') { if (!s.d || kidsMode()) return; const on = favs.toggle(s.d); if (on) bump(s.it, s.d, 2); toast(on ? '已收藏' : '已取消收藏'); return syncRail(); }
   if (a === 'eps') { if (!s.d) return; if (sheetEl.hidden) { renderSheet(); sheetEl.hidden = false; menuEl.hidden = true; } else sheetEl.hidden = true; return; }
@@ -549,22 +576,23 @@ function setRate(r) { cur().video.playbackRate = r; rateEl.hidden = r === 1; }
 root.addEventListener('pointerdown', e => {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   if (e.target.closest(IGNORE)) return;
+  if (scrub) return;
   // nothing starts in the home-bar / screen-edge zones: iOS owns swipes there
-  if (e.pointerType === 'touch' && (e.clientY > innerHeight - 44 || e.clientX < 16 || e.clientX > innerWidth - 16)) return;
+  if (e.pointerType === 'touch' && (e.clientY > innerHeight - 24 || e.clientX < 16 || e.clientX > innerWidth - 16)) return;
   if (!menuEl.hidden || !sheetEl.hidden) { closeOverlays(); return; }
   if (g) return;
   const s = cur();
-  g = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), axis: '', dx: 0, dy: 0, long: false, t0: s.video.currentTime || 0, target: 0,
+  g = { low: e.pointerType === 'touch' && e.clientY > root.getBoundingClientRect().bottom - 120, id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), axis: '', dx: 0, dy: 0, long: false, t0: s.video.currentTime || 0, target: 0,
     lp: setTimeout(() => { if (g && !g.axis && s.d) { g.long = true; setRate(2); } }, 450) };
   root.setPointerCapture(e.pointerId);
 });
 root.addEventListener('pointermove', e => {
-  if (!g || e.pointerId !== g.id) return;
+  if (scrub || !g || e.pointerId !== g.id) return;
   g.dx = e.clientX - g.x; g.dy = e.clientY - g.y;
   if (!g.axis && Math.max(Math.abs(g.dx), Math.abs(g.dy)) > 8) {
     clearTimeout(g.lp);
     if (g.long) { g.axis = 'hold'; }
-    else g.axis = Math.abs(g.dy) >= Math.abs(g.dx) ? 'y' : 'x';
+    else g.axis = g.low || Math.abs(g.dy) < Math.abs(g.dx) ? 'x' : 'y';   // 从屏幕下沿 (进度条一带) 起手的拖动只当作快进快退, 不会变成上下切换
     if (g.axis === 'y') root.classList.add('dragging');
   }
   if (g.axis === 'y') {
@@ -579,6 +607,7 @@ root.addEventListener('pointermove', e => {
     root.classList.add('scrubbing');
     root.style.setProperty('--p', g.target / dur);
     showTip(fmtT(g.target), `/ ${fmtT(dur)}`);
+    liveSeek(g.target);
   }
 });
 function endGesture(e, cancelled) {
@@ -593,7 +622,8 @@ function endGesture(e, cancelled) {
   }
   if (x.axis === 'x') {
     root.classList.remove('scrubbing'); tipEl.hidden = true;
-    if (!cancelled && x.target) cur().video.currentTime = x.target;
+    seekWant = null;
+    if (x.target) cur().video.currentTime = cancelled ? x.t0 : x.target;
     return;
   }
   if (cancelled) return;
@@ -609,21 +639,33 @@ root.addEventListener('pointercancel', e => endGesture(e, true));
 
 // progress bar: drag to seek
 let scrub = null;
+// 拖动时画面跟着实时跳转: 节流 (上一次 seek 没完成就不再发), 手指抬起时再精确落到最终位置
+let seekBusy = false, seekWant = null;
+function liveSeek(t) {
+  const v = cur()?.video; if (!v) return;
+  seekWant = t;
+  if (seekBusy) return;
+  const go = () => { if (seekWant == null) return; seekBusy = true; const x = seekWant; seekWant = null; v.currentTime = x;
+    const done = () => { v.removeEventListener('seeked', done); clearTimeout(tm); seekBusy = false; go(); };
+    const tm = setTimeout(done, 400); v.addEventListener('seeked', done); };
+  go();
+}
 const fracOf = e => { const r = prog.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
 function scrubTo(e) {
   const v = cur().video; scrub.frac = fracOf(e);
   root.style.setProperty('--p', scrub.frac);
   showTip(fmtT(scrub.frac * v.duration), `/ ${fmtT(v.duration)}`);
+  liveSeek(scrub.frac * v.duration);
 }
 prog.addEventListener('pointerdown', e => {
   const v = cur()?.video; if (!v || !v.duration || !isFinite(v.duration)) return;
-  scrub = { id: e.pointerId, frac: 0 };
+  scrub = { id: e.pointerId, frac: 0, t0: v.currentTime };
   prog.setPointerCapture(e.pointerId); root.classList.add('scrubbing'); scrubTo(e); e.stopPropagation();
 });
 prog.addEventListener('pointermove', e => { if (scrub && e.pointerId === scrub.id) scrubTo(e); });
 const scrubEnd = (e, ok) => {
   if (!scrub || e.pointerId !== scrub.id) return;
-  const v = cur().video; if (ok) v.currentTime = scrub.frac * v.duration;
+  const v = cur().video; seekWant = null; v.currentTime = ok ? scrub.frac * v.duration : scrub.t0;
   scrub = null; root.classList.remove('scrubbing'); tipEl.hidden = true;
 };
 prog.addEventListener('pointerup', e => scrubEnd(e, true));
@@ -724,6 +766,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) cur().video.pause(); else tryPlay(cur());
 });
 addEventListener('pagehide', flushProfile);
+addEventListener('resize', () => slides.forEach(layoutLand));
 
 // entry points: any element with data-feed (category / search / 收藏 / 历史 pages)
 document.addEventListener('click', e => {

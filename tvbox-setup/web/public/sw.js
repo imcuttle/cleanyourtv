@@ -1,6 +1,6 @@
 // Minimal service worker: makes the page installable and shows the app shell offline.
 // Only same-origin static shell files are cached; /api, /hls, /img, /dl, /media always go to the network.
-const CACHE = 'tvbox-shell-v3';
+const CACHE = 'tvbox-shell-v4';
 const SHELL = ['./', 'style.css', 'app.js', 'feed.js', 'vendor/hls.min.js', 'icon.svg', 'icons/icon-192.png'];
 // The server writes the login state into <html data-auth> of the entry page. Cache it without that attribute,
 // so an offline copy never claims a state it can't know (the page then verifies by itself).
