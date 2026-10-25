@@ -94,7 +94,7 @@ const saveLikes = () => { localStorage.feedLikes = JSON.stringify([...likes].sli
 // ---------- state ----------
 const F = { recN: 0, names: new Set(), gen: 0, mode: 'rec', extra: null, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
   pool: [], pcount: {}, cats: null, catsSite: '', catUsed: new Set(), catCount: 1, once: false, dir: 1,
-  muted: localStorage.feedMuted === '1', userPaused: false };
+  muted: localStorage.feedMuted === '1', autoMuted: false, userPaused: false };   // autoMuted: the browser refused sound-on autoplay, muted for now only
 const AHEAD = 6;                                    // titles kept validated (detail fetched) beyond the current one
 
 // ---------- slides ----------
@@ -133,6 +133,7 @@ function mkSlide() {
   const s = { el, video: el.querySelector('video'), bg: el.querySelector('.fd-bg'), h2: el.querySelector('h2'), meta: el.querySelector('.m'), blurb: el.querySelector('p'), msg: el.querySelector('.fd-msg'),
     i: -1, it: null, d: null, line: 0, ep: 0, eps: [], startAt: 0, hls: null, via: false, loading: false, pre: false, err: false, watched: 0, lastT: 0, judged: true, lastSave: 0 };
   const v = s.video;
+  { const vol = parseFloat(localStorage.playerVolume); if (Number.isFinite(vol)) v.volume = Math.min(1, Math.max(0, vol)); }   // same level as the main player
   for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize']) v.addEventListener(ev, () => layoutLand(s));   // HLS 的画面尺寸有时晚一点才知道
   v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); });
   v.addEventListener('waiting', () => { if (s === cur()) el.classList.add('wait'); });
@@ -269,19 +270,37 @@ function setRole(s, role) {
     else if (role > 0 && s.pre && !s.loading) { s.hls.startLoad(-1); s.loading = true; }
   } else s.video.preload = role === 0 || (s.pre && role > 0) ? 'auto' : 'metadata';
 }
+const paintMute = () => q('[data-a=mute]').classList.toggle('off', F.muted || F.autoMuted);
 function setMuted(m, save = true) {
-  F.muted = m; if (save) localStorage.feedMuted = m ? '1' : '0';
+  F.muted = m; F.autoMuted = false;
+  if (save) localStorage.feedMuted = m ? '1' : '0';
   ring.forEach(s => { s.video.muted = m; });
-  q('[data-a=mute]').classList.toggle('off', m);
+  paintMute();
 }
+// The user's mute choice is only ever changed by the speaker button. When the browser blocks autoplay with sound
+// (NotAllowedError) the current video is muted temporarily and the sound comes back on the next tap / key press.
+function unlockSound() {
+  if (!F.autoMuted) return;
+  F.autoMuted = false;
+  ring.forEach(s => { s.video.muted = F.muted; });
+  paintMute();
+}
+for (const ev of ['pointerdown', 'keydown', 'touchend']) addEventListener(ev, () => { if (!root.hidden) unlockSound(); }, true);
 function tryPlay(s) {
   if (s !== cur() || F.userPaused || covered() || document.hidden || !s.d) return;
   const v = s.video;
-  v.muted = F.muted;
+  v.muted = F.muted || F.autoMuted;
   const p = v.play();
-  if (p) p.catch(() => {
-    if (!v.muted) { setMuted(true, false); v.play().catch(() => s.el.classList.add('paused')); toast('已静音播放，点右上角喇叭开声音'); }
-    else s.el.classList.add('paused');
+  if (p) p.catch(err => {
+    if (err?.name === 'AbortError') {            // interrupted by a newer load / pause (a normal part of switching titles): not a sound problem
+      if (s === cur() && !F.userPaused && !document.hidden) setTimeout(() => { if (s === cur() && v.paused) tryPlay(s); }, 150);
+      return;
+    }
+    if (err?.name === 'NotAllowedError' && !v.muted) {
+      F.autoMuted = true; v.muted = true; paintMute();   // preference untouched; sound returns at the next gesture
+      v.play().catch(() => s.el.classList.add('paused'));
+      toast('浏览器拦截了自动播放声音，已先静音，点一下屏幕就恢复');
+    } else s.el.classList.add('paused');
   });
 }
 function togglePause() {
@@ -569,7 +588,7 @@ function syncRail() {
   q('[data-a=fav]').hidden = kidsMode();
   q('[data-a=eps]').hidden = !d || (s.eps.length < 2 && d.lines.length < 2);
   q('.fd-mode span').textContent = modeLabel();
-  q('[data-a=mute]').classList.toggle('off', F.muted);
+  paintMute();
 }
 function doLike(on) {
   const s = cur(); if (!s?.it) return;
@@ -588,7 +607,7 @@ function act(a) {
   const s = cur();
   if (a === 'close') { guardUntil = 0; return history.back(); }   // 主动退出: 不要被「拖动误触返回」的保护拦下
   if (a === 'mode') { if (menuEl.hidden) { renderMenu(); menuEl.hidden = false; sheetEl.hidden = true; } else menuEl.hidden = true; return; }
-  if (a === 'mute') { setMuted(!F.muted); if (!F.muted) tryPlay(s); return; }
+  if (a === 'mute') { setMuted(F.autoMuted ? false : !F.muted); if (!F.muted) tryPlay(s); return; }
   if (a === 'up') return go(-1);
   if (a === 'down') return go(1);
   if (!s?.it) return;

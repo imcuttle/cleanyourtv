@@ -2068,6 +2068,16 @@ function paintCtrl() {
   tl.style.setProperty('--b', (end / d) * 100 + '%');
 }
 for (const ev of ['timeupdate', 'durationchange', 'progress', 'play', 'pause', 'volumechange', 'loadedmetadata']) video.addEventListener(ev, paintCtrl);
+// Volume and mute are remembered (localStorage) and shared with the 沉浸 player: restored once at start, saved on every change.
+{
+  const vol = parseFloat(localStorage.playerVolume);
+  if (Number.isFinite(vol)) video.volume = Math.min(1, Math.max(0, vol));
+  video.muted = localStorage.playerMuted === '1';
+  video.addEventListener('volumechange', () => {
+    localStorage.playerMuted = video.muted ? '1' : '0';
+    if (video.volume > 0) localStorage.playerVolume = String(+video.volume.toFixed(3));   // keep the last audible level through a mute
+  });
+}
 const togglePlay = () => (video.paused ? video.play().catch(() => {}) : video.pause());
 // iPhone can only fullscreen the <video> itself (its native player then takes over); everything else fullscreens the player.
 const toggleFs = () => {
