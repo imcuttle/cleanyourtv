@@ -834,8 +834,11 @@ async function recognize(input) {
   if (direct?.kind === 'config') {
     // Exported source sets embed edited / local channel lists as {name, text}; keep those as pasted lists.
     const embedded = (Array.isArray(direct.obj.lives) ? direct.obj.lives : []).filter(l => l && typeof l.text === 'string' && l.text.trim());
-    const f = await configFrom({ ...direct.obj, lives: (direct.obj.lives || []).filter(l => !(l && l.text)) }, null);
-    sites = f.sites.map(s => ({ ...s, info: '来自粘贴的配置' }));
+    const embeddedVod = (Array.isArray(direct.obj.sites) ? direct.obj.sites : []).filter(s => s && typeof s.text === 'string' && s.text.trim());
+    const f = await configFrom({ ...direct.obj, sites: (direct.obj.sites || []).filter(s => !(s && typeof s.text === 'string')), lives: (direct.obj.lives || []).filter(l => !(l && l.text)) }, null);
+    sites = [...f.sites.map(s => ({ ...s, info: '来自粘贴的配置' })),
+      ...embeddedVod.map(s => { const n = parseVodText(s.text).items.length;
+        return { name: str(s.name) || '分享的片单', text: s.text.trim() + '\n', ok: n > 0, ...(n ? {} : { empty: true }), info: n ? `${n} 部（含片单文本）` : '片单里没有可播放的片，不导入', ...(Number(s.kids) ? { kids: 1 } : {}), ...(Number(s.adult) ? { adult: 1 } : {}) }; })];
     lives = [...f.lives.map(l => ({ ...l, info: '来自粘贴的配置' })),
       ...embedded.map(l => ({ name: str(l.name) || '分享的频道', text: l.text.trim() + '\n', ok: true,
         info: `${parseLive(l.text).groups.reduce((n, g) => n + g.channels.length, 0)} 个频道（含频道列表）` }))];
@@ -896,9 +899,11 @@ async function recognize(input) {
   for (const f of await fsp.readdir(LIVES).catch(() => [])) {
     if (config.lives.some(l => l.url === 'local:' + f)) haveText.add(textKey(await fsp.readFile(path.join(LIVES, f), 'utf8').catch(() => '')));
   }
+  const haveVodText = new Set();
+  for (const s of config.sites) if (LOCAL_VOD.test(str(s.api))) haveVodText.add(textKey(await fsp.readFile(path.join(VODS, path.basename(s.api.slice(6))), 'utf8').catch(() => '')));
   const seenS = new Set(), seenL = new Set();
-  sites = sites.filter(s => { const k = s.members ? 'g|' + s.name + '|' + s.members.join(',') : normApi(s.api) + '|' + (s.categories || []).join(','); return !seenS.has(k) && seenS.add(k); })
-    .map(s => s.members ? { ...s, exists: config.sites.some(g => g.members && g.name === s.name) } : { ...s, api: normApi(s.api), exists: !s.categories && haveApi.has(normApi(s.api)) });
+  sites = sites.filter(s => { const k = s.text ? 't|' + textKey(s.text) : s.members ? 'g|' + s.name + '|' + s.members.join(',') : normApi(s.api) + '|' + (s.categories || []).join(','); return !seenS.has(k) && seenS.add(k); })
+    .map(s => s.text ? { ...s, exists: haveVodText.has(textKey(s.text)) } : s.members ? { ...s, exists: config.sites.some(g => g.members && g.name === s.name) } : { ...s, api: normApi(s.api), exists: !s.categories && haveApi.has(normApi(s.api)) });
   lives = lives.filter(l => { const k = l.text ? textKey(l.text) : normUrl(l.url); return !seenL.has(k) && seenL.add(k); })
     .map(l => ({ ...l, exists: l.text ? haveText.has(textKey(l.text)) : haveUrl.has(normUrl(l.url)) }));
   await Promise.all([probeSites(sites.filter(s => !s.exists)), probeLives(lives.filter(l => !l.exists))]);
@@ -2494,7 +2499,17 @@ rpcHandlers.config = async ({ op, body: b }) => {
       else if (/^https?:\/\//.test(str(l.url))) lives.push({ name: str(l.name) || hostOf(l.url), url: str(l.url), ...(Number(l.kids) ? { kids: 1 } : {}), ...(Number(l.adult) ? { adult: 1 } : {}) });
     }
     const haveApi = new Set(config.sites.filter(s => !s.categories).map(s => normApi(s.api)));
-    const incoming = Array.isArray(b.sites) ? b.sites : [];
+    const incoming = [];
+    const haveVod = new Set();
+    for (const s of config.sites) if (LOCAL_VOD.test(str(s.api))) haveVod.add(textKey(await fsp.readFile(path.join(VODS, path.basename(s.api.slice(6))), 'utf8').catch(() => '')));
+    for (const s of Array.isArray(b.sites) ? b.sites : []) {
+      if (typeof s.text !== 'string') { incoming.push(s); continue; }
+      if (s.empty || haveVod.has(textKey(s.text)) || !parseVodText(s.text).items.length) continue;
+      haveVod.add(textKey(s.text));
+      const file = crypto.randomBytes(5).toString('hex') + '.txt';
+      await fsp.writeFile(path.join(VODS, file), s.text);
+      incoming.push({ name: str(s.name) || '分享的片单', api: 'local:' + file, probed: true, ok: true, ...(Number(s.kids) ? { kids: 1 } : {}), ...(Number(s.adult) ? { adult: 1 } : {}) });
+    }
     const apiOf = new Map(incoming.filter(s => !s.members).map(s => [str(s.key), s.api]));
     const fresh = incoming.filter(s => s.members || s.categories || !haveApi.has(normApi(s.api)));
     // Already probed (and classified) during recognition: saving does no network work. Only API callers that skip that pay for it here.

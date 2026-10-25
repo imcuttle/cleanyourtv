@@ -2656,7 +2656,9 @@ function toggleBulkMenu(btn) {
   if (!open) return;
   const r = btn.getBoundingClientRect();
   menu.hidden = false;
-  menu.style.top = r.bottom + 4 + 'px';
+  const room = innerHeight - r.bottom - 12, h = menu.offsetHeight;
+  menu.style.maxHeight = Math.max(160, innerHeight - 24) + 'px'; menu.style.overflowY = 'auto';
+  menu.style.top = (h <= room ? r.bottom + 4 : Math.max(8, Math.min(r.top - h - 4, innerHeight - 8 - Math.min(h, innerHeight - 24)))) + 'px';
   menu.style.left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8)) + 'px';
 }
 function closeBulkMenus() { $$('.bmenu').forEach(m => { m.hidden = true; }); }
@@ -3008,13 +3010,21 @@ async function renderSettings() {
       const groups = gRows.map(r => ({ key: r.dataset.key, name: $('.nm', r).value.trim(), members: JSON.parse(r.dataset.members), ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}) }));
       const gKeys = new Set(gRows.map(r => r.dataset.key));
       siteRows = [...new Set([...siteRows.filter(r => !r.dataset.members), ...$$('#sites .srow.mem').filter(m => gKeys.has(m.dataset.parent))])];
-      const sites = siteRows.map(r => {
+      let sites = siteRows.map(r => {
         const s = { key: r.dataset.key || undefined, name: $('.nm', r).value.trim(), api: $('.url', r).value.trim() };
         if ($('.kids', r).checked) s.kids = 1;
         if ($('.adult', r).checked) s.adult = 1;
         if (r.dataset.cats) s.categories = JSON.parse(r.dataset.cats);
         return s;
       }).filter(s => s.api);
+      // A 本地片单 only exists on this server: it travels as its text, like an edited channel list.
+      for (let i = 0; i < sites.length; i++) {
+        if (!String(sites[i].api).startsWith('local:')) continue;
+        const j = await api('vod/raw', { api: sites[i].api });
+        const { api: _a, key: _k, ...rest } = sites[i];
+        if (j.text) sites[i] = { ...rest, text: j.text }; else sites[i] = null;
+      }
+      sites = sites.filter(Boolean);
       const lives = [];
       for (const r of liveRows) {
         const l = { name: $('.nm', r).value.trim(), url: $('.url', r).value.trim(), ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}) };
@@ -3336,7 +3346,7 @@ async function recognizeFlow(text, quiet) {
   const rowHtml = (x, i) => `<label class="crow ${x.exists || x.empty ? 'dim' : ''}" data-i="${i}">
       <input type="checkbox" class="csel" data-i="${i}" ${x.exists || x.empty ? 'disabled' : x.ok === false ? '' : 'checked'}>
       <input class="cname" data-i="${i}" value="${esc(x.name)}" ${x.exists ? 'disabled' : ''}>
-      <span class="curl">${esc(x.kind === 'site' ? x.api : x.url || '粘贴的频道列表（存成本地文本）')}</span>
+      <span class="curl">${esc(x.kind === 'site' ? x.api || '分享的片单（存成本地文本）' : x.url || '粘贴的频道列表（存成本地文本）')}</span>
       <span class="cstat ${x.exists ? '' : x.ok === true ? 'ok' : x.ok === false ? 'bad' : ''}">${x.exists ? '已存在' : esc(x.info || (x.ok === false ? '不通' : '未验证'))}<span class="ctags">${x.exists ? '' : tagOf(x)}</span></span></label>`;
   const section = (title, kind) => {
     const items = all.map((x, i) => [x, i]).filter(([x]) => x.kind === kind);

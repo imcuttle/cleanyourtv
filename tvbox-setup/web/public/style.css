@@ -203,7 +203,7 @@ a.btn { text-decoration: none; cursor: pointer; }
 .bulk { margin: 8px 0 2px; align-items: center; flex-wrap: wrap; }
 /* long lists: the action bar sticks under the top bar while its list scrolls by (stays inside its own section) */
 :root { --hh: 64px; }
-.actions.bulk { position: sticky; top: var(--hh); z-index: 6; margin: 0 0 6px; padding: 9px 0; background: #141414f2; border-bottom: 1px solid #ffffff14; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+.actions.bulk { position: sticky; top: var(--hh); z-index: 6; margin: 0 0 6px; padding: 9px 0; background: #141414fa; border-bottom: 1px solid #ffffff14; }
 .srow .ops { display: flex; gap: 4px; align-items: center; }
 .srow .ops button, .small { background: #2a2a2a; border: 1px solid #3a3a3a; color: #ddd; border-radius: 4px; padding: 5px 9px; font-size: 12px; }
 .srow .ops button:hover, .small:hover { background: #3a3a3a; }
