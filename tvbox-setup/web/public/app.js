@@ -501,6 +501,17 @@ $('#siteMenu').onclick = async e => {
   loadSites(); if (location.hash && location.hash !== '#/') location.hash = '#/'; else route();
 };
 const closeMenu = () => { $('#siteMenu').hidden = true; $('#siteBtn').classList.remove('open'); };
+// 小屏: the 点播源 list is a bottom sheet (like the 直播源 picker) over a blurred scrim instead of a popover under the header.
+const sheetScrim = $('#sheetScrim');
+{
+  const sheets = () => [$('#siteMenu'), $('#liveMenu')].filter(Boolean);
+  const sync = () => { const on = matchMedia('(max-width: 760px)').matches && sheets().some(m => !m.hidden); sheetScrim.hidden = !on; document.body.classList.toggle('sheet-open', on); };
+  const mo = new MutationObserver(sync);
+  const watch = () => sheets().forEach(m => { if (!m._w) { m._w = 1; mo.observe(m, { attributes: true, attributeFilter: ['hidden'] }); } });
+  watch(); new MutationObserver(watch).observe(document.body, { childList: true, subtree: true });
+  matchMedia('(max-width: 760px)').addEventListener('change', sync);
+  sheetScrim.addEventListener('click', () => { closeMenu(); const l = $('#liveMenu'); if (l && !l.hidden) { l.hidden = true; $('#liveBtn')?.classList.remove('open'); } });
+}
 document.addEventListener('click', e => { if (!e.composedPath().some(n => n.classList?.contains('picker'))) closeMenu(); });
 // ---------- search box: scope (全部源 / 仅当前源) ----------
 const searchScope = { get: () => localStorage.searchScope === 'site' ? 'site' : 'all', set(v) { localStorage.searchScope = v; syncScope(); } };
@@ -515,7 +526,7 @@ function syncScope() {
   $('#scopeAllHint').textContent = `同时搜索全部 ${searchableCount()} 个源，结果自动合并`;
   $('#scopeSiteHint').textContent = cur ? cur.name : '没有可用的源';
   $$('#scopeMenu [data-scope]').forEach(b => b.classList.toggle('on', b.dataset.scope === (site ? 'site' : 'all')));
-  $('#q').placeholder = site ? `在「${cur.name}」里搜` : '搜片名 / 演员 / 导演';
+  $('#q').placeholder = smallScreen.matches ? '搜索' : site ? `在「${cur.name}」里搜` : '搜片名 / 演员 / 导演';
 }
 const closeScope = () => { $('#scopeMenu').hidden = true; $('#scopeBtn').classList.remove('open'); $('#scopeBtn').setAttribute('aria-expanded', 'false'); };
 $('#scopeBtn').onclick = e => {
@@ -550,7 +561,7 @@ function paintSov() {
   $('#sOvAll').textContent = `${searchableCount()} 个源，结果合并`;
   $('#sOvSite').textContent = cur ? cur.name : '没有可用的源';
   $$('#sOvScope [data-scope]').forEach(b => { b.classList.toggle('on', b.dataset.scope === (site ? 'site' : 'all')); if (b.dataset.scope === 'site') b.disabled = !cur; });
-  $('#q2').placeholder = $('#q').placeholder;
+  $('#q2').placeholder = site ? `在「${cur.name}」里搜` : '搜片名 / 演员 / 导演';
   const typed = $('#q2').value.trim().toLowerCase(), list = recents.all().filter(x => !typed || x.toLowerCase().includes(typed));
   $('#sOvClear').hidden = !recents.all().length;
   $('#sOvRecent').innerHTML = list.length ? list.map(x => `<div class="sov-row" data-q="${esc(x)}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>${esc(x)}</span><em data-del title="删除这条">×</em></div>`).join('')
@@ -645,7 +656,7 @@ $('#sOvRecent').onclick = e => {
 };
 $('#sOvClear').onclick = () => { recents.clear(); paintSov(); };
 addEventListener('keydown', e => { if (e.key === 'Escape') closeSov(); });
-smallScreen.addEventListener('change', () => { if (!smallScreen.matches) closeSov(); });
+smallScreen.addEventListener('change', () => { if (!smallScreen.matches) closeSov(); syncScope(); });
 addEventListener('hashchange', closeSov);
 syncScope();
 addEventListener('scroll', () => $('#top').classList.toggle('solid', scrollY > 30));
