@@ -24,7 +24,7 @@
     <button id="navFwd" type="button" title="前进 (Alt+→)" aria-label="前进" disabled><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
     <button id="navReload" type="button" title="刷新 (F5)" aria-label="刷新"><svg viewBox="0 0 24 24"><path d="M19 8a8 8 0 1 0 1.5 6M19 3v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
   </div>
-  <a class="logo" href="#/">TVBOX</a>
+  <a class="logo" href="#/">TVBOX<sup id="levelTag" class="level" hidden></sup></a>
   <nav>
     <a href="#/" data-nav="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span>首页</span></a>
     <a href="#/charts" data-nav="charts"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V10h4v11zM10 21V3h4v18zM15 21v-7h4v7z"/></svg><span>榜单</span></a>
@@ -48,7 +48,6 @@
       <button id="siteBtn" class="sitebtn" type="button"><span id="siteName">选择源</span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       <div id="siteMenu" class="menu" hidden></div>
     </div>
-    <span id="levelTag" class="level" hidden></span>
   </div>
 </header>
 <main id="view"></main>
@@ -63,6 +62,7 @@
     <button class="pill" data-act="vfav" hidden>＋ 收藏</button>
     <button class="pill" data-act="dl" hidden>⬇ 下载</button>
     <button class="pill" data-act="ext" hidden title="用系统默认播放器打开这个文件">播放器</button>
+    <button class="pill" data-act="pip" hidden title="小窗播放：切到别的应用也不会停">小窗</button>
     <button class="pill" data-act="prev">上一集</button>
     <button class="pill" data-act="next">下一集</button>
     <button class="pill" data-act="list">选集</button>

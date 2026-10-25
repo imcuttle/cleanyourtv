@@ -463,7 +463,7 @@ async function loadSites() {
   $('[data-nav=favorites]').hidden = j.level === 'kids';
   $('[data-nav=charts]').hidden = j.level === 'kids';
   chartCat = null;
-  $('#levelTag').textContent = j.level === 'kids' ? '儿童模式' : '无限制';
+  $('#levelTag').textContent = j.level === 'kids' ? '少儿' : '无限';
   $('#levelTag').className = 'level ' + j.level;
   renderMenu();
   autoPing();
@@ -1485,19 +1485,61 @@ let hls, cur = null, idleTimer;
 // comes back. "Back to tab" brings the player back; closing the small window stops playback.
 let pipOn = false, pipSkip = false;
 const playerOpen = () => !player.hidden && !pipOn;
-video.addEventListener('enterpictureinpicture', () => {
+const onEnterPip = () => {
+  if (pipOn) return;
   pipOn = true;
   player.classList.add('pip'); togglePlist(false);
   if (!$('#modal')) document.body.style.overflow = '';
   if (history.state?.player) { pipSkip = true; history.back(); }
-});
-video.addEventListener('leavepictureinpicture', () => {
+};
+const onLeavePip = () => {
   if (!pipOn) return;
   pipOn = false;
   player.classList.remove('pip');
   if (video.paused) return closePlayer();
   history.pushState({ player: 1 }, ''); document.body.style.overflow = 'hidden'; poke();
-});
+};
+video.addEventListener('enterpictureinpicture', onEnterPip);
+video.addEventListener('leavepictureinpicture', onLeavePip);
+// iOS Safari older than the standard API: same thing through the presentation mode.
+video.addEventListener('webkitpresentationmodechanged', () => (video.webkitPresentationMode === 'picture-in-picture' ? onEnterPip : onLeavePip)());
+const pipSupported = () => !!(document.pictureInPictureEnabled || video.webkitSupportsPresentationMode?.('picture-in-picture'));
+function togglePip() {
+  if (pipOn || document.pictureInPictureElement || video.webkitPresentationMode === 'picture-in-picture') {
+    return document.exitPictureInPicture ? document.exitPictureInPicture().catch(() => {}) : video.webkitSetPresentationMode('inline');
+  }
+  const p = video.requestPictureInPicture ? video.requestPictureInPicture() : (video.webkitSetPresentationMode('picture-in-picture'), Promise.resolve());
+  return p.catch(() => toast('这个浏览器不支持小窗播放'));
+}
+// 小窗 + 后台播放: leaving the app (home / another app / lock screen) while something plays shrinks it into the small window
+// where the browser allows it (Safari: autoPictureInPicture; Chrome: the Media Session hook below), and the lock-screen /
+// notification controls drive the player. Nothing in the page pauses a hidden tab, so audio keeps going where the OS lets it.
+video.autoPictureInPicture = true;
+const ms = navigator.mediaSession;
+function syncMedia() {
+  if (!ms || !cur || !window.MediaMetadata) return;
+  const e = cur.eps[cur.ep], live = cur.kind === 'live';
+  const pic = live ? e.logo : cur.d?.pic;
+  try {
+    ms.metadata = new MediaMetadata({ title: live ? e.name : (cur.eps.length > 1 ? e.name : cur.title), artist: live ? '直播' : cur.title, album: 'TVBOX',
+      artwork: pic ? [{ src: new URL(pic, location.href).href, sizes: '512x512' }] : [] });
+  } catch {}
+  try { ms.setActionHandler('previoustrack', cur.ep > 0 ? () => step(-1) : null); ms.setActionHandler('nexttrack', cur.ep < cur.eps.length - 1 ? () => step(1) : null); } catch {}
+}
+if (ms) {
+  const on = (a, f) => { try { ms.setActionHandler(a, f); } catch {} };
+  on('play', () => video.play().catch(() => {}));
+  on('pause', () => video.pause());
+  const vod = () => cur && cur.kind !== 'live' && isFinite(video.duration);
+  on('seekbackward', d => { if (vod()) video.currentTime -= d?.seekOffset || 10; });
+  on('seekforward', d => { if (vod()) video.currentTime += d?.seekOffset || 10; });
+  on('seekto', d => { if (vod() && d.seekTime != null && isFinite(d.seekTime)) video.currentTime = d.seekTime; });
+  on('enterpictureinpicture', () => { if (cur && !video.paused && !pipOn) togglePip(); });
+  video.addEventListener('play', () => { ms.playbackState = 'playing'; });
+  video.addEventListener('pause', () => { ms.playbackState = 'paused'; });
+  const pos = () => { if (isFinite(video.duration) && video.duration > 0) try { ms.setPositionState({ duration: video.duration, position: Math.min(video.currentTime, video.duration), playbackRate: video.playbackRate || 1 }); } catch {} };
+  video.addEventListener('loadedmetadata', pos); video.addEventListener('ratechange', pos); video.addEventListener('seeked', pos);
+}
 
 function play(d, line, ep) {
   cur = { kind: 'vod', d, line, ep, eps: d.lines[line].episodes, title: d.name };
@@ -1520,6 +1562,8 @@ function openPlayer(startAt) {
   $('[data-act=prev]').hidden = cur.ep <= 0;
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
+  $('[data-act=pip]').hidden = !pipSupported() || fineCursor;   // desktop has it in the control bar
+  syncMedia();
   $('[data-act=star]').hidden = !live;
   paintVodActs();
   $('[data-act=ext]').hidden = !(cur.kind === 'vod' && cur.d.local && serverInfo?.loopback);
@@ -1603,6 +1647,7 @@ function closePlayer() {
   if (hls) { hls.destroy(); hls = null; }
   pvReset(); playingSrc = null;
   video.pause(); video.removeAttribute('src'); video.load();
+  if (ms) { try { ms.metadata = null; ms.playbackState = 'none'; } catch {} }
   if (pipOn) { pipOn = false; player.classList.remove('pip'); document.exitPictureInPicture?.().catch(() => {}); }
   player.hidden = true; togglePlist(false); msg('');
   if (!$('#modal')) document.body.style.overflow = '';
@@ -1612,6 +1657,7 @@ function closePlayer() {
 player.addEventListener('click', e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'close') history.back();
+  if (act === 'pip') togglePip();
   if (act === 'next') step(1);
   if (act === 'prev') step(-1);
   if (act === 'list') return togglePlist();
@@ -1665,7 +1711,7 @@ ctrl.addEventListener('click', e => {
   if (c === 'fwd') video.currentTime += 10;
   if (c === 'mute') { video.muted = !video.muted; if (!video.muted && !video.volume) video.volume = 0.5; }
   if (c === 'fs') toggleFs();
-  if (c === 'pip') (document.pictureInPictureElement ? document.exitPictureInPicture() : video.requestPictureInPicture()).catch(() => toast('这个浏览器不支持画中画'));
+  if (c === 'pip') togglePip();
   if (c === 'rate') { video.playbackRate = RATES[(RATES.indexOf(video.playbackRate) + 1) % RATES.length]; e.target.closest('button').textContent = video.playbackRate + 'x'; }
 });
 $('.vol').oninput = e => { video.volume = +e.target.value; video.muted = video.volume === 0; };

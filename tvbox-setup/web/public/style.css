@@ -472,7 +472,6 @@ nav a svg { display: none; }
   .right { flex: 1; min-width: 0; width: auto; gap: 8px; }
   .sitebtn { height: 34px; }
   .sitebtn { max-width: 104px; padding: 0 9px 0 11px; gap: 5px; }
-  #levelTag { display: none; }
   .menu { top: calc(52px + env(safe-area-inset-top)); bottom: auto; max-height: 60vh; }
   nav { position: fixed; z-index: 25; left: 0; right: 0; bottom: 0; gap: 0; justify-content: space-around;
     height: calc(var(--tab) + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
@@ -769,7 +768,6 @@ nav a { white-space: nowrap; }
 .card .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 @media (min-width: 761px) and (max-width: 1180px) {
-  #levelTag { display: none; }
 }
 @media (min-width: 761px) and (max-width: 900px) {
   header { padding-left: 3%; padding-right: 3%; gap: 10px; }
@@ -840,3 +838,11 @@ html.wide-cards .metaRow { line-height: 1.9; }
 .menu .mempty { padding: 18px 10px; text-align: center; color: var(--muted); font-size: 13px; }
 .menu .mempty[hidden] { display: none; }
 @media (max-width: 760px) { .menu .msearch .find { height: 40px; font-size: 16px; } }
+
+/* 安全级别: a tiny superscript on the logo corner (无限 / 少儿), nothing for 标准 */
+.logo { position: relative; display: inline-block; }
+.logo .level { position: absolute; top: -3px; right: -4px; transform: translateX(100%); padding: 1px 4px; border-radius: 3px; font-size: 9px; font-weight: 700; line-height: 1.25; letter-spacing: 0; vertical-align: baseline; }
+.logo .level[hidden] { display: none; }
+.logo .level.all { background: #ffffff26; color: #ddd; }
+.logo .level.kids { background: #46d369; color: #000; }
+header .logo { margin-right: 14px; }
