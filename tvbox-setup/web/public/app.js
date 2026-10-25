@@ -2705,7 +2705,7 @@ async function renderSettings() {
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="" readonly>
-      <span class="ops"><span class="tagl">聚合源</span>${flags(x)}<span class="status"></span><button data-op="test" title="测速：逐个测成员，汇总能连上几个">测速</button><button data-op="toggle"></button><button data-op="dissolve" title="解散：成员回到主列表，聚合源删除">解散</button><button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del" title="删除聚合源和它的所有成员">删除</button></span></div>`
+      <span class="ops"><span class="tagl">聚合源</span>${flags(x)}<span class="status"></span><button data-op="test" title="测速：逐个测成员，汇总能连上几个">测速</button><button data-op="edit" title="把聚合结果存成一个本地片单再编辑（会失去聚合状态）">编辑文本</button><button data-op="toggle"></button><button data-op="dissolve" title="解散：成员回到主列表，聚合源删除">解散</button><button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del" title="删除聚合源和它的所有成员">删除</button></span></div>`
     : `<div class="srow${parent ? ' mem' : ''}" data-i="${i}" ${parent ? `data-parent="${esc(parent)}" hidden` : ''} ${x.key && kind === 'site' ? `data-key="${esc(x.key)}"` : ''} ${x.from ? `data-from="${esc(x.from)}"` : ''} ${x.categories ? `data-cats="${esc(JSON.stringify(x.categories))}"` : ''} ${cacheOf(x) ? `data-ok="${cacheOf(x).cls === 'status ok' ? 1 : 0}"${cacheOf(x).total !== undefined ? ` data-total="${cacheOf(x).total}"` : ''}` : ''}>
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
@@ -2929,22 +2929,31 @@ async function renderSettings() {
   })));
   // 点播源: the title list becomes a text file on the server (a web source starts from a snapshot of its first pages).
   const editVodText = async r => {
-    const url = $('.url', r).value.trim(), name = $('.nm', r).value.trim() || url;
+    const isGroup = !!r.dataset.members, keys = isGroup ? JSON.parse(r.dataset.members) : [];
+    const url = isGroup ? 'group:' + r.dataset.key : $('.url', r).value.trim(), name = $('.nm', r).value.trim() || url;
     if (!url) return toast('先填接口地址');
+    if (isGroup) {
+      if (!keys.length) return toast('这个聚合源没有成员');
+      if (!confirm(`把聚合源「${name}」转成一个本地片单？\n\n· 会取 ${keys.length} 个成员各自前 3 页的片，同名同年的自动合并成一部（线路包含所有成员的线路）\n· 转换后它变成普通的本地点播源，不再是聚合源：成员不再被实时聚合，之后新增的片不会自动出现\n· 只含能直接播放的线路；原来的成员源本身不受影响\n\n继续？`)) return;
+    }
     const m = document.createElement('div');
     m.className = 'modal'; m.id = 'textModal';
     m.innerHTML = `<div class="sheet editor"><div class="body"><h3>编辑「${esc(name)}」<span class="lan" id="chCount"></span></h3>
       <p class="hint">每行一部：<code>片名,播放地址</code>（m3u8 / mp4）；多集写成 <code>片名,第1集$地址#第2集$地址</code>，或同名再写一行追加一集；分类用 <code>分类名,#genre#</code>。${url.startsWith('local:') ? '' : '网页源这里是它前 3 页的快照，保存后改读服务端本地文件，不再请求原接口。'}</p>
-      <textarea id="liveText" spellcheck="false">${url.startsWith('local:') ? '加载中…' : '正在从源上拉取前 3 页片单，最多十几秒…'}</textarea>
+      <textarea id="liveText" spellcheck="false">${url.startsWith('local:') ? '加载中…' : isGroup ? `正在从 ${keys.length} 个成员拉取并合并，最多几十秒…` : '正在从源上拉取前 3 页片单，最多十几秒…'}</textarea>
       <div class="actions"><button class="btn red" id="ltSave" disabled>保存</button><button class="small" id="ltCancel">取消</button></div></div></div>`;
     document.body.append(m); document.body.style.overflow = 'hidden';
     const close = () => { m.remove(); document.body.style.overflow = ''; };
     m.onclick = e => { if (e.target === m) close(); };
     $('#ltCancel').onclick = close;
-    const j = await api('vod/raw', { api: url }, AbortSignal.timeout(40e3)).catch(e => ({ text: '', error: e.message }));
+    const j = await (isGroup ? api('vod/group', { keys: keys.join(',') }, AbortSignal.timeout(90e3)) : api('vod/raw', { api: url }, AbortSignal.timeout(40e3))).catch(e => ({ text: '', error: e.message }));
     if (!m.isConnected) return;
     const ta = $('#liveText');
-    if (j.error) toast(j.error + '，可以直接手写片单');
+    if (j.error) toast(j.error + (isGroup ? '' : '，可以直接手写片单'));
+    if (isGroup && j.members) {
+      const bad = j.members.filter(x => !x.ok);
+      toast(`已合并 ${j.titles} 部（其中 ${j.merged} 部有多个来源）${bad.length ? `；${bad.length} 个成员没取到：${bad.map(x => x.name).join('、')}` : ''}`);
+    }
     ta.value = j.text || '我的分类,#genre#\n片名,https://example.com/movie.m3u8\n剧名,第1集$https://example.com/1.m3u8#第2集$https://example.com/2.m3u8\n';
     const count = () => { $('#chCount').textContent = `${ta.value.split(/\r?\n/).filter(l => /^[^,#\/][^,]*,\s*https?:\/\//.test(l.trim())).length} 行片`; };
     ta.oninput = count; count();
@@ -2952,8 +2961,20 @@ async function renderSettings() {
     $('#ltSave').onclick = async () => {
       const b = $('#ltSave'); b.disabled = true; b.textContent = '保存中…';
       try {
-        const out = await req('PUT', '/api/vod/raw', { api: url, text: ta.value });
-        if (!url.startsWith('local:')) r.dataset.from = url;
+        const out = await req('PUT', '/api/vod/raw', { api: isGroup ? 'new' : url, text: ta.value });
+        if (isGroup) {
+          // The group row turns into an ordinary 本地片单 source: swap it for a plain row in place (its members stay in the list).
+          const tpl = document.createElement('div');
+          tpl.innerHTML = rowHtml({ name: $('.nm', r).value.trim(), api: out.api, kids: $('.kids', r).checked ? 1 : 0, adult: $('.adult', r).checked ? 1 : 0 }, 'site', +r.dataset.i || 0);
+          const plain = tpl.firstElementChild;
+          blockOf(r).slice(1).forEach(unMem);
+          r.replaceWith(plain);
+          close();
+          await persist(current());
+          toast(`已转成本地片单：${out.titles} 部 / ${out.cats} 个分类（已不再是聚合源）${out.bad ? `，有 ${out.bad} 行格式不对被跳过` : ''}`);
+          return renderSettings();
+        }
+        if (!url.startsWith('local:') && !isGroup) r.dataset.from = url;
         $('.url', r).value = out.api;
         close();
         await persist(current());
