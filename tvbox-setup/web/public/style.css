@@ -863,8 +863,8 @@ body.sov-open { overflow: hidden; }
 .sov-sec { display: flex; align-items: center; justify-content: space-between; margin: 18px 2px 10px; font-size: 13px; font-weight: 700; color: var(--muted); letter-spacing: .5px; }
 .sov-sec button { border: 0; background: none; color: var(--muted); font-size: 13px; padding: 2px 4px; }
 .sov-sec button[hidden] { display: none; }
-.sov-scope { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.sov-scope button { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; padding: 12px 14px; border-radius: 12px; border: 1px solid #ffffff1f; background: #ffffff0f; color: #ddd; text-align: left; transition: background .15s, border-color .15s; }
+.sov-scope { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.sov-scope button { box-sizing: border-box; width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; padding: 12px 14px; border-radius: 12px; border: 1px solid #ffffff1f; background: #ffffff0f; color: #ddd; text-align: left; transition: background .15s, border-color .15s; }
 .sov-scope b { font-size: 15px; font-weight: 700; }
 .sov-scope small { max-width: 100%; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sov-scope button.on { border-color: var(--red); background: #e5091426; color: #fff; }

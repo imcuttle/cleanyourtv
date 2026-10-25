@@ -556,16 +556,27 @@ function paintSov() {
   $('#sOvRecent').innerHTML = list.length ? list.map(x => `<div class="sov-row" data-q="${esc(x)}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>${esc(x)}</span><em data-del title="删除这条">×</em></div>`).join('')
     : `<div class="sov-empty">${recents.all().length ? '没有匹配的记录，回车直接搜' : '还没有搜索记录。输入片名、演员或导演，回车搜索。'}</div>`;
 }
+// Pin the sheet to what is actually visible: when the layout viewport is wider than the visible area (DevTools device mode,
+// a browser zoomed out, a page that scrolls sideways) `inset: 0` would make it wider than the screen and push 取消 / the
+// second scope card off the right edge.
+const fitSov = () => {
+  const vv = window.visualViewport;
+  if (!vv || sov.hidden) return;
+  const fit = Math.abs(vv.scale - 1) < 0.02;
+  sov.style.cssText = fit ? `inset:auto;left:${vv.offsetLeft}px;top:${vv.offsetTop}px;width:${vv.width}px;height:${vv.height}px` : '';
+};
+window.visualViewport?.addEventListener('resize', fitSov);
+window.visualViewport?.addEventListener('scroll', fitSov);
 function openSov() {
   if (!sov.hidden) return;
   closeScope(); closeMenu();
   $('#q2').value = $('#q').value;
-  paintSov(); sov.hidden = false; document.body.classList.add('sov-open');
+  paintSov(); sov.hidden = false; document.body.classList.add('sov-open'); fitSov();
   $('#q2').focus(); $('#q2').select();
 }
 function closeSov() {
   if (sov.hidden) return;
-  sov.hidden = true; document.body.classList.remove('sov-open'); $('#q2').blur(); $('#q').blur();
+  sov.hidden = true; sov.style.cssText = ''; document.body.classList.remove('sov-open'); $('#q2').blur(); $('#q').blur();
 }
 $('#q').addEventListener('focus', () => { if (smallScreen.matches) openSov(); else openHist(); });
 
