@@ -2589,13 +2589,13 @@ async function renderSettings() {
       <button class="small" data-bulk="merge" title="${kind === 'live' ? '把选中的直播源合成一个频道列表（同分组归并、相同地址去重）' : '把选中的点播源聚合成一个入口：搜索/浏览/播放线路同时覆盖所有成员，同名影片合并'}">${kind === 'live' ? '合并选中' : '聚合选中'}</button><span class="lan" data-bulk="count"></span></div>`;
   view.innerHTML = `<div class="page set"><h1>设置</h1>
     <p class="lan">修改保存在服务端，局域网里所有浏览器共享。${info.urls.length ? '其他设备打开：' + info.urls.map(u => `<code>${esc(u)}</code>`).join(' ') : ''}</p>
+    <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。</p>
+      <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button></div></section>
     ${installSection()}
     <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。${safety.hasPin ? '已设家长 PIN。' : '设了 PIN 后，别人想从儿童 / 标准切到更宽松的级别就必须输入 PIN。'}</p>
       <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}">${v}</button>`).join('')}</div>
       <div class="actions"><button class="small" id="setPin">${safety.hasPin ? '修改 / 清除 PIN' : '设置家长 PIN'}</button>${safety.hasPin ? '<span class="lan">切到更宽松的级别、改 PIN 都要输入 PIN；切到更严的级别不用；只有在「全部」下才能清除 PIN。</span>' : ''}</div>
     </section>
-    <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。</p>
-      <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button></div></section>
     <section><h2>封面卡片</h2><p class="hint">竖版：2:3 海报；宽卡：16:9，一屏能放更多标题，详情页和首页大图同步变成宽版。也可以点右上角的卡片图标快速切换。</p>
       <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版海报</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div></section>
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
