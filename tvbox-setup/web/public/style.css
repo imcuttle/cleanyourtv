@@ -504,7 +504,7 @@ nav a svg { display: none; }
   .set section { padding: 16px 14px; }
   .field input { min-width: 0; }
   .seg.big button { padding: 9px 18px; }
-  .savebar { bottom: calc(var(--tab) + env(safe-area-inset-bottom)); }
+  .savebar { bottom: 0; }   /* #view's own bottom padding already clears the tab bar */
   .toast { bottom: calc(var(--tab) + 14px + env(safe-area-inset-bottom)); }
   .dl { padding: 8px 10px; }
   .channels { grid-template-columns: repeat(2, 1fr); }
@@ -1041,3 +1041,18 @@ html.touchui .ptitle { font-size: 16px; }
   .fd-hint { bottom: calc(110px + env(safe-area-inset-bottom)); }
 }
 html.touchui .pmsg { top: 64%; padding: 0 24px; }
+
+.savebar { padding-bottom: 12px; margin-bottom: 8px; }
+.pcenter { pointer-events: none; } .pcenter button { pointer-events: auto; }
+html.touchui #player { touch-action: none; }
+html.touchui #player.plopen { touch-action: auto; }
+#srcWrap { display: contents; }
+
+/* 宽卡 + 小屏: the home banner is a column (poster, then text right under it), so the gap never depends on the screen height */
+@media (max-width: 760px) {
+  html.wide-cards .hero { height: auto; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 14px; padding: calc(72px + env(safe-area-inset-top)) 0 52px; }
+  html.wide-cards .hero .poster { position: relative; inset: auto; transform: none; width: 84vw; flex: none; }
+  html.wide-cards .hero .info { position: relative; left: auto; bottom: auto; width: 92%; z-index: 2; }
+  html.wide-cards .hero .dots { bottom: 16px; }
+  html.wide-cards .rows { margin-top: 0; }
+}

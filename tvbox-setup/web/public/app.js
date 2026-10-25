@@ -1780,6 +1780,7 @@ function togglePlist(open = $('.plist').hidden) {
   const box = $('.plist');
   box.hidden = !open;
   $('[data-act=list]').classList.toggle('on', open);
+  player.classList.toggle('plopen', open);
   if (open) { $('.pitems .on', box)?.scrollIntoView({ block: 'center' }); poke(); }
 }
 function closePlayer() {
@@ -1815,7 +1816,6 @@ player.addEventListener('click', e => {
   if (!$('.plist').hidden && !e.target.closest('.plist, .pbar, .pacts')) togglePlist(false);
 });
 function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && !scrubbing && !gesturing && !(fineCursor && ctrl.matches(':hover')) && player.classList.add('idle'), fineCursor ? 3000 : 4000); }
-player.addEventListener('mousemove', poke);
 // touch: a tap on the picture shows / hides the controls (see below); only touches on the controls themselves keep them up
 player.addEventListener('touchstart', e => { if (e.target.closest('.ctrl, .pbar, .pcenter, .plist')) poke(); }, { passive: true });
 
@@ -1824,6 +1824,7 @@ player.addEventListener('touchstart', e => { if (e.target.closest('.ctrl, .pbar,
 // player gets its own bar. Hovering the timeline seeks a second, muted, lowest-quality copy of the stream
 // to that moment and shows its frame (hover on a mouse, dragging on a touch screen).
 const fineCursor = matchMedia('(hover: hover) and (pointer: fine)').matches;
+if (fineCursor) player.addEventListener('mousemove', poke);   // (a tap also fires a compatibility mousemove: it would undo the tap-to-hide)
 const ctrl = $('.ctrl'), tl = $('.tl'), tip = $('.tip'), seekV = $('.tip video');
 let playingSrc = null, pvHls = null, pvKey = '', pvWant = null, pvBusy = false, pvTimer = 0, scrubbing = false;
 // Every screen gets the same custom player (Netflix-style). On touch screens the centre carries the transport buttons, the
@@ -1991,7 +1992,7 @@ if (!fineCursor) {
 function previewAt(t) {
   if (!playingSrc) return;
   if (pvKey !== playingSrc.src) {
-    pvReset();
+    pvReset(); tip.hidden = false;
     pvKey = playingSrc.src;
     tip.classList.remove('ready');
     if (playingSrc.hls && window.Hls && Hls.isSupported()) {
