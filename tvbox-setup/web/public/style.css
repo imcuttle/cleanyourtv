@@ -1056,3 +1056,12 @@ html.touchui #player.plopen { touch-action: auto; }
   html.wide-cards .hero .dots { bottom: 16px; }
   html.wide-cards .rows { margin-top: 0; }
 }
+
+/* 分享菜单（详情页 / 播放页） */
+.sharemenu { position: fixed; z-index: 70; width: min(300px, calc(100vw - 16px)); background: #181818f2; border: 1px solid #ffffff1a; border-radius: 10px; padding: 6px; box-shadow: 0 16px 40px #000c; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.sharemenu .sh-h { padding: 8px 10px 6px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sharemenu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; background: none; border: 0; color: #fff; padding: 10px; border-radius: 6px; text-align: left; font: inherit; }
+.sharemenu button:hover, .sharemenu button:focus-visible { background: #ffffff1a; outline: none; }
+.sharemenu button b { font-size: 14px; }
+.sharemenu button small { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.btn.ico#shareBtn svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

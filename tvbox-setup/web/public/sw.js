@@ -21,7 +21,7 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const r = e.request, u = new URL(r.url);
   if (r.method !== 'GET' || u.origin !== location.origin) return;
-  if (/^\/(api|hls|img|dl|media)\//.test(u.pathname) || r.headers.has('range') || u.searchParams.has('token')) return;
+  if (/^\/(api|hls|img|dl|media)\//.test(u.pathname) || r.headers.has('range')) return;
   // network first, fall back to cache (static files are served with ETag, so this stays fresh)
   e.respondWith(fetch(r).then(res => {
     if (res.ok) { const cp = res.clone(); caches.open(CACHE).then(c => put(c, r, cp)); }

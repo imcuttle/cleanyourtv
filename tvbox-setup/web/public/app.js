@@ -227,6 +227,51 @@ function toast(msg, sticky) {
   if (!sticky) setTimeout(() => t.remove(), 2600);
   return t; // sticky: stays until the caller removes it
 }
+// ---------- 分享链接 ----------
+// 详情页 / 播放页的「分享」：复制一个能直接打开这部片（或这一集 / 这个频道）的链接。链接就是现有的深链接
+// （#/v/… 详情、#/play/… 某一集、#/tv/… 直播频道），不新增服务端接口。
+// 在本机用 localhost 打开时，链接里换成局域网地址，不然发给别人是打不开的。
+// 链接里不带访问令牌：对方第一次打开输入一次令牌（深链接会保留，输完直接进到这部片）。
+const LOCAL_HOST = /^(localhost|127\.|\[?::1\]?$)/;
+const shareUrl = hash => (LOCAL_HOST.test(location.hostname) && serverInfo?.urls?.[0] || location.origin) + '/' + hash;
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch {}
+  // http 的局域网地址不是安全上下文，没有 clipboard API：用选中文本 + execCommand 兜底
+  const ta = document.createElement('textarea');
+  ta.value = t; ta.readOnly = true; ta.style.cssText = 'position:fixed;left:0;top:0;opacity:0;font-size:16px';
+  document.body.append(ta); ta.focus(); ta.select(); ta.setSelectionRange(0, t.length);
+  let ok = false; try { ok = document.execCommand('copy'); } catch {}
+  ta.remove(); return ok;
+}
+let closeShare = () => {};
+function shareMenu(anchor, hash, label) {
+  closeShare();
+  infoP().catch(() => {});   // 点选项时要同步拿到局域网地址（Safari 里 await 之后复制会被拒）
+  const m = document.createElement('div');
+  m.className = 'sharemenu'; m.setAttribute('role', 'menu');
+  m.innerHTML = `<div class="sh-h">分享「${esc(label)}」</div>
+    <button type="button" data-k="plain"><b>复制链接</b><small>链接里不含令牌，对方打开后输入一次访问令牌</small></button>
+    ${navigator.share ? '<button type="button" data-k="sys"><b>系统分享…</b></button>' : ''}`;
+  document.body.append(m);
+  const r = anchor.getBoundingClientRect(), w = m.offsetWidth, h = m.offsetHeight;
+  m.style.left = Math.min(Math.max(8, r.right - w), innerWidth - w - 8) + 'px';
+  m.style.top = (r.bottom + 8 + h > innerHeight - 8 ? Math.max(8, r.top - h - 8) : r.bottom + 8) + 'px';
+  const off = [];
+  const on = (t, ev, fn, o) => { t.addEventListener(ev, fn, o); off.push(() => t.removeEventListener(ev, fn, o)); };
+  closeShare = () => { off.forEach(f => f()); m.remove(); closeShare = () => {}; };
+  on(document, 'pointerdown', e => { if (!m.contains(e.target) && !anchor.contains(e.target)) closeShare(); }, true);
+  on(document, 'keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); closeShare(); } }, true);
+  on(window, 'hashchange', () => closeShare()); on(window, 'popstate', () => closeShare()); on(window, 'resize', () => closeShare());
+  m.onclick = async e => {
+    const b = e.target.closest('button[data-k]'); if (!b) return;
+    const k = b.dataset.k, url = shareUrl(hash);
+    closeShare();
+    if (k === 'sys') return navigator.share({ title: label, url }).catch(() => {});
+    if (await copyText(url)) toast('链接已复制');
+    else prompt('复制这个链接：', url);
+  };
+  m.querySelector('button')?.focus({ preventScroll: true });
+}
 const spinner = '<div class="spinner"></div>';
 const fmtSize = b => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : b > 1e7 ? (b / 1e6).toFixed(0) + ' MB' : (b / 1e6).toFixed(1) + ' MB';
 const fmtSpeed = b => !b ? '' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' MB/s' : Math.max(1, Math.round(b / 1e3)) + ' KB/s';
@@ -1421,6 +1466,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
           ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
             ${d.local ? '' : '<button class="btn more dlbtn" id="dlToggle">⬇ 下载</button>'}` : ''}
           ${canOpen && eps.length ? `<button class="btn more ico" id="extPlay" title="用系统默认播放器打开${eps.length > 1 ? ' ' + esc(eps[resumeIdx].name) : ''}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14zM5 5h6v2H5v12h12v-6h2v8H3V5z"/></svg>播放器</button><button class="btn more ico" id="extReveal" title="在文件夹中显示这个文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5A1.5 1.5 0 0 1 4.5 4h5.2c.4 0 .8.2 1.1.5L12.3 6H19.5A1.5 1.5 0 0 1 21 7.5v10A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>文件夹</button>` : ''}
+          <button class="btn more ico" id="shareBtn" title="分享链接" aria-label="分享链接"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12v7a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-7M12 15V4M8 8l4-4 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
         </div></div></div>
       <div class="body">
@@ -1466,6 +1512,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
       $('#extPlay', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'play');
       $('#extReveal', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'reveal');
     }
+    $('#shareBtn', m).onclick = e => shareMenu(e.currentTarget, vodHref(site, id), d.name);
     if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
@@ -1699,6 +1746,7 @@ function openPlayer(startAt) {
   $('[data-act=pip]').hidden = !pipSupported() || fineCursor;   // desktop has it in the control bar
   syncMedia();
   $('[data-act=star]').hidden = !live;
+  $('[data-act=share]').hidden = cur.kind === 'local';   // 下载列表里的本地文件没有可分享的页面
   paintVodActs();
   $('[data-act=ext]').hidden = !(cur.kind === 'vod' && cur.d.local && serverInfo?.loopback);
   if (live) paintStar(liveFavs.has(e.url));
@@ -1802,6 +1850,12 @@ player.addEventListener('click', e => {
   if (act === 'prev') step(-1);
   if (act === 'list') return togglePlist();
   if (act === 'ext') { video.pause(); return openLocal(cur.eps[cur.ep].url, 'play'); }
+  if (act === 'share') {
+    const c = cur.eps[cur.ep], live = cur.kind === 'live';
+    const hash = live ? `#/tv/${encodeURIComponent(localStorage.live || '')}/${encodeURIComponent(c.url)}/${encodeURIComponent(c.name || '')}`
+      : playHref(cur.d.site, cur.d.id, cur.line, cur.ep);
+    return shareMenu(e.target.closest('[data-act]'), hash, live ? c.name : cur.eps.length > 1 ? `${cur.title} ${c.name}` : cur.title);
+  }
   if (act === 'vfav') { toast(favs.toggle(cur.d) ? '已收藏' : '已取消收藏'); return paintVodActs(); }
   if (act === 'dl') {
     const e = cur.eps[cur.ep], j = dlFor(cur.d.site, cur.d.id, e.url);

@@ -90,14 +90,13 @@ function banner(n, ffmpeg, dl) {
   console.log(`    本机      http://localhost:${PORT}`);
   for (const ip of lan) console.log(`    局域网    http://${ip}:${PORT}`);
   console.log(`\n  访问令牌  ${TOKEN}`);
-  console.log(`  （浏览器第一次打开要输入它，之后一直记住；存在 ${AUTH.ENV_FILE} 的 ${AUTH.KEY}，换令牌就删掉那一行再重启。下面的二维码已带令牌，扫码即登录）`);
+  console.log(`  （浏览器第一次打开要输入它，之后一直记住；存在 ${AUTH.ENV_FILE} 的 ${AUTH.KEY}，换令牌就删掉那一行再重启）`);
   console.log(`\n  进程：${n} 个（CPU ${CPUS} 核，环境变量 WORKERS 可调）`);
   console.log(`  下载目录：${dl}`);
   console.log(`  直播封面：${ffmpeg ? 'ffmpeg 已找到' : '没有 ffmpeg，悬停时用浏览器截图'}`);
   console.log('  关闭这个窗口即停止服务。');
   // 二维码: 手机 / 电视扫一下就能打开。局域网的马上显示，公网的等查到 IP 再显示。
-  const withTok = url => `${url}/?token=${encodeURIComponent(TOKEN)}`; // 二维码里带上令牌，手机扫一下就进去了
-  const qr = (title, url) => { try { console.log(`\n  ${title}  ${url}\n${toTerminal(withTok(url))}`); } catch {} };
+  const qr = (title, url) => { try { console.log(`\n  ${title}  ${url}\n${toTerminal(url)}`); } catch {} };
   if (lan[0]) qr('局域网二维码（手机和这台电脑连同一个 Wi-Fi）', `http://${lan[0]}:${PORT}`);
   publicIp().then(ip => {
     if (!ip) return console.log('\n  公网：没查到公网 IP（离线或被墙），只能在局域网里访问。');
@@ -2590,8 +2589,8 @@ async function serveStatic(p, req, res) {
 
 // ---- 访问令牌 ----
 // 一道统一的闸，放在所有路由前面：除了网页本身的静态文件，/api /hls /img /dl /media 全部要令牌，没有一个接口单独处理。
-// 令牌三种带法：Cookie（浏览器登录后服务端种下，HttpOnly、长期有效，<img> / <video> / hls 请求自动带上）、
-// Authorization: Bearer（网页的 fetch 拦截器带，用来登录和 Cookie 丢了时自动恢复）、?token=（扫码 / 外部播放器链接）。
+// 令牌两种带法，都不走 URL：Cookie（浏览器登录后服务端种下，HttpOnly、长期有效，<img> / <video> / hls 请求自动带上）、
+// Authorization: Bearer（网页的 fetch 拦截器带，用来登录和 Cookie 丢了时自动恢复）。
 // 带对了令牌、而 Cookie 还不对，就顺手种一个 Cookie。
 const INDEX_HTML = path.join(PUBLIC, 'index.html');
 const COOKIE = 'tvbox_token';
@@ -2607,12 +2606,12 @@ const cookieOf = (req, name) => {
 };
 const failures = new Map(); // ip -> { n, reset }  给错令牌的次数（每个 worker 各记各的）
 setInterval(() => { const now = Date.now(); for (const [k, v] of failures) if (v.reset < now) failures.delete(k); }, 60000).unref();
-// -> { ok, tooMany, fresh }  fresh = 令牌是 header / query 带的，Cookie 还没有
+// -> { ok, tooMany, fresh }  fresh = 令牌是 header 带的，Cookie 还没有
 function checkAuth(req, u) {
   if (tokenOk(cookieOf(req, COOKIE))) return { ok: true };
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
-  const given = m ? m[1].trim() : u.searchParams.get('token');
-  if (!given) return { ok: false };
+  if (!m) return { ok: false };
+  const given = m[1].trim();
   const ip = req.socket.remoteAddress || '';
   const f = failures.get(ip);
   if (f && f.n >= 10 && f.reset > Date.now()) return { ok: false, tooMany: true };

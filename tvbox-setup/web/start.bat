@@ -21,12 +21,8 @@ if not defined NODE (
 
 where ffmpeg >nul 2>nul || if not exist ".tools\ffmpeg.exe" echo 提示：把 ffmpeg.exe 放进 .tools 文件夹后，直播封面和悬停预览由服务端生成，更快。
 echo 第一次运行时 Windows 防火墙会询问，勾选「专用网络」并允许，局域网里其他设备才能访问。
-rem 访问令牌：第一次启动在 .env 里生成 TVBOX_TOKEN（已有就沿用）。服务启动后会在这个窗口里再打印一次。
-"%NODE%" -e "require('./auth').ensureToken()"
-set "TOKEN="
-for /f "tokens=1,* delims==" %%A in ('findstr /b "TVBOX_TOKEN=" .env 2^>nul') do set "TOKEN=%%B"
-
+rem 访问令牌：第一次启动由 server.js 在 .env 里生成 TVBOX_TOKEN，并在这个窗口里打印；浏览器输入一次后会一直记住。
 if not defined PORT set "PORT=9988"
-start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:%PORT%/?token=%TOKEN%"
+start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:%PORT%"
 "%NODE%" server.js
 pause
