@@ -81,13 +81,35 @@ function primary() {
 }
 
 function banner(n, ffmpeg, dl) {
+  const { toTerminal } = require('./qr');
+  const lan = lanIps();
   console.log('\n  TVBox 已启动，浏览器打开：\n');
   console.log(`    本机      http://localhost:${PORT}`);
-  for (const ip of lanIps()) console.log(`    局域网    http://${ip}:${PORT}`);
+  for (const ip of lan) console.log(`    局域网    http://${ip}:${PORT}`);
   console.log(`\n  进程：${n} 个（CPU ${CPUS} 核，环境变量 WORKERS 可调）`);
   console.log(`  下载目录：${dl}`);
   console.log(`  直播封面：${ffmpeg ? 'ffmpeg 已找到' : '没有 ffmpeg，悬停时用浏览器截图'}`);
-  console.log('  关闭这个窗口即停止服务。\n');
+  console.log('  关闭这个窗口即停止服务。');
+  // 二维码: 手机 / 电视扫一下就能打开。局域网的马上显示，公网的等查到 IP 再显示。
+  const qr = (title, url) => { try { console.log(`\n  ${title}  ${url}\n${toTerminal(url)}`); } catch {} };
+  if (lan[0]) qr('局域网二维码（手机和这台电脑连同一个 Wi-Fi）', `http://${lan[0]}:${PORT}`);
+  publicIp().then(ip => {
+    if (!ip) return console.log('\n  公网：没查到公网 IP（离线或被墙），只能在局域网里访问。');
+    const url = `http://${ip}:${PORT}`;
+    console.log(`\n  公网      ${url}`);
+    console.log('            从外网访问需要在路由器里把端口 ' + PORT + ' 转发到这台电脑（光猫 / 运营商没有公网 IPv4 时不通）。没有设家长 PIN 的话，别把它暴露出去。');
+    qr('公网二维码', url);
+  });
+}
+// Public IPv4, asked from a few lookup services at once; first answer wins. null when offline.
+async function publicIp() {
+  const ask = async u => {
+    const r = await fetch(u, { signal: AbortSignal.timeout(4000), headers: { 'user-agent': 'curl/8' } });
+    const t = (await r.text()).trim();
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) throw new Error('not an ip');
+    return t;
+  };
+  try { return await Promise.any(['https://api.ipify.org', 'https://4.ipw.cn', 'https://ifconfig.me/ip', 'https://icanhazip.com'].map(ask)); } catch { return null; }
 }
 
 // ---- RPC: run `op` in the process that owns it (leader, or media for local*/hls*) — directly when that is us ----
