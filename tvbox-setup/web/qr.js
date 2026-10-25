@@ -147,15 +147,38 @@ function encode(text) {
   return m;
 }
 
-// Two QR rows per terminal line (▀ with explicit fg/bg), black on white whatever the terminal theme is.
-function toTerminal(text, indent = '    ') {
-  const m = encode(text), n = m.length, q = 3;
+// Terminal rendering, three flavours (env TVBOX_QR=half|wide|plain forces one):
+//   half  – two QR rows per line with ▀ and fg/bg colours: compact, needs ANSI colours and a font that has ▀ (macOS / Linux).
+//   wide  – every module is two spaces with a background colour: no special glyph at all, so it survives Windows consoles
+//           (cmd / PowerShell, raster or CJK fonts that draw ▀ as garbage or leave gaps). Needs ANSI colours (Windows 10+).
+//   plain – no colours at all (old consoles, redirected output): light modules are drawn as █, dark ones as spaces, which
+//           scans on a dark terminal.
+function pickMode() {
+  const f = process.env.TVBOX_QR;
+  if (f === 'half' || f === 'wide' || f === 'plain') return f;
+  const colours = !process.env.NO_COLOR && process.stdout.isTTY && (process.stdout.hasColors ? process.stdout.hasColors() : true);
+  if (!colours) return 'plain';
+  return process.platform === 'win32' ? 'wide' : 'half';
+}
+function toTerminal(text, indent = '    ', mode = pickMode()) {
+  const m = encode(text), n = m.length, q = mode === 'half' ? 3 : 2;
   const dark = (x, y) => x >= 0 && y >= 0 && x < n && y < n && m[y][x];
   const lines = [];
-  for (let y = -q; y < n + q; y += 2) {
-    let s = indent;
-    for (let x = -q; x < n + q; x++) s += `\x1b[${dark(x, y) ? 30 : 97};${dark(x, y + 1) ? 40 : 107}m▀`;
-    lines.push(s + '\x1b[0m');
+  if (mode === 'half') {
+    for (let y = -q; y < n + q; y += 2) {
+      let s = indent;
+      for (let x = -q; x < n + q; x++) s += `\x1b[${dark(x, y) ? 30 : 97};${dark(x, y + 1) ? 40 : 107}m▀`;
+      lines.push(s + '\x1b[0m');
+    }
+  } else {
+    for (let y = -q; y < n + q; y++) {
+      let s = indent;
+      for (let x = -q; x < n + q; x++) {
+        if (mode === 'wide') s += `\x1b[${dark(x, y) ? 40 : 107}m  `;
+        else s += dark(x, y) ? '  ' : '\u2588\u2588';
+      }
+      lines.push(s + (mode === 'wide' ? '\x1b[0m' : ''));
+    }
   }
   return lines.join('\n');
 }

@@ -532,7 +532,60 @@ $('#scopeMenu').onclick = e => {
 };
 document.addEventListener('click', e => { if (!e.target.closest('#searchForm')) closeScope(); });
 addEventListener('keydown', e => { if (e.key === 'Escape') closeScope(); });
-$('#searchForm').onsubmit = e => { e.preventDefault(); const q = $('#q').value.trim(); if (q) { closeScope(); location.hash = searchHash(q); } };
+const recents = {
+  all: () => { try { return JSON.parse(localStorage.recentSearches || '[]').filter(x => typeof x === 'string'); } catch { return []; } },
+  add(q) { localStorage.recentSearches = JSON.stringify([q, ...this.all().filter(x => x !== q)].slice(0, 12)); },
+  del(q) { localStorage.recentSearches = JSON.stringify(this.all().filter(x => x !== q)); },
+  clear() { localStorage.removeItem('recentSearches'); },
+};
+const runSearch = q => { q = q.trim(); if (!q) return; recents.add(q); closeScope(); closeSov(); $('#q').value = q; location.hash = searchHash(q); };
+$('#searchForm').onsubmit = e => { e.preventDefault(); runSearch($('#q').value); };
+
+// 小屏: focusing the search box opens a full-screen search sheet (own input, scope switch, recent searches) instead of
+// typing into the cramped header pill.
+const smallScreen = matchMedia('(max-width: 760px)');
+const sov = $('#sOv');
+function paintSov() {
+  const cur = state.sites.find(s => s.key === state.site), site = searchScope.get() === 'site' && !!cur;
+  $('#sOvAll').textContent = `${searchableCount()} 个源，结果合并`;
+  $('#sOvSite').textContent = cur ? cur.name : '没有可用的源';
+  $$('#sOvScope [data-scope]').forEach(b => { b.classList.toggle('on', b.dataset.scope === (site ? 'site' : 'all')); if (b.dataset.scope === 'site') b.disabled = !cur; });
+  $('#q2').placeholder = $('#q').placeholder;
+  const typed = $('#q2').value.trim().toLowerCase(), list = recents.all().filter(x => !typed || x.toLowerCase().includes(typed));
+  $('#sOvClear').hidden = !recents.all().length;
+  $('#sOvRecent').innerHTML = list.length ? list.map(x => `<div class="sov-row" data-q="${esc(x)}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>${esc(x)}</span><em data-del title="删除这条">×</em></div>`).join('')
+    : `<div class="sov-empty">${recents.all().length ? '没有匹配的记录，回车直接搜' : '还没有搜索记录。输入片名、演员或导演，回车搜索。'}</div>`;
+}
+function openSov() {
+  if (!sov.hidden) return;
+  closeScope(); closeMenu();
+  $('#q2').value = $('#q').value;
+  paintSov(); sov.hidden = false; document.body.classList.add('sov-open');
+  $('#q2').focus(); $('#q2').select();
+}
+function closeSov() {
+  if (sov.hidden) return;
+  sov.hidden = true; document.body.classList.remove('sov-open'); $('#q2').blur(); $('#q').blur();
+}
+$('#q').addEventListener('focus', () => { if (smallScreen.matches) openSov(); });
+$('#q2').addEventListener('input', paintSov);
+$('#sOvForm').onsubmit = e => { e.preventDefault(); runSearch($('#q2').value); };
+$('#sOvCancel').onclick = closeSov;
+$('#sOvScope').onclick = e => {
+  const b = e.target.closest('[data-scope]'); if (!b || b.disabled) return;
+  searchScope.set(b.dataset.scope); paintSov(); $('#q2').focus();
+  const q = $('#q2').value.trim();
+  if (location.hash.startsWith('#/search/') && q) { closeSov(); location.hash = searchHash(q); }
+};
+$('#sOvRecent').onclick = e => {
+  const row = e.target.closest('.sov-row'); if (!row) return;
+  if (e.target.closest('[data-del]')) { recents.del(row.dataset.q); paintSov(); return; }
+  runSearch(row.dataset.q);
+};
+$('#sOvClear').onclick = () => { recents.clear(); paintSov(); };
+addEventListener('keydown', e => { if (e.key === 'Escape') closeSov(); });
+smallScreen.addEventListener('change', () => { if (!smallScreen.matches) closeSov(); });
+addEventListener('hashchange', closeSov);
 syncScope();
 addEventListener('scroll', () => $('#top').classList.toggle('solid', scrollY > 30));
 addEventListener('hashchange', () => route({ nav: true }));

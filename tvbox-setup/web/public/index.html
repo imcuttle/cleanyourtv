@@ -52,6 +52,24 @@
 </header>
 <main id="view"></main>
 
+<div id="sOv" hidden role="dialog" aria-label="搜索">
+  <form id="sOvForm" class="sov-bar" role="search">
+    <div class="sov-pill">
+      <svg class="s-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      <input id="q2" type="search" autocomplete="off" enterkeyhint="search" placeholder="搜片名 / 演员 / 导演">
+    </div>
+    <button type="button" class="sov-cancel" id="sOvCancel">取消</button>
+  </form>
+  <div class="sov-body">
+    <div class="sov-sec">搜索范围</div>
+    <div class="sov-scope" id="sOvScope">
+      <button type="button" data-scope="all"><b>全部源</b><small id="sOvAll">—</small></button>
+      <button type="button" data-scope="site"><b>仅当前源</b><small id="sOvSite">—</small></button>
+    </div>
+    <div class="sov-sec"><span>最近搜索</span><button type="button" id="sOvClear" hidden>清空</button></div>
+    <div id="sOvRecent" class="sov-recent"></div>
+  </div>
+</div>
 <div id="player" hidden>
   <video id="video" controls playsinline autoplay></video>
   <div class="pbar">
