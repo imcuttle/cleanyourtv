@@ -1304,3 +1304,11 @@ html.cs-big .card .img img { image-rendering: auto; }
 .clipnotes { margin: 4px 0; line-height: 1.6; }
 .sheet .top .poster.sk { opacity: 1; }
 .sheet .top .info h1 { min-height: 1.2em; }
+
+/* text editor host (Monaco, or a textarea when it cannot load) */
+.edhost { height: min(62vh, 640px); min-height: 280px; border: 1px solid #333; border-radius: 6px; overflow: hidden; background: #1e1e1e; position: relative; }
+.edhost .edload { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; }
+.edhost .plainedit { width: 100%; height: 100%; box-sizing: border-box; border: 0; background: #1e1e1e; color: #ddd; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; padding: 10px; resize: none; }
+.edhost .monaco-editor { position: absolute; inset: 0; }
+.sheet.editor { width: min(1100px, 96vw); }
+@media (max-width: 760px) { .edhost { height: 58vh; } }

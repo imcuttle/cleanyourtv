@@ -2791,6 +2791,57 @@ function closeBulkMenus() { $$('.bmenu').forEach(m => { m.hidden = true; }); }
 document.addEventListener('click', e => { if (!e.target.closest('.bmenu, [data-bulk=more], [data-bulk=cat], [data-cbulk=more], [data-cbulk=cat]')) closeBulkMenus(); });
 addEventListener('scroll', closeBulkMenus, { passive: true });
 
+// ---------- text editor: Monaco (the open-source editor core of VS Code), loaded on first use ----------
+// textEditor(host, { value, language }) → { get value / set value, onchange, focus(), dispose() } — the same small surface as a <textarea>,
+// so callers do not care which one they got. If Monaco cannot be loaded (offline, blocked) a plain textarea stands in.
+let monacoP = null;
+function loadMonaco() {
+  if (monacoP) return monacoP;
+  return monacoP = new Promise((ok, bad) => {
+    const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = 'vendor/monaco/vs/editor/editor.main.css'; document.head.append(css);
+    const sc = document.createElement('script'); sc.src = 'vendor/monaco/vs/loader.js';
+    sc.onerror = () => { monacoP = null; bad(new Error('编辑器组件加载失败')); };
+    sc.onload = () => {
+      window.require.config({ paths: { vs: 'vendor/monaco/vs' }, 'vs/nls': { availableLanguages: { '*': 'zh-cn' } } });
+      // The language workers run from a same-origin blob that imports the real one (workers cannot be loaded cross-path directly).
+      window.MonacoEnvironment = { getWorkerUrl: () => URL.createObjectURL(new Blob([`self.MonacoEnvironment={baseUrl:'${location.origin}${location.pathname.replace(/[^/]*$/, '')}vendor/monaco/'};importScripts('${location.origin}${location.pathname.replace(/[^/]*$/, '')}vendor/monaco/vs/base/worker/workerMain.js');`], { type: 'text/javascript' })) };
+      window.require(['vs/editor/editor.main'], () => ok(window.monaco), e => { monacoP = null; bad(e); });
+    };
+    document.head.append(sc);
+  });
+}
+// Channel / title lists: m3u comments, "分类,#genre#" group lines and "名称,地址" rows get light syntax colouring.
+function defineListLanguage(monaco) {
+  if (monaco.languages.getLanguages().some(l => l.id === 'tvlist')) return;
+  monaco.languages.register({ id: 'tvlist' });
+  monaco.languages.setMonarchTokensProvider('tvlist', {
+    tokenizer: { root: [
+      [/^\s*\/\/.*$/, 'comment'], [/^#EXTM3U.*$/, 'keyword'], [/^#EXTINF/, 'keyword', '@extinf'], [/^#.*$/, 'comment'],
+      [/^[^,\n#]+(?=,#genre#)/, 'type.identifier'], [/,#genre#/, 'keyword'],
+      [/^[^,\n]+(?=,)/, 'string'], [/\$/, 'delimiter'], [/@@/, 'keyword'], [/\s\|\|\s/, 'keyword'], [/https?:\/\/[^\s#$|]+/, 'string.link'],
+    ], extinf: [[/[a-z-]+(?==)/, 'attribute.name'], [/"[^"]*"/, 'string'], [/,.*$/, 'type.identifier', '@pop'], [/./, '']] },
+  });
+}
+async function textEditor(host, { value = '', language = 'tvlist' } = {}) {
+  const fallback = () => {
+    const ta = document.createElement('textarea'); ta.spellcheck = false; ta.value = value; ta.className = 'plainedit'; host.replaceChildren(ta);
+    const api = { get value() { return ta.value; }, set value(v) { ta.value = v; api.onchange?.(); }, focus: () => ta.focus(), dispose: () => ta.remove(), onchange: null, kind: 'textarea' };
+    ta.oninput = () => api.onchange?.();
+    return api;
+  };
+  let monaco;
+  try { monaco = await Promise.race([loadMonaco(), new Promise((_, bad) => setTimeout(() => bad(new Error('timeout')), 15000))]); } catch { return fallback(); }
+  defineListLanguage(monaco);
+  host.replaceChildren();
+  const ed = monaco.editor.create(host, { value, language, theme: 'vs-dark', automaticLayout: true, minimap: { enabled: false }, fontSize: 13,
+    lineNumbers: 'on', wordWrap: 'off', scrollBeyondLastLine: false, renderWhitespace: 'none', tabSize: 2, fixedOverflowWidgets: true, padding: { top: 8, bottom: 8 },
+    contextmenu: true, smoothScrolling: true, quickSuggestions: false, suggestOnTriggerCharacters: false });
+  const api = { get value() { return ed.getValue(); }, set value(v) { ed.setValue(v); }, focus: () => ed.focus(), dispose: () => ed.dispose(), onchange: null, kind: 'monaco', editor: ed, monaco };
+  ed.onDidChangeModelContent(() => api.onchange?.());
+  ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => host.closest('.sheet')?.querySelector('#ltSave')?.click());
+  return api;
+}
+
 // ---------- settings ----------
 let installEvt = null;
 addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; });
@@ -3054,26 +3105,28 @@ async function renderSettings() {
       if (!confirm(`把聚合源「${name}」转成一个本地片单？\n\n· 会取 ${keys.length} 个成员各自前 3 页的片，同名同年的自动合并成一部（线路包含所有成员的线路）\n· 转换后它变成普通的本地点播源，不再是聚合源：成员不再被实时聚合，之后新增的片不会自动出现\n· 只含能直接播放的线路；原来的成员源本身不受影响\n\n继续？`)) return;
     }
     const m = document.createElement('div');
+    let editorOf = null;
     m.className = 'modal'; m.id = 'textModal';
     m.innerHTML = `<div class="sheet editor"><div class="body"><h3>编辑「${esc(name)}」<span class="lan" id="chCount"></span></h3>
       <p class="hint">每行一部：<code>片名,播放地址</code>（m3u8 / mp4）；多集写成 <code>片名,第1集$地址#第2集$地址</code>，或同名再写一行追加一集；分类用 <code>分类名,#genre#</code>。${url.startsWith('local:') ? '' : '网页源这里是它前 3 页的快照，保存后改读服务端本地文件，不再请求原接口。'}</p>
-      <textarea id="liveText" spellcheck="false">${url.startsWith('local:') ? '加载中…' : isGroup ? `正在从 ${keys.length} 个成员拉取并合并，最多几十秒…` : '正在从源上拉取前 3 页片单，最多十几秒…'}</textarea>
+      <div id="liveText" class="edhost"><p class="lan edload">${url.startsWith('local:') ? '加载中…' : isGroup ? `正在从 ${keys.length} 个成员拉取并合并，最多几十秒…` : '正在从源上拉取前 3 页片单，最多十几秒…'}</p></div>
       <div class="actions"><button class="btn red" id="ltSave" disabled>保存</button><button class="small" id="ltCancel">取消</button></div></div></div>`;
     document.body.append(m); document.body.style.overflow = 'hidden';
-    const close = () => { m.remove(); document.body.style.overflow = ''; };
+    const close = () => { editorOf?.dispose(); m.remove(); document.body.style.overflow = ''; };
     m.onclick = e => { if (e.target === m) close(); };
     $('#ltCancel').onclick = close;
     const j = await (isGroup ? api('vod/group', { keys: keys.join(',') }, AbortSignal.timeout(90e3)) : api('vod/raw', { api: url }, AbortSignal.timeout(40e3))).catch(e => ({ text: '', error: e.message }));
     if (!m.isConnected) return;
-    const ta = $('#liveText');
     if (j.error) toast(j.error + (isGroup ? '' : '，可以直接手写片单'));
     if (isGroup && j.members) {
       const bad = j.members.filter(x => !x.ok);
       toast(`已合并 ${j.titles} 部（其中 ${j.merged} 部有多个来源）${bad.length ? `；${bad.length} 个成员没取到：${bad.map(x => x.name).join('、')}` : ''}`);
     }
-    ta.value = j.text || '我的分类,#genre#\n片名,https://example.com/movie.m3u8\n剧名,第1集$https://example.com/1.m3u8#第2集$https://example.com/2.m3u8\n';
-    const count = () => { $('#chCount').textContent = `${ta.value.split(/\r?\n/).filter(l => /^[^,#\/][^,]*,\s*https?:\/\//.test(l.trim())).length} 行片`; };
-    ta.oninput = count; count();
+    const ta = await textEditor($('#liveText'), { value: j.text || '我的分类,#genre#\n片名,https://example.com/movie.m3u8\n剧名,第1集$https://example.com/1.m3u8#第2集$https://example.com/2.m3u8\n' });
+    if (!m.isConnected) { ta.dispose(); return; }
+    editorOf = ta;
+    const count = () => { $('#chCount').textContent = `${new Set(ta.value.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('//') && !l.startsWith('#') && /^[^,]+,.*https?:\/\//.test(l) && !/,#genre#/.test(l)).map(l => l.slice(0, l.indexOf(',')))).size} 部`; };
+    ta.onchange = count; count(); ta.focus();
     $('#ltSave').disabled = false;
     $('#ltSave').onclick = async () => {
       const b = $('#ltSave'); b.disabled = true; b.textContent = '保存中…';
@@ -3104,36 +3157,39 @@ async function renderSettings() {
     if (r.parentElement.id === 'sites') return editVodText(r);
     let url = $('.url', r).value.trim();
     const name = $('.nm', r).value.trim() || url;
-    // On this machine the list opens in VS Code (a real editor); other devices get the in-page text box below.
-    if ((await infoP()).loopback) {
-      try {
-        const j = await req('POST', '/api/live/edit', { url });
-        if (!url.startsWith('local:')) { r.dataset.from = url; $('.url', r).value = url = j.url; await persist(current()); }
-        if (j.ok) return toast('已在 VS Code 打开，保存文件即生效（频道列表每次都从这个文件读）');
-        toast(j.error + '，改用网页里的编辑框');
-      } catch (err) { toast(err.message); }
-    }
+    const info_ = await infoP().catch(() => ({}));
     const m = document.createElement('div');
+    let ta = null;
     m.className = 'modal'; m.id = 'textModal';
     m.innerHTML = `<div class="sheet editor"><div class="body"><h3>编辑「${esc(name)}」<span class="lan" id="chCount"></span></h3>
-      <p class="hint">m3u（<code>#EXTINF:-1 group-title="分组" tvg-logo="…",频道名</code> 下一行写地址）或 TVBox txt（<code>分组,#genre#</code> / <code>频道名,地址</code>）。保存后存成服务端本地文件，不再拉原地址。</p>
-      <textarea id="liveText" spellcheck="false">加载中…</textarea>
-      <div class="actions"><button class="btn red" id="ltSave">保存</button><button class="small" id="ltCancel">取消</button></div></div></div>`;
+      <p class="hint">m3u（<code>#EXTINF:-1 group-title="分组" tvg-logo="…",频道名</code> 下一行写地址）或 TVBox txt（<code>分组,#genre#</code> / <code>频道名,地址</code>）。保存后存成服务端本地文件，不再拉原地址。⌘/Ctrl+S 保存，⌘/Ctrl+F 查找，⌘/Ctrl+H 替换。</p>
+      <div id="liveText" class="edhost"><p class="lan edload">加载中…</p></div>
+      <div class="actions"><button class="btn red" id="ltSave" disabled>保存</button><button class="small" id="ltCancel">取消</button>${info_.loopback ? '<button class="small" id="ltVsc" title="改用本机的 VS Code 打开这个文件（保存文件即生效）">在 VS Code 打开</button>' : ''}</div></div></div>`;
     document.body.append(m); document.body.style.overflow = 'hidden';
-    const close = () => { m.remove(); document.body.style.overflow = ''; };
+    const close = () => { ta?.dispose(); m.remove(); document.body.style.overflow = ''; };
     m.onclick = e => { if (e.target === m) close(); };
     $('#ltCancel').onclick = close;
     const j = await api('live/raw', { url }).catch(e => ({ text: '', error: e.message }));
-    const ta = $('#liveText');
-    ta.value = j.text || '#EXTM3U\n#EXTINF:-1 group-title="我的频道",频道名\nhttps://example.com/live.m3u8\n';
-    const count = () => { $('#chCount').textContent = `${(ta.value.match(/^#EXTINF/gm) || []).length || ta.value.split('\n').filter(l => /,https?:\/\//.test(l)).length} 个频道`; };
-    ta.oninput = count; count();
+    if (!m.isConnected) return;
+    ta = await textEditor($('#liveText'), { value: j.text || '#EXTM3U\n#EXTINF:-1 group-title="我的频道",频道名\nhttps://example.com/live.m3u8\n' });
+    if (!m.isConnected) { ta.dispose(); return; }
+    const count = () => { const v = ta.value; $('#chCount').textContent = `${(v.match(/^#EXTINF/gm) || []).length || v.split('\n').filter(l => /,https?:\/\//.test(l)).length} 个频道`; };
+    ta.onchange = count; count(); ta.focus();
+    $('#ltSave').disabled = false;
     $('#ltSave').onclick = async () => {
+      const b = $('#ltSave'); b.disabled = true; b.textContent = '保存中…';
       try {
         const out = await req('PUT', '/api/live/raw', { url, text: ta.value });
         if (!url.startsWith('local:')) { r.dataset.from = url; $('.url', r).value = out.url; }
         close();
         await persist(current());
+      } catch (err) { toast(err.message); b.disabled = false; b.textContent = '保存'; }
+    };
+    if ($('#ltVsc')) $('#ltVsc').onclick = async () => {
+      try {
+        const o = await req('POST', '/api/live/edit', { url });
+        if (!url.startsWith('local:')) { r.dataset.from = url; $('.url', r).value = url = o.url; await persist(current()); }
+        if (o.ok) { close(); toast('已在 VS Code 打开，保存文件即生效（频道列表每次都从这个文件读）'); } else toast(o.error);
       } catch (err) { toast(err.message); }
     };
   };
