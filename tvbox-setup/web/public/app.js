@@ -1387,6 +1387,18 @@ async function refreshDownloads(signal) {
   return state.downloads;
 }
 const dlFor = (site, id, url) => (state.downloads || []).find(j => j.site === site && j.vid === id && j.url === url);
+// Icon-only 收藏 / 下载 buttons (same glyphs as the player bar).
+const svgI = p => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p}"/></svg>`;
+const IC = {
+  heart: svgI('M12 20.5l-1.2-1.1C5.9 15 3 12.4 3 9a4.5 4.5 0 0 1 8-2.8A4.5 4.5 0 0 1 21 9c0 3.4-2.9 6-7.8 10.4z'),
+  dl: svgI('M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 20h14'),
+  done: svgI('M5 12.5l4.5 4.5L19 7.5'),
+  pause: svgI('M8 5v14M16 5v14'),
+  play: svgI('M7 4.5v15l12-7.5z'),
+  retry: svgI('M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5'),
+  wait: svgI('M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'),
+};
+
 async function enqueue(d, line, eps) {
   await req('POST', '/api/downloads', { items: eps.map(i => ({ site: d.site, siteName: d.siteName, adult: d.adult ? 1 : 0, id: d.id, name: d.name, pic: d.pic, line, ep: i, epName: d.lines[line].episodes[i].name, url: d.lines[line].episodes[i].url })) });
   await refreshDownloads();
@@ -1464,10 +1476,10 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         <button class="close">✕</button>
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
           ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
-            ${d.local ? '' : '<button class="btn more dlbtn" id="dlToggle">⬇ 下载</button>'}` : ''}
+            ${d.local ? '' : `<button class="btn more ico ib dlbtn" id="dlToggle" title="下载" aria-label="下载">${IC.dl}</button>`}` : ''}
           ${canOpen && eps.length ? `<button class="btn more ico" id="extPlay" title="用系统默认播放器打开${eps.length > 1 ? ' ' + esc(eps[resumeIdx].name) : ''}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14zM5 5h6v2H5v12h12v-6h2v8H3V5z"/></svg>播放器</button><button class="btn more ico" id="extReveal" title="在文件夹中显示这个文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5A1.5 1.5 0 0 1 4.5 4h5.2c.4 0 .8.2 1.1.5L12.3 6H19.5A1.5 1.5 0 0 1 21 7.5v10A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>文件夹</button>` : ''}
           <button class="btn more ico" id="shareBtn" title="分享" aria-label="分享"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2"/></svg></button>
-          ${kidsMode() ? '' : `<button class="btn more fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn">${favs.has(site, id) ? '✓ 已收藏' : '＋ 收藏'}</button>`}
+          ${kidsMode() ? '' : `<button class="btn more ico ib fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn" title="${favs.has(site, id) ? '取消收藏' : '收藏'}" aria-label="收藏">${IC.heart}</button>`}
         </div></div></div>
       <div class="body">
         <div class="metaRow"><span id="qtag">${qChip(vodQ(d), 'big')}</span><a class="dbtag" id="dbtag" hidden target="_blank" rel="noreferrer"></a>
@@ -1591,26 +1603,26 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     const mine = (state.downloads || []).filter(j => j.site === site && j.vid === id);
     const active = mine.filter(j => ACTIVE.includes(j.status));
     const speed = fmtSpeed(active.reduce((n, j) => n + (j.speed || 0), 0));
-    let label, p = 0;
-    if (dlMode) label = '✓ 完成';
+    let ic = IC.dl, txt = '', tip = '下载', p = 0;
+    if (dlMode) { ic = IC.done; tip = '完成'; }
     else if (eps.length === 1) {
       const j = dlFor(site, id, eps[0].url);
-      if (!j) label = '⬇ 下载';
-      else if (j.status === 'done') label = '✓ 已下载';
-      else if (j.status === 'queued') label = `⏳ 排队第 ${j.qpos} 位`;
-      else if (j.status === 'downloading') { label = `⏸ ${j.pct}%${speed ? ' · ' + speed : ''}`; p = j.pct; }
-      else if (j.status === 'paused') { label = `▶ 继续 ${j.pct}%`; p = j.pct; }
-      else label = '⟳ 重新下载';
-      b.title = j ? { downloading: '点一下暂停', queued: '点一下暂停', paused: '点一下继续' }[j.status] || '' : '';
+      if (!j) { /* default */ }
+      else if (j.status === 'done') { ic = IC.done; tip = '已下载'; }
+      else if (j.status === 'queued') { ic = IC.wait; txt = `#${j.qpos}`; tip = `排队第 ${j.qpos} 位，点一下暂停`; }
+      else if (j.status === 'downloading') { ic = IC.pause; txt = `${j.pct}%`; tip = `下载中${speed ? ' · ' + speed : ''}，点一下暂停`; p = j.pct; }
+      else if (j.status === 'paused') { ic = IC.play; txt = `${j.pct}%`; tip = '已暂停，点一下继续'; p = j.pct; }
+      else { ic = IC.retry; tip = '失败，点一下重试'; }
     } else if (active.length) {
       const done = mine.filter(j => j.status === 'done').length;
-      label = `⬇ ${done}/${mine.length} 集${speed ? ' · ' + speed : ''}`;
+      txt = `${done}/${mine.length}`; tip = `下载中 ${done}/${mine.length} 集${speed ? ' · ' + speed : ''}`;
       p = Math.round(mine.reduce((n, j) => n + (j.status === 'done' ? 100 : j.pct || 0), 0) / mine.length);
     } else {
       const done = mine.filter(j => j.status === 'done').length;
-      label = done ? `⬇ 下载 · 已下 ${done} 集` : '⬇ 下载';
+      tip = done ? `下载 · 已下 ${done} 集` : '下载';
     }
-    b.textContent = label;
+    b.innerHTML = ic + (txt ? `<span>${txt}</span>` : '');
+    b.title = tip; b.setAttribute('aria-label', tip);
     b.classList.toggle('dling', p > 0);
     b.style.setProperty('--p', p + '%');
   };
@@ -1864,6 +1876,7 @@ player.addEventListener('click', e => {
     return enqueue(cur.d, cur.line, [cur.ep]).then(paintVodActs, err => toast(err.message));
   }
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); paintStar(liveFavs.has(c.url)); return; }
+  if (act === 'more') { const on = $('.pacts').classList.toggle('exp'); e.target.closest('[data-act]').setAttribute('aria-expanded', on); return; }
   if (act === 'rate') return cycleRate();
   if (act === 'fs') return toggleFs();
   if (act === 'lock') return setLock(true);
