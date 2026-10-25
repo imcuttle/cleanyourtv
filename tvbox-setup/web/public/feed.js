@@ -522,7 +522,10 @@ function renderSheet() {
   sheetEl.innerHTML = `<div class="sh-head"><b>${esc(d.name)}</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">${I.close}</button></div>
     ${d.lines.length > 1 ? `<div class="sh-lines">${d.lines.map((l, i) => `<button data-sl="${i}" class="${i === s.line ? 'on' : ''}">${esc(l.name)}</button>`).join('')}</div>` : ''}
     <div class="sh-eps">${s.eps.map((e, i) => `<button data-se="${i}" class="${i === s.ep ? 'on' : ''}">${esc(e.name)}</button>`).join('')}</div>`;
-  sheetEl.querySelector('.on[data-se]')?.scrollIntoView({ block: 'center' });
+  // 不用 scrollIntoView: 它会把整个 #feed 容器也一起滚动, 界面整体上移错位。只滚动选集列表自己。
+  const box = sheetEl.querySelector('.sh-eps'), on = sheetEl.querySelector('.on[data-se]');
+  if (box && on) box.scrollTop = on.offsetTop - box.offsetTop - (box.clientHeight - on.offsetHeight) / 2;
+  root.scrollTop = 0; root.scrollLeft = 0;
 }
 sheetEl.addEventListener('click', e => {
   const s = cur();

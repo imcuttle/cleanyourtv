@@ -662,7 +662,7 @@ nav a svg { display: none; }
 @keyframes fdIn { from { transform: translateX(30px); opacity: 0; } }
 .sh-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; } .sh-head b { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sh-lines { display: flex; gap: 6px; flex-wrap: wrap; } .sh-lines button { padding: 6px 12px; border-radius: 16px; border: 1px solid #ffffff33; background: none; font-size: 13px; } .sh-lines .on { background: #fff; color: #000; }
-.sh-eps { display: grid; grid-template-columns: repeat(auto-fill, minmax(66px, 1fr)); gap: 8px; overflow-y: auto; overscroll-behavior: contain; align-content: start; flex: 1; }
+.sh-eps { min-height: 0; grid-auto-rows: 44px; display: grid; grid-template-columns: repeat(auto-fill, minmax(66px, 1fr)); gap: 8px; overflow-y: auto; overscroll-behavior: contain; align-content: start; flex: 1; }
 .sh-eps button { padding: 11px 4px; border-radius: 6px; border: 0; background: #2c2c2c; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .sh-eps .on { background: var(--red); font-weight: 800; }
 .fd-heart { position: absolute; z-index: 6; width: 96px; height: 96px; margin: -48px 0 0 -48px; pointer-events: none; animation: fdHeart .85s ease-out forwards; }
 .fd-heart svg { width: 100%; height: 100%; fill: #ff2c55; filter: drop-shadow(0 4px 14px #0008); }

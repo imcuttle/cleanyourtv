@@ -1874,7 +1874,11 @@ function togglePlist(open = $('.plist').hidden) {
   box.hidden = !open;
   $('[data-act=list]').classList.toggle('on', open);
   player.classList.toggle('plopen', open);
-  if (open) { $('.pitems .on', box)?.scrollIntoView({ block: 'center' }); poke(); }
+  if (open) {
+    const list = $('.pitems', box), on = $('.pitems .on', box);   // 不用 scrollIntoView (会连播放器容器一起滚走)
+    if (list && on) list.scrollTop = on.offsetTop - list.offsetTop - (list.clientHeight - on.offsetHeight) / 2;
+    player.scrollTop = 0; poke();
+  }
 }
 function closePlayer() {
   if (hls) { hls.destroy(); hls = null; }
