@@ -519,6 +519,7 @@ $('#siteMenu').onclick = async e => {
     e.stopPropagation();
     const key = del.dataset.del, s = state.sites.find(x => x.key === key); if (!s) return;
     if (!confirm(`删除点播源「${s.name}」？`)) return;
+    if (!leaveSettingsOk()) return;   // the settings page is rebuilt afterwards
     try {
       const cfg = await get('/api/config');
       await req('PUT', '/api/config', { ...cfg, sites: cfg.sites.filter(x => x.key !== key) });
@@ -771,7 +772,22 @@ function restoreScroll(y) {
   for (const ev of ['wheel', 'touchstart', 'keydown', 'mousedown']) addEventListener(ev, stop, { capture: true, passive: true });
 }
 
+// ---- unsaved edits on the settings page ----
+// dirty() flags them; saving clears the flag. Leaving (another page, a re-render, reload, closing the tab) asks first.
+let settingsDirty = false, settingsHash = '', settingsSaver = null;
+const settingsOpen = () => !!$('#srcWrap');
+function leaveSettingsOk() {
+  if (!settingsDirty || !settingsOpen()) { settingsDirty = false; return true; }
+  if (confirm('设置页有未保存的修改，离开后会丢失。\n\n确定要离开吗？（取消 = 留下，去点「保存」）')) { settingsDirty = false; return true; }
+  return false;
+}
+addEventListener('beforeunload', e => { if (settingsDirty && settingsOpen()) { e.preventDefault(); e.returnValue = ''; } });
 async function route(opts = {}) {
+  if (!leaveSettingsOk()) {
+    // The address bar already moved on: put it back without a new history entry, and keep the page as it is.
+    if (settingsHash && location.hash !== settingsHash) { history.replaceState(null, '', settingsHash); try { syncNav(); } catch {} }
+    return;
+  }
   clearInterval(heroTimer); clearInterval(pageTimer); view.onclick = null;
   newPage();
   const seq = ++routeSeq;
@@ -2694,6 +2710,7 @@ function installSection() {
 
 const testCache = new Map();
 async function renderSettings() {
+  settingsDirty = false;
   const localP = get('/api/local'); // sent together with the rest, so it never queues behind speed tests
   localP.catch(() => {});
   const [cfg, info, safety] = await Promise.all([get('/api/config'), get('/api/info').catch(() => ({ urls: [] })), get('/api/safety')]);
@@ -2792,7 +2809,7 @@ async function renderSettings() {
     return s;
   }).filter(x => (x.api || x.url));
   const current = () => ({ sites: collect($('#sites'), 'site'), lives: collect($('#lives'), 'live') });
-  const dirty = () => { const d = $('#dirty'); if (d) d.textContent = '有未保存的修改'; };
+  const dirty = () => { settingsDirty = true; settingsHash = location.hash; const d = $('#dirty'); if (d) d.textContent = '有未保存的修改'; };
   const isMem = r => r.classList.contains('mem');
   const blockOf = head => {
     const b = [head];
@@ -2844,11 +2861,13 @@ async function renderSettings() {
   const persist = async (c, rerender) => {
     const j = await req('PUT', '/api/config', c);
     state.cats = []; apiMemo.clear(); await loadSites(); toast('已保存');
+    settingsDirty = false;
     if (rerender) return renderSettings();
     // The server de-duplicates by link and may rename keys: drop rows it removed, keep every other row untouched.
     const keep = new Set((j.sites || []).map(x => x.key));
     $$('#sites .srow[data-key]').forEach(r => { if (!keep.has(r.dataset.key)) r.remove(); });
     renumber(); refreshCount();
+    settingsDirty = false;
     const d = $('#dirty'); if (d) d.textContent = '';
     const raw = $('#raw'); if (raw) raw.value = JSON.stringify(j, null, 2);
   };
@@ -2998,6 +3017,7 @@ async function renderSettings() {
     if (cm) return setCardMode(cm);
     const lv = e.target.dataset.level;
     if (lv) {
+      if (!leaveSettingsOk()) return;   // the page is rebuilt with the new level
       try {
         const looser = ({ kids: 0, standard: 1, all: 2 })[lv] > ({ kids: 0, standard: 1, all: 2 })[safety.level];
         await req('POST', '/api/safety', { level: lv, pin: sessionStorage.pin || '' });
@@ -3098,20 +3118,31 @@ async function renderSettings() {
       // Only sources that carry no 少儿 / 成人 mark yet: a classification someone already made is never overwritten.
       const targets = (sel.length ? sel : rows).filter(r => !r.dataset.members && !$('.kids', r).checked && !$('.adult', r).checked && /^https?:\/\//.test($('.url', r).value.trim()));
       if (!targets.length) return toast('没有未分类的点播源（已勾少儿 / 成人的不会改）');
-      const label = btn.textContent; btn.disabled = true; btn.textContent = `分类中 ${targets.length}…`;
+      if (btn.dataset.busy) return toast('自动分类正在进行');
+      // 8 at a time: the toast shows how far it is, and each batch is applied to the rows as soon as it is back.
+      const label = btn.textContent, STEP = 8, n = { adult: 0, kids: 0, none: 0, fail: 0 };
+      btn.disabled = true; btn.dataset.busy = '1'; btn.textContent = `分类中 ${targets.length}…`;
+      const bar = toast(`自动分类 0/${targets.length}…`, true);
+      const line = done => `自动分类 ${done}/${targets.length} · 成人 ${n.adult} · 少儿 ${n.kids} · 标准 ${n.none}${n.fail ? ` · 连不上 ${n.fail}` : ''}`;
       try {
-        const j = await req('POST', '/api/classify', { apis: targets.map(r => $('.url', r).value.trim()) });
-        const n = { adult: 0, kids: 0, none: 0, fail: 0 };
-        targets.forEach((r, i) => {
-          const x = j.results[i];
-          if (!x) { n.fail++; return; }
-          $('.adult', r).checked = x.kind === 'adult'; $('.kids', r).checked = x.kind === 'kids'; n[x.kind]++;
-          const lab = $('.flag', r)?.parentElement; if (lab) lab.title = `${x.total} 个分类：成人词 ${x.adult}，少儿词 ${x.kids}`;
-        });
-        dirty();
-        toast(`成人 ${n.adult} · 少儿 ${n.kids} · 标准 ${n.none}${n.fail ? ` · ${n.fail} 个连不上（没改）` : ''}，点「保存」后生效`);
-      } catch (err) { toast('自动分类失败：' + err.message); }
-      finally { btn.disabled = false; btn.textContent = label; }
+        let done = 0;
+        for (let i = 0; i < targets.length; i += STEP) {
+          const part = targets.slice(i, i + STEP);
+          if (part.some(r => !r.isConnected)) throw new Error('页面已刷新');
+          const j = await req('POST', '/api/classify', { apis: part.map(r => $('.url', r).value.trim()) });
+          part.forEach((r, k) => {
+            const x = j.results[k];
+            if (!x) { n.fail++; return; }
+            $('.adult', r).checked = x.kind === 'adult'; $('.kids', r).checked = x.kind === 'kids'; n[x.kind]++;
+            const lab = $('.flag', r)?.parentElement; if (lab) lab.title = `${x.total} 个分类：成人词 ${x.adult}，少儿词 ${x.kids}`;
+          });
+          done += part.length; bar.textContent = line(done);
+          dirty();
+        }
+        bar.remove();
+        toast(`自动分类完成：成人 ${n.adult} · 少儿 ${n.kids} · 标准 ${n.none}${n.fail ? ` · ${n.fail} 个连不上（没改）` : ''}，点「保存」后生效`);
+      } catch (err) { bar.remove(); toast('自动分类中断：' + err.message + (n.adult + n.kids + n.none ? `（已处理的 ${n.adult + n.kids + n.none} 个保留，点「保存」后生效）` : '')); }
+      finally { btn.disabled = false; delete btn.dataset.busy; btn.textContent = label; }
       return;
     }
     if (op === 'retry') {
@@ -3179,11 +3210,14 @@ async function renderSettings() {
     }
   };
   $$('[data-dbrow]').forEach(c => c.onchange = () => { localStorage.dbRows = JSON.stringify({ ...dbRows(), [c.dataset.dbrow]: c.checked }); toast('已保存'); });
-  view.oninput = e => { if (e.target.closest('.srow:not(.lrow)')) dirty(); };
-  view.onchange = e => { if (e.target.closest('.srow:not(.lrow)')) dirty(); };
+  // picking rows (the select checkboxes) is not an edit
+  view.oninput = e => { if (e.target.closest('.srow:not(.lrow)') && !e.target.classList.contains('sel')) dirty(); };
+  view.onchange = e => { if (e.target.closest('.srow:not(.lrow)') && !e.target.classList.contains('sel')) dirty(); };
+  settingsSaver = () => persist(current());
   $('#setPin').onclick = async () => {
     const newPin = prompt(!safety.hasPin ? '设置家长 PIN（4 位以上数字）' : safety.level === 'all' ? '新 PIN（留空 = 清除 PIN）' : '新 PIN（儿童 / 标准模式下不能清除，只能改）');
     if (newPin === null) return;
+    if (!leaveSettingsOk()) return;
     if (safety.hasPin && safety.level !== 'all' && !newPin.trim()) return toast('儿童 / 标准模式下不能清除 PIN');
     try { await req('POST', '/api/safety', { pin: sessionStorage.pin || '', newPin }); delete sessionStorage.pin; toast(newPin ? 'PIN 已设置，之后放宽级别需要输入它' : 'PIN 已清除'); renderSettings(); }
     catch (err) { toast(err.message); }
@@ -3246,6 +3280,7 @@ async function renderSettings() {
   $('#saveRaw').onclick = () => { let c; try { c = JSON.parse($('#raw').value); } catch { return toast('JSON 格式不对'); } persist(c, true).catch(err => toast(err.message)); };
   $('#reset').onclick = async () => {
     if (!confirm('恢复成内置的默认源？')) return;
+    settingsDirty = false;
     try { await req('POST', '/api/config/reset', {}); await loadSites(); toast('已恢复默认'); renderSettings(); } catch (err) { toast(err.message); }
   };
   $('#exportAll').onclick = () => exportSources($$('#sites .srow'), $$('#lives .srow'));
@@ -3256,6 +3291,7 @@ async function renderSettings() {
   };
   $('#imp').onclick = async () => {
     const url = $('#impUrl').value.trim(); if (!url) return;
+    if (!leaveSettingsOk()) return;   // the page is rebuilt with the imported sources
     $('#imp').disabled = true; $('#imp').textContent = '导入中…';
     try {
       const j = await req('POST', '/api/config/import', { url, replace: $('#impReplace').checked });
@@ -3385,7 +3421,7 @@ async function recognizeFlow(text, quiet) {
   };
   m.firstChild.innerHTML = `<div class="body"><h3>剪贴板里识别到 ${all.length} 个源</h3>
     <p class="hint">已存在的自动去重；不通、没内容的默认不勾（0 内容的不能选）。可以 Shift 点选连续范围、按住鼠标拖出方框圈选，名称可以直接改，也可以批量设分类。</p>
-    <div class="actions bulk cbulk"><label class="flag"><input type="checkbox" data-cbulk="all">全选</label>
+    <div class="actions cbulk"><label class="flag"><input type="checkbox" data-cbulk="all">全选</label>
       <button class="small" data-cbulk="invert">反选</button><button class="small" data-cbulk="good">只选能用的</button>
       <span class="bwrap"><button class="small" data-cbulk="cat">设分类 ▾</button><div class="bmenu" hidden>
         <button data-cbulk="setkids">设为 少儿</button><button data-cbulk="setadult">设为 成人</button><button data-cbulk="setstd">设为 标准（去掉标记）</button></div></span>
@@ -3438,6 +3474,11 @@ async function recognizeFlow(text, quiet) {
     if (saving) return;
     const pick = boxes().filter(c => c.checked).map(c => { const x = all[+c.dataset.i]; return { ...x, name: $(`.cname[data-i="${c.dataset.i}"]`, m).value.trim() || x.name }; });
     if (!pick.length) return;
+    if (settingsDirty && settingsOpen() && settingsSaver) {
+      // adding refreshes the settings page: the pending edits have to be saved first, or they would be lost (or overwrite what is added)
+      if (!confirm('设置页有未保存的修改。\n\n先保存这些修改，再添加选中的源？（取消 = 不添加）')) return;
+      try { await settingsSaver(); } catch (e) { return toast('保存设置页的修改失败：' + e.message); }
+    }
     lock(true);
     try {
       const j = await req('POST', '/api/config/add', { sites: pick.filter(x => x.kind === 'site'), lives: pick.filter(x => x.kind === 'live') });
