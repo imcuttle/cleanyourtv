@@ -380,15 +380,15 @@ function observeJav(root = document) { $$('.card[data-jav]', root).forEach(el =>
 
 // ---------- boot / source picker ----------
 // Source menu: opening it pings the rows in view (4 at a time, one retry); scrolling pings the rest.
-// Results are cached in localStorage and stay valid until 「重测」 — only a failed result is looked at again after 10 min.
+// Only passing results are cached (localStorage, valid until 「重测」). A failure is shown but never kept: it is tested again every time the menu opens.
 const siteHealth = new Map(Object.entries((() => { try { return JSON.parse(localStorage.siteHealth || '{}'); } catch { return {}; } })())); // api -> { ok, ms, total, at }
 const healthBusy = new Set();
-const FAIL_TTL = 10 * 60e3;
+let healthEpoch = 0; // set whenever the menu opens: a failure older than that is not trusted
 let menuIO = null, healthQ = [], healthRun = 0, healthSave = 0;
 const saveHealth = () => { clearTimeout(healthSave); healthSave = setTimeout(() => {
   const live = new Set(state.sites.map(x => x.api)); // forget sources that no longer exist
-  localStorage.siteHealth = JSON.stringify(Object.fromEntries([...siteHealth].filter(([k]) => live.has(k)))); }, 400); };
-const healthFresh = t => t && (t.ok || Date.now() - t.at < FAIL_TTL);
+  localStorage.siteHealth = JSON.stringify(Object.fromEntries([...siteHealth].filter(([k, v]) => v.ok && live.has(k)))); }, 400); };
+const healthFresh = t => t && (t.ok || t.at >= healthEpoch);
 const healthCell = (s, busy) => busy ? '<b class="hs">测速中…</b>' : s.group ? `<b class="hs">聚合 ${s.group}</b>` : !s.api || s.local ? ''
   : !siteHealth.get(s.api) ? '<b class="hs">…</b>' : siteHealth.get(s.api).ok ? `<b class="hs ok">${siteHealth.get(s.api).ms}ms</b>` : '<b class="hs bad">不通</b>';
 let menuQ = '';
@@ -461,7 +461,7 @@ function pingMenu(force) {
 }
 const testableSites = () => state.sites.filter(s => s.api && !s.local && !s.inGroup);
 // Without opening the menu: every source that has no good result yet gets pinged in the background (4 at a time);
-// passing results are reused from the cache, failures are looked at again after 10 min.
+// passing results are reused from the cache, failures are never cached.
 let autoPingT = 0;
 function autoPing() {
   clearTimeout(autoPingT);
@@ -491,7 +491,7 @@ async function loadSites() {
   renderMenu();
   autoPing();
 }
-$('#siteBtn').onclick = e => { e.stopPropagation(); closeScope(); $('#siteMenu').hidden = !$('#siteMenu').hidden; $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) { requestAnimationFrame(() => pingMenu()); if (matchMedia('(hover:hover)').matches) $('#menuQ')?.focus(); $('#siteMenu button.on')?.scrollIntoView({ block: 'nearest' }); } };
+$('#siteBtn').onclick = e => { e.stopPropagation(); closeScope(); $('#siteMenu').hidden = !$('#siteMenu').hidden; if (!$('#siteMenu').hidden) healthEpoch = Date.now(); $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) { requestAnimationFrame(() => pingMenu()); if (matchMedia('(hover:hover)').matches) $('#menuQ')?.focus(); $('#siteMenu button.on')?.scrollIntoView({ block: 'nearest' }); } };
 $('#siteMenu').oninput = e => { if (e.target.id === 'menuQ') { menuQ = e.target.value.trim(); filterMenu(); } };
 $('#siteMenu').onkeydown = e => {
   if (e.target.id !== 'menuQ') return;
@@ -2316,6 +2316,7 @@ async function lmSave(mutate) {
   if (i < 0 && location.hash.startsWith('#/live')) loadLiveBody();
 }
 const LIVE_TTL = 5 * 60e3;
+let lmEpoch = 0; // set whenever the live menu opens: only passing results are cached, a failure is retried then
 let lmIO = null, lmQ = [], lmRun = 0;
 async function lmPingOne(k) {
   const url = liveUrlOf(k), name = state.lives.find(l => l.key === k)?.name || '';
@@ -2331,7 +2332,7 @@ async function lmPingOne(k) {
 // before its turn leaves the queue, so what the user is looking at is always what gets tested next.
 function lmQueue(k) {
   const url = liveUrlOf(k), h = liveHealth.get(url);
-  if (!url || h === 'busy' || (h && Date.now() - h.at < LIVE_TTL)) return;
+  if (!url || h === 'busy' || (h && (h.ok ? Date.now() - h.at < LIVE_TTL : h.at >= lmEpoch))) return;
   lmQ = [k, ...lmQ.filter(x => x !== k)];
   lmMark(k); lmDrain();
 }
@@ -2388,7 +2389,7 @@ async function renderLive() {
       <div id="liveBody"></div></div>`;
     $('#liveBtn').onclick = async e => {
       e.stopPropagation();
-      const m = $('#liveMenu'); m.hidden = !m.hidden; $('#liveBtn').classList.toggle('open', !m.hidden);
+      const m = $('#liveMenu'); m.hidden = !m.hidden; if (!m.hidden) lmEpoch = Date.now(); $('#liveBtn').classList.toggle('open', !m.hidden);
       if (!m.hidden) { lmRender(); await lmRefresh().catch(() => {}); lmRender(); $('.lpr.on', m)?.scrollIntoView({ block: 'nearest' }); }
     };
     $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lmRender(); };
@@ -2456,15 +2457,14 @@ async function renderLiveBody(src) {
 // the side with room — from the left edge when the cover sits in the left third of the window, from the right edge in the
 // right third, from the middle otherwise. The layer ignores the pointer, so the card underneath still gets hover and
 // click; leaving the cover (or scrolling) folds it back. Server: disk LRU + hot LRU; browser: HTTP cache for a week; here only
-// "played before" / "just failed" are remembered, and one preview exists at a time.
-const lpvSeen = new Set(), lpvFail = new Map();
+// "played before" is remembered (a failed preview is not), and one preview exists at a time.
+const lpvSeen = new Set();
 // Two animations on purpose: the shape grows with a soft start and a long settle, the fade-in is short and independent of it.
 const LPV_GROW = { duration: 440, easing: 'cubic-bezier(.32,.72,0,1)', fill: 'forwards' };
 const LPV_FADE = { duration: 180, easing: 'ease-out', fill: 'forwards' };
 let lpv = null;
 function startLocalPreview(el, url, box = el) {
   if (!url || !matchMedia('(hover: hover) and (pointer: fine)').matches) return;
-  if (Date.now() - (lpvFail.get(url) || 0) < 90e3) return;
   if (lpv && lpv.el === el) return;
   stopLocalPreview();
   const me = lpv = { el, box, ov: null, img: null, timer: 0, off: null };
@@ -2478,7 +2478,6 @@ function startLocalPreview(el, url, box = el) {
     me.img = img;
     img.onerror = () => {
       if (lpv === me) { box.classList.remove('pvload'); lpv = null; }
-      lpvFail.set(url, Date.now()); if (lpvFail.size > 300) lpvFail.delete(lpvFail.keys().next().value);
     };
     img.onload = async () => {
       await img.decode().catch(() => {});                 // first frame ready before anything moves
@@ -2606,6 +2605,64 @@ function stopPreview() {
   pv = null;
 }
 
+// ---------- shared multi-select: shift+click range, mouse rectangle ("圈选") ----------
+// zone: element that receives the pointer; box: where the checkbox clicks happen; rows(): selectable rows in order;
+// box_(row): the row's checkbox; changed(): called after every selection change; skip: targets that never start a rectangle.
+function multiPick({ zone, box, rows, box_, changed, skip, start = () => true }) {
+  let anchor = null;
+  box.addEventListener('click', e => {
+    const c = e.target.closest('input[type=checkbox]'); if (!c) return;
+    const list = rows(), row = list.find(r => r.contains(c)); if (!row || box_(row) !== c) return;
+    if (e.shiftKey && anchor && list.includes(anchor)) {
+      const a = list.indexOf(anchor), b = list.indexOf(row);
+      list.slice(Math.min(a, b), Math.max(a, b) + 1).forEach(r => { if (!box_(r).disabled) box_(r).checked = c.checked; });
+      changed();
+    }
+    anchor = row;
+  });
+  zone.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'mouse' || e.button !== 0 || e.target.closest(skip) || !start(e)) return;
+    const add = e.shiftKey || e.ctrlKey || e.metaKey, x0 = e.clientX, y0 = e.clientY;
+    const base = new Map(rows().map(r => [r, box_(r).checked]));
+    let band = null;
+    const move = ev => {
+      if (!band) {
+        if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return;
+        band = document.createElement('div'); band.className = 'marquee'; document.body.append(band);
+        document.body.classList.add('marqueeing'); getSelection()?.removeAllRanges();
+      }
+      const l = Math.min(x0, ev.clientX), t = Math.min(y0, ev.clientY), w = Math.abs(ev.clientX - x0), h = Math.abs(ev.clientY - y0);
+      band.style.cssText = `left:${l}px;top:${t}px;width:${w}px;height:${h}px`;
+      for (const r of rows()) {
+        const c = box_(r); if (c.disabled) continue;
+        const b = r.getBoundingClientRect();
+        c.checked = (b.left < l + w && b.right > l && b.top < t + h && b.bottom > t) ? true : add ? base.get(r) : false;
+      }
+      changed();
+      if (ev.clientY < 60) scrollBy(0, -14); else if (ev.clientY > innerHeight - 60) scrollBy(0, 14);
+    };
+    const up = () => {
+      removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up);
+      band?.remove(); document.body.classList.remove('marqueeing');
+      if (band) addEventListener('click', ev => { ev.preventDefault(); ev.stopPropagation(); }, { capture: true, once: true });
+    };
+    addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up);
+  });
+}
+// Small dropdown for the bulk bars ("分类" / "更多"): fixed-position so the bars' own scrolling never clips it.
+function toggleBulkMenu(btn) {
+  const menu = btn.nextElementSibling, open = menu.hidden;
+  closeBulkMenus();
+  if (!open) return;
+  const r = btn.getBoundingClientRect();
+  menu.hidden = false;
+  menu.style.top = r.bottom + 4 + 'px';
+  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8)) + 'px';
+}
+function closeBulkMenus() { $$('.bmenu').forEach(m => { m.hidden = true; }); }
+document.addEventListener('click', e => { if (!e.target.closest('.bmenu, [data-bulk=more], [data-bulk=cat], [data-cbulk=more], [data-cbulk=cat]')) closeBulkMenus(); });
+addEventListener('scroll', closeBulkMenus, { passive: true });
+
 // ---------- settings ----------
 let installEvt = null;
 addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; });
@@ -2640,7 +2697,7 @@ async function renderSettings() {
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="${esc(kind === 'site' ? x.api : x.url)}" placeholder="${kind === 'site' ? 'https://example.com/api.php/provide/vod' : 'https://…/live.m3u / .m3u8 / .txt'}">
-      <span class="ops">${kind === 'site' ? `${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
+      <span class="ops">${kind === 'site' ? `${String(x.api).startsWith('local:') ? '<span class="tagl">本地片单</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit" title="把片单存成服务端本地文本再编辑">编辑文本</button><button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
         <button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`;
   const rowsHtml = (list, kind) => list.map((x, i) => rowHtml(x, kind, i)).join('');
   // 点播源 list: a 聚合源 row carries its members right under it (collapsed); they are not listed on their own any more.
@@ -2669,8 +2726,14 @@ async function renderSettings() {
   };
   const bulk = kind => `<div class="actions bulk" data-kind="${kind}"><label class="flag"><input type="checkbox" data-bulk="all">全选</label>
       <button class="small" data-bulk="invert">反选</button><button class="small" data-bulk="delsel">删除选中</button>
-      <button class="small" data-bulk="delbad">删除不通的</button>${kind === 'site' ? '<button class="small" data-bulk="delempty" title="删除能连上、但一部片都没有的点播源">删除 0 部的</button>' : ''}<button class="small" data-bulk="retry">重测不通的</button>${kind === 'site' ? '<button class="small" data-bulk="classify" title="按分类名自动判断：80% 以上分类是色情词 → 成人，80% 以上是少儿词 → 少儿，否则标准（不勾选）。只处理还没勾少儿 / 成人的源；勾选了源就只看选中的，否则看全部">自动分类</button>' : ''}<button class="small" data-bulk="export">导出选中</button>
-      <button class="small" data-bulk="merge" title="${kind === 'live' ? '把选中的直播源合成一个频道列表（同分组归并、相同地址去重）' : '把选中的点播源聚合成一个入口：搜索/浏览/播放线路同时覆盖所有成员，同名影片合并'}">${kind === 'live' ? '合并选中' : '聚合选中'}</button><span class="lan" data-bulk="count"></span></div>`;
+      <span class="bwrap"><button class="small" data-bulk="cat">设分类 ▾</button><div class="bmenu" hidden>
+        <button data-bulk="setkids">设为 少儿</button><button data-bulk="setadult">设为 成人</button><button data-bulk="setstd">设为 标准（去掉标记）</button></div></span>
+      <span class="bwrap"><button class="small" data-bulk="more">更多 ▾</button><div class="bmenu" hidden>
+        <button data-bulk="merge" title="${kind === 'live' ? '把选中的直播源合成一个频道列表（同分组归并、相同地址去重）' : '把选中的点播源聚合成一个入口：搜索/浏览/播放线路同时覆盖所有成员，同名影片合并'}">${kind === 'live' ? '合并选中' : '聚合选中'}</button>
+        <button data-bulk="export">导出选中</button>
+        <button data-bulk="retry">重测不通的</button>
+        <button data-bulk="delbad">删除不通的</button>${kind === 'site' ? '<button data-bulk="delempty" title="删除能连上、但一部片都没有的点播源">删除 0 部的</button><button data-bulk="classify" title="按分类名自动判断：80% 以上分类是色情词 → 成人，80% 以上是少儿词 → 少儿，否则标准（不勾选）。只处理还没勾少儿 / 成人的源；勾选了源就只看选中的，否则看全部">自动分类</button>' : ''}</div></span>
+      <span class="lan" data-bulk="count"></span></div>`;
   view.innerHTML = `<div class="page set"><h1>设置</h1>
     <p class="lan">修改保存在服务端，局域网里所有浏览器共享。${info.urls.length ? '其他设备打开：' + info.urls.map(u => `<code>${esc(u)}</code>`).join(' ') : ''}</p>
     <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。</p>
@@ -2813,7 +2876,7 @@ async function renderSettings() {
     st.className = cls; st.textContent = res.text; st.title = res.title;
     r.dataset.ok = res.ok ? '1' : '0';
     if (res.total !== undefined) r.dataset.total = res.total; else delete r.dataset.total;
-    testCache.set(url, { cls, text: res.text, title: res.title, total: res.total });
+    if (res.ok) testCache.set(url, { cls, text: res.text, title: res.title, total: res.total }); else testCache.delete(url);
   };
   // One pool for sites and lives together: at most 4 requests in flight, so page loads and /api/local are never starved
   // (browsers allow only 6 connections per host). Entries from an older generation drain instantly (test() bails out).
@@ -2830,7 +2893,43 @@ async function renderSettings() {
     if (st && $('.url', r).value.trim() && !r.dataset.members) { st.className = 'status'; st.textContent = '排队中'; st.title = ''; }
     testQ.push({ r, gen: testGen, done }); pump();
   })));
+  // 点播源: the title list becomes a text file on the server (a web source starts from a snapshot of its first pages).
+  const editVodText = async r => {
+    const url = $('.url', r).value.trim(), name = $('.nm', r).value.trim() || url;
+    if (!url) return toast('先填接口地址');
+    const m = document.createElement('div');
+    m.className = 'modal'; m.id = 'textModal';
+    m.innerHTML = `<div class="sheet editor"><div class="body"><h3>编辑「${esc(name)}」<span class="lan" id="chCount"></span></h3>
+      <p class="hint">每行一部：<code>片名,播放地址</code>（m3u8 / mp4）；多集写成 <code>片名,第1集$地址#第2集$地址</code>，或同名再写一行追加一集；分类用 <code>分类名,#genre#</code>。${url.startsWith('local:') ? '' : '网页源这里是它前 3 页的快照，保存后改读服务端本地文件，不再请求原接口。'}</p>
+      <textarea id="liveText" spellcheck="false">${url.startsWith('local:') ? '加载中…' : '正在从源上拉取前 3 页片单，最多十几秒…'}</textarea>
+      <div class="actions"><button class="btn red" id="ltSave" disabled>保存</button><button class="small" id="ltCancel">取消</button></div></div></div>`;
+    document.body.append(m); document.body.style.overflow = 'hidden';
+    const close = () => { m.remove(); document.body.style.overflow = ''; };
+    m.onclick = e => { if (e.target === m) close(); };
+    $('#ltCancel').onclick = close;
+    const j = await api('vod/raw', { api: url }, AbortSignal.timeout(40e3)).catch(e => ({ text: '', error: e.message }));
+    if (!m.isConnected) return;
+    const ta = $('#liveText');
+    if (j.error) toast(j.error + '，可以直接手写片单');
+    ta.value = j.text || '我的分类,#genre#\n片名,https://example.com/movie.m3u8\n剧名,第1集$https://example.com/1.m3u8#第2集$https://example.com/2.m3u8\n';
+    const count = () => { $('#chCount').textContent = `${ta.value.split(/\r?\n/).filter(l => /^[^,#\/][^,]*,\s*https?:\/\//.test(l.trim())).length} 行片`; };
+    ta.oninput = count; count();
+    $('#ltSave').disabled = false;
+    $('#ltSave').onclick = async () => {
+      const b = $('#ltSave'); b.disabled = true; b.textContent = '保存中…';
+      try {
+        const out = await req('PUT', '/api/vod/raw', { api: url, text: ta.value });
+        if (!url.startsWith('local:')) r.dataset.from = url;
+        $('.url', r).value = out.api;
+        close();
+        await persist(current());
+        toast(`已存成本地片单：${out.titles} 部 / ${out.cats} 个分类${out.bad ? `（有 ${out.bad} 行格式不对被跳过）` : ''}`);
+        renderSettings();
+      } catch (err) { toast(err.message); b.disabled = false; b.textContent = '保存'; }
+    };
+  };
   const editText = async r => {
+    if (r.parentElement.id === 'sites') return editVodText(r);
     let url = $('.url', r).value.trim();
     const name = $('.nm', r).value.trim() || url;
     // On this machine the list opens in VS Code (a real editor); other devices get the in-page text box below.
@@ -2936,6 +3035,14 @@ async function renderSettings() {
   const bulkOp = async (btn, op) => {
     const bar = btn.closest('.bulk'), kind = bar.dataset.kind, box = $(kind === 'site' ? '#sites' : '#lives'), rows = $$('.srow', box);
     const sel = rows.filter(r => $('.sel', r).checked);
+    if (op === 'more' || op === 'cat') return toggleBulkMenu(btn);
+    closeBulkMenus();
+    if (op === 'setkids' || op === 'setadult' || op === 'setstd') {
+      if (!sel.length) return toast('先勾选要设置的源');
+      for (const r of sel) { $('.kids', r).checked = op === 'setkids'; $('.adult', r).checked = op === 'setadult'; }
+      dirty();
+      return toast(`已把 ${sel.length} 个设为${({ setkids: '少儿', setadult: '成人', setstd: '标准' })[op]}，点「保存」后生效`);
+    }
     if (op === 'all') { rows.forEach(r => { $('.sel', r).checked = btn.checked; }); return refreshCount(); }
     if (op === 'invert') { rows.forEach(r => { $('.sel', r).checked = !$('.sel', r).checked; }); return refreshCount(); }
     if (op === 'delsel') {
@@ -3088,6 +3195,11 @@ async function renderSettings() {
     });
   };
   bindDrag($('#sites')); bindDrag($('#lives'));
+  // Multi-select in the lists: shift+click a checkbox for a range, drag a rectangle over rows on a PC.
+  for (const box of [$('#sites'), $('#lives')]) multiPick({
+    zone: box.parentElement, box, skip: 'input, button, textarea, select, a, label, summary, .drag',
+    rows: () => $$('.srow', box).filter(r => !r.hidden), box_: r => $('.sel', r), changed: refreshCount,
+    start: e => !!e.target.closest('.srow, #' + box.id) });
   renumber(); refreshCount();
   $('#save').onclick = () => persist(current()).catch(err => toast(err.message));
   $('#saveRaw').onclick = () => { let c; try { c = JSON.parse($('#raw').value); } catch { return toast('JSON 格式不对'); } persist(c, true).catch(err => toast(err.message)); };
@@ -3210,7 +3322,7 @@ async function recognizeFlow(text, quiet) {
   localStorage.clipSeen = clipKey(text);
   const m = document.createElement('div');
   m.className = 'modal'; m.id = 'clipModal';
-  m.innerHTML = `<div class="sheet editor"><div class="body"><h3>识别剪贴板</h3><div class="spinner"></div><p class="lan" style="text-align:center">逐个打开链接确认类型…</p></div></div>`;
+  m.innerHTML = `<div class="sheet editor"><div class="body"><h3>识别剪贴板</h3><div class="spinner"></div><p class="lan" id="clipStage" style="text-align:center">正在逐个打开链接确认类型，并检测点播源是否有内容、归哪一类…<br>源多的话要等十几秒，检测完才能添加，添加本身是即时的。</p></div></div>`;
   document.body.append(m); document.body.style.overflow = 'hidden';
   const close = () => { m.remove(); if (!$('#modal')) document.body.style.overflow = ''; };
   m.onclick = e => { if (e.target === m) close(); };
@@ -3220,31 +3332,78 @@ async function recognizeFlow(text, quiet) {
   const fresh = all.filter(x => !x.exists);
   if (!all.length) { close(); return toast(r.unknown.length ? `剪贴板里 ${r.unknown.length} 个链接都不是点播/直播源` : '剪贴板里没识别到点播/直播源'); }
   if (!fresh.length) { close(); return toast(`识别到 ${all.length} 个源，都已存在`); }
-  const rowHtml = (x, i) => `<label class="crow ${x.exists ? 'dim' : ''}">
-      <input type="checkbox" data-i="${i}" ${x.exists ? 'disabled' : x.ok === false ? '' : 'checked'}>
+  const tagOf = x => x.adult ? '<i class="ctag adult">成人</i>' : x.kids ? '<i class="ctag">少儿</i>' : '';
+  const rowHtml = (x, i) => `<label class="crow ${x.exists || x.empty ? 'dim' : ''}" data-i="${i}">
+      <input type="checkbox" class="csel" data-i="${i}" ${x.exists || x.empty ? 'disabled' : x.ok === false ? '' : 'checked'}>
       <input class="cname" data-i="${i}" value="${esc(x.name)}" ${x.exists ? 'disabled' : ''}>
       <span class="curl">${esc(x.kind === 'site' ? x.api : x.url || '粘贴的频道列表（存成本地文本）')}</span>
-      <span class="cstat ${x.exists ? '' : x.ok === true ? 'ok' : x.ok === false ? 'bad' : ''}">${x.exists ? '已存在' : esc(x.info || (x.ok === false ? '不通' : '未验证'))}</span></label>`;
+      <span class="cstat ${x.exists ? '' : x.ok === true ? 'ok' : x.ok === false ? 'bad' : ''}">${x.exists ? '已存在' : esc(x.info || (x.ok === false ? '不通' : '未验证'))}<span class="ctags">${x.exists ? '' : tagOf(x)}</span></span></label>`;
   const section = (title, kind) => {
     const items = all.map((x, i) => [x, i]).filter(([x]) => x.kind === kind);
     return items.length ? `<h4>${title} · 新 ${items.filter(([x]) => !x.exists).length} / 共 ${items.length}</h4>${items.map(([x, i]) => rowHtml(x, i)).join('')}` : '';
   };
   m.firstChild.innerHTML = `<div class="body"><h3>剪贴板里识别到 ${all.length} 个源</h3>
-    <p class="hint">已存在的自动去重，不会再加。不通的默认不勾。名称可以直接改。</p>
-    ${section('点播源', 'site')}${section('直播源', 'live')}
+    <p class="hint">已存在的自动去重；不通、没内容的默认不勾（0 内容的不能选）。可以 Shift 点选连续范围、按住鼠标拖出方框圈选，名称可以直接改，也可以批量设分类。</p>
+    <div class="actions bulk cbulk"><label class="flag"><input type="checkbox" data-cbulk="all">全选</label>
+      <button class="small" data-cbulk="invert">反选</button><button class="small" data-cbulk="good">只选能用的</button>
+      <span class="bwrap"><button class="small" data-cbulk="cat">设分类 ▾</button><div class="bmenu" hidden>
+        <button data-cbulk="setkids">设为 少儿</button><button data-cbulk="setadult">设为 成人</button><button data-cbulk="setstd">设为 标准（去掉标记）</button></div></span>
+      <span class="lan" data-cbulk="count"></span></div>
+    <div id="clipRows">${section('点播源', 'site')}${section('直播源', 'live')}</div>
     ${r.unknown.length ? `<details class="lan"><summary>${r.unknown.length} 个链接没认出来</summary>${r.unknown.map(u => `<div class="curl">${esc(u)}</div>`).join('')}</details>` : ''}
-    <div class="actions"><button class="btn red" id="clipAdd"></button><button class="small" id="clipCancel">取消</button></div></div>`;
-  const count = () => { const n = $$('input[type=checkbox]:checked', m).length; $('#clipAdd').textContent = n ? `添加选中的 ${n} 个` : '没有选中'; $('#clipAdd').disabled = !n; };
-  m.onchange = count; count();
-  $('#clipCancel').onclick = close;
+    <div class="actions"><button class="btn red" id="clipAdd"></button><button class="small" id="clipCancel">取消</button><span class="lan" id="clipMsg"></span></div></div>`;
+  let saving = false;
+  const boxes = () => $$('.crow:not(.dim) .csel', m);
+  const count = () => {
+    const n = boxes().filter(c => c.checked).length, tot = boxes().length;
+    $('#clipAdd').textContent = saving ? '保存中…' : n ? `添加选中的 ${n} 个` : '没有选中';
+    $('#clipAdd').disabled = saving || !n;
+    $('[data-cbulk=count]', m).textContent = `已选 ${n} / ${tot}`;
+    $('[data-cbulk=all]', m).checked = n > 0 && n === tot;
+  };
+  const lock = on => {   // while saving nothing in the sheet can be changed, cancelled or submitted twice
+    saving = on;
+    $$('input, button', m).forEach(x => { if (on) { x.dataset.was = x.disabled ? '1' : ''; x.disabled = true; } else if (x.dataset.was !== undefined) { x.disabled = x.dataset.was === '1'; delete x.dataset.was; } });
+    $('#clipMsg').textContent = on ? '正在写入，请稍等…' : '';
+    count();
+  };
+  count();
+  multiPick({ zone: m, box: $('#clipRows', m), skip: 'input, button, textarea, select, a, summary, .bmenu',
+    rows: () => $$('.crow:not(.dim)', m), box_: r => $('.csel', r), changed: count, start: e => !!e.target.closest('#clipRows') });
+  m.onchange = e => { if (!saving && e.target.classList.contains('csel')) count(); };
+  m.onclick = e => {
+    if (e.target === m && !saving) return close();
+    const op = e.target.dataset.cbulk; if (!op || saving) return;
+    if (op === 'cat') return toggleBulkMenu(e.target);
+    closeBulkMenus();
+    const rows = boxes();
+    if (op === 'all') rows.forEach(c => { c.checked = e.target.checked; });
+    else if (op === 'invert') rows.forEach(c => { c.checked = !c.checked; });
+    else if (op === 'good') rows.forEach(c => { c.checked = all[+c.dataset.i].ok !== false; });
+    else if (op === 'setkids' || op === 'setadult' || op === 'setstd') {
+      const picked = rows.filter(c => c.checked);
+      if (!picked.length) return toast('先勾选要设置的源');
+      for (const c of picked) {
+        const x = all[+c.dataset.i];
+        x.kids = op === 'setkids' ? 1 : 0; x.adult = op === 'setadult' ? 1 : 0;
+        $('.ctags', c.closest('.crow')).innerHTML = tagOf(x);
+      }
+      toast(`已把 ${picked.length} 个设为${({ setkids: '少儿', setadult: '成人', setstd: '标准' })[op]}`);
+    }
+    count();
+  };
+  $('#clipCancel').onclick = () => { if (!saving) close(); };
   $('#clipAdd').onclick = async () => {
-    const pick = $$('input[type=checkbox]:checked', m).map(c => { const x = all[+c.dataset.i]; return { ...x, name: $(`.cname[data-i="${c.dataset.i}"]`, m).value.trim() || x.name }; });
+    if (saving) return;
+    const pick = boxes().filter(c => c.checked).map(c => { const x = all[+c.dataset.i]; return { ...x, name: $(`.cname[data-i="${c.dataset.i}"]`, m).value.trim() || x.name }; });
+    if (!pick.length) return;
+    lock(true);
     try {
       const j = await req('POST', '/api/config/add', { sites: pick.filter(x => x.kind === 'site'), lives: pick.filter(x => x.kind === 'live') });
-      close(); await loadSites();
-      toast(`已添加 ${j.added.sites} 个点播源（自动分类：成人 ${j.added.adult || 0}、少儿 ${j.added.kids || 0}）、${j.added.lives} 个直播源${j.added.skippedEmpty ? `（跳过 ${j.added.skippedEmpty} 个 0 部内容的）` : ''}`);
+      saving = false; close(); await loadSites();
+      toast(`已添加 ${j.added.sites} 个点播源（成人 ${j.added.adult || 0}、少儿 ${j.added.kids || 0}）、${j.added.lives} 个直播源${j.added.skippedEmpty ? `（跳过 ${j.added.skippedEmpty} 个 0 部内容的）` : ''}`);
       if (location.hash.startsWith('#/settings')) renderSettings();
-    } catch (e) { toast(e.message); }
+    } catch (e) { lock(false); toast(e.message); }
   };
 }
 

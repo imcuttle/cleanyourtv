@@ -1225,3 +1225,15 @@ nav .mine { display: none; }
 .ctxm .chead { color: var(--muted); font-size: 12px; padding: 4px 10px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ctxm.csheet button { min-height: 52px; font-size: 16px; }
 body.card-sheet header { z-index: 20; }   /* 底部 tab 栏在 header 里: 让遮罩和浮窗盖在它上面 */
+
+.marquee { position: fixed; z-index: 60; pointer-events: none; border: 1px solid var(--red, #e50914); background: #e5091422; border-radius: 2px; }
+body.marqueeing, body.marqueeing * { user-select: none !important; -webkit-user-select: none !important; cursor: crosshair !important; }
+.bwrap { display: inline-block; }
+.bmenu { position: fixed; z-index: 70; min-width: 150px; display: flex; flex-direction: column; background: #1f1f1f; border: 1px solid #3a3a3a; border-radius: 6px; padding: 4px; box-shadow: 0 8px 24px #000a; }
+.bmenu[hidden] { display: none; }
+.bmenu button { background: none; border: 0; color: #ddd; text-align: left; padding: 8px 10px; border-radius: 4px; font-size: 13px; white-space: nowrap; }
+.bmenu button:hover { background: #333; color: #fff; }
+.ctag { font-style: normal; font-size: 11px; padding: 1px 5px; border-radius: 3px; margin-left: 6px; background: #54b9c533; color: #54b9c5; }
+.ctag.adult { background: #e5091433; color: #ff6b6b; }
+.cbulk { position: static !important; top: auto; background: none; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; padding: 6px 0; }
+.crow { user-select: none; -webkit-user-select: none; } .crow .cname { user-select: text; -webkit-user-select: text; }

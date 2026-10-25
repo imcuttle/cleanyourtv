@@ -203,6 +203,7 @@ function defaults() {
   return normalize(JSON.parse(fs.readFileSync(path.join(CONFIG, 'vod-apps.json'), 'utf8')));
 }
 
+const LOCAL_VOD = /^local:[\w.-]+\.txt$/; // a 点播源 edited as text on this server (data/vods)
 // Keep what a browser can use: 苹果CMS JSON sites (type 1). Extra fields understood here:
 //   kids: 1        shown in 儿童 mode
 //   adult: 1       hidden unless 安全级别 = 全部
@@ -213,7 +214,7 @@ function normalize(cfg) {
   for (const s of cfg.sites || []) {
     if (!s) continue;
     if (Array.isArray(s.members)) { out.push({ group: s }); continue; }
-    if (!/^https?:\/\//.test(str(s.api).trim()) || (s.type !== undefined && Number(s.type) !== 1)) continue;
+    if (!(/^https?:\/\//.test(str(s.api).trim()) || LOCAL_VOD.test(str(s.api).trim())) || (s.type !== undefined && Number(s.type) !== 1)) continue;
     const api = str(s.api).trim();
     const categories = Array.isArray(s.categories) ? s.categories.map(String).filter(Boolean) : [];
     // Same link (ignoring ac/pg/t/wd params, fragment, trailing slash) is the same source: keep the first.
@@ -303,6 +304,8 @@ const pinOk = req => !safety.pin || req.headers['x-pin'] === safety.pin;
 // ======================= live: text, check, covers =======================
 const LIVES = path.join(DATA, 'lives');
 const THUMBS = path.join(DATA, 'thumbs');
+const VODS = path.join(DATA, 'vods');
+fs.mkdirSync(VODS, { recursive: true });
 fs.mkdirSync(LIVES, { recursive: true });
 fs.mkdirSync(THUMBS, { recursive: true });
 
@@ -403,8 +406,77 @@ async function cachedText(url) {
     return body;
   });
 }
+// ---- 本地片单: a 点播源 that is a text file on this server, served in 苹果CMS shape ----
+//   分类名,#genre#                      starts a category (titles before any category go to 「未分类」)
+//   片名,https://…/a.m3u8               one title; the same title again adds another episode
+//   片名,第1集$https://…#第2集$https://…  episodes written out; // starts a comment
+function parseVodText(text) {
+  const cats = new Map(), titles = new Map(), bad = [];
+  let cat = '未分类';
+  str(text).replace(/^\uFEFF/, '').split(/\r?\n/).forEach((raw, n) => {
+    const line = raw.trim();
+    if (!line || line.startsWith('//') || line.startsWith('#')) return;
+    const i = line.indexOf(',');
+    const name = i > 0 ? line.slice(0, i).trim() : '', rest = i > 0 ? line.slice(i + 1).trim() : '';
+    if (rest === '#genre#') { cat = name || '未分类'; return; }
+    const eps = rest.split('#').map(p => {
+      const j = p.indexOf('$'), url = (j < 0 ? p : p.slice(j + 1)).trim();
+      return { name: j < 0 ? '' : p.slice(0, j).trim().replace(/[$#]/g, ' '), url };
+    }).filter(e => /^https?:\/\//.test(e.url));
+    if (!name || !eps.length) return bad.push(n + 1);
+    const key = cat + '|' + name;
+    if (!cats.has(cat)) cats.set(cat, 'c' + crypto.createHash('sha1').update(cat).digest('hex').slice(0, 6));
+    if (!titles.has(key)) titles.set(key, { id: 'v' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 10), name: name.replace(/[$#]/g, ' '), cat, eps: [] });
+    titles.get(key).eps.push(...eps);
+  });
+  const items = [...titles.values()];
+  for (const t of items) t.eps.forEach((e, k) => { if (!e.name) e.name = t.eps.length > 1 ? `第${k + 1}集` : '播放'; });
+  return { cats: [...cats].map(([name, id]) => ({ id, name })), items, bad };
+}
+const vodFileCache = new Map();
+const VOD_PAGE = 30;
+function fileCms(api, params) {
+  const file = path.join(VODS, path.basename(str(api).slice(6)));
+  let st; try { st = fs.statSync(file); } catch { throw new Error('本地片单文件不存在'); }
+  let hit = vodFileCache.get(file);
+  if (!hit || hit.mtime !== st.mtimeMs) { hit = { mtime: st.mtimeMs, ...parseVodText(fs.readFileSync(file, 'utf8')) }; vodFileCache.set(file, hit); }
+  const catName = new Map(hit.cats.map(c => [c.id, c.name]));
+  const ids = str(params.ids).split(',').map(x => x.trim()).filter(Boolean);
+  const t = str(params.t), wd = str(params.wd).trim().toLowerCase();
+  const catId = new Map(hit.cats.map(c => [c.name, c.id]));
+  const list = ids.length ? hit.items.filter(it => ids.includes(it.id))
+    : hit.items.filter(it => (!t || catId.get(it.cat) === t) && (!wd || it.name.toLowerCase().includes(wd)));
+  const pg = Math.max(1, Number(params.pg) || 1);
+  const page = ids.length ? list : list.slice((pg - 1) * VOD_PAGE, pg * VOD_PAGE);
+  return { code: 1, msg: '数据列表', page: pg, pagecount: Math.max(1, Math.ceil(list.length / VOD_PAGE)), limit: String(VOD_PAGE), total: list.length,
+    class: hit.cats.map(c => ({ type_id: c.id, type_pid: 0, type_name: c.name })),
+    list: page.map(it => ({ vod_id: it.id, vod_name: it.name, vod_pic: '', type_id: catId.get(it.cat), type_name: it.cat,
+      vod_remarks: it.eps.length > 1 ? `${it.eps.length}集` : '', vod_play_from: '本地片单',
+      vod_play_url: it.eps.map(e => `${e.name}$${e.url}`).join('#') })) };
+}
+// Text for the editor: the local file itself, or (for a web source) a snapshot of its first pages — only titles with a directly playable line.
+async function vodText(api) {
+  if (LOCAL_VOD.test(api)) return fsp.readFile(path.join(VODS, path.basename(api.slice(6))), 'utf8');
+  if (!/^https?:\/\//.test(api)) throw new Error('不是点播源地址');
+  const byCat = new Map();
+  let n = 0;
+  for (let pg = 1; pg <= 3; pg++) {
+    const b = await cmsGet({ name: '', api }, { ac: 'detail', pg: String(pg) }, true, 12000);
+    for (const d of b.list || []) {
+      const l = lines(d)[0]; if (!l) continue;
+      const cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类', name = str(d.vod_name).replace(/[,\n]/g, ' ').trim();
+      if (!name) continue;
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push(`${name},${l.episodes.map(e => `${e.name}$${e.url}`).join('#')}`); n++;
+    }
+    if (pg >= Number(b.pagecount || 1)) break;
+  }
+  if (!n) throw new Error('这个源前几页里没有可直接播放的片');
+  return [...byCat].map(([c, rows]) => `${c},#genre#\n${rows.join('\n')}`).join('\n\n') + '\n';
+}
 async function cmsGet(site, params, fresh = false, ms = 15000) {
   if (site.local) return localCms(params, '');
+  if (LOCAL_VOD.test(str(site.api))) return fileCms(site.api, params);
   const u = new URL(site.api);
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.searchParams.set(k, v);
   const key = u.toString();
@@ -661,6 +733,48 @@ async function classifyNew(sites) {
   return n;
 }
 
+// One request per source (8 at a time): is it empty / unreachable, and which kind is it. Used before saving so that
+// saving itself does no network work. Mutates the entries: ok/info for the row, adult/kids flags, empty/probed markers.
+async function probeSites(sites) {
+  const todo = sites.filter(s => s.api && !s.members && !s.categories && s.ok !== false);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(8, todo.length) }, async () => {
+    while (next < todo.length) {
+      const s = todo[next++];
+      try {
+        const b = await cmsGet({ name: '', api: s.api }, { ac: 'list' }, true, 10000);
+        if (!(Number(b.total) > 0) && !(b.list || []).length) { s.ok = false; s.empty = true; s.info = '0 部内容，不导入'; continue; }
+        const all = b.class || [], parents = new Set(all.map(c => str(c.type_pid)));
+        const leaves = all.filter(c => !parents.has(str(c.type_id)));
+        const k = classifyNames((leaves.length ? leaves : all).map(c => c.type_name))?.kind;
+        if (!s.kids && !s.adult && (k === 'adult' || k === 'kids')) s[k] = 1;
+        s.ok = true; s.info = Number(b.total) > 0 ? b.total + '部' : (s.info || '能连上');
+      } catch (e) { s.ok = false; s.info = '连不上：' + (e.message || '').slice(0, 40); }
+      s.probed = true;
+    }
+  }));
+}
+
+// Live sources that came out of a pasted TVBox config were never opened: open them now (8 at a time) so the list says
+// reachable / how many channels / empty before anything is saved.
+async function probeLives(lives) {
+  const todo = lives.filter(l => l.url && /^https?:\/\//.test(l.url) && l.ok === undefined);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(8, todo.length) }, async () => {
+    while (next < todo.length) {
+      const l = todo[next++];
+      try {
+        const p = await peek(l.url);
+        const c = p.stream ? { kind: 'stream' } : classifyText(p.text);
+        if (c?.kind === 'list' && c.channels > 0) { l.ok = true; l.info = `${c.channels} 个频道`; }
+        else if (c?.kind === 'stream') { l.ok = true; l.info = '直播流'; }
+        else { l.ok = false; l.empty = true; l.info = '打开了但没有频道，不导入'; }
+      } catch (e) { l.ok = false; l.info = '连不上：' + (e.message || '').slice(0, 40); }
+      l.probed = true;
+    }
+  }));
+}
+
 // ======================= clipboard recognition =======================
 // Pasted text → 点播 sites / 直播 sources. Each link is fetched and classified by what it actually
 // returns (苹果CMS JSON, TVBox config, m3u/txt list, single stream); names come from the text on the
@@ -787,6 +901,7 @@ async function recognize(input) {
     .map(s => s.members ? { ...s, exists: config.sites.some(g => g.members && g.name === s.name) } : { ...s, api: normApi(s.api), exists: !s.categories && haveApi.has(normApi(s.api)) });
   lives = lives.filter(l => { const k = l.text ? textKey(l.text) : normUrl(l.url); return !seenL.has(k) && seenL.add(k); })
     .map(l => ({ ...l, exists: l.text ? haveText.has(textKey(l.text)) : haveUrl.has(normUrl(l.url)) }));
+  await Promise.all([probeSites(sites.filter(s => !s.exists)), probeLives(lives.filter(l => !l.exists))]);
   return { sites, lives, unknown };
 }
 
@@ -2128,6 +2243,14 @@ async function api(route, q, res, req) {
 
   // ---- live: speed test, raw text editing, covers ----
   if (route === 'checklive') return send(res, 200, await checkLive(q.get('url') || '', q.get('name') || ''));
+  if (route === 'vod/raw') {
+    if (req.method === 'GET') {
+      try { return send(res, 200, { text: await vodText(q.get('api') || '') }); }
+      catch (e) { return send(res, 200, { text: '', error: e.message }); }
+    }
+    if (!pinOk(req)) return needPin(res);
+    return leader('config', { op: 'vodRaw', body: await readBody(req) });
+  }
   if (route === 'live/raw') {
     if (req.method === 'GET') {
       try { return send(res, 200, { text: await liveText(q.get('url') || '', true) }); }
@@ -2309,6 +2432,14 @@ rpcHandlers.config = async ({ op, body: b }) => {
     await fsp.writeFile(path.join(LIVES, file), str(b.text));
     broadcastReload();
     return { body: { url: 'local:' + file } };
+  } else if (op === 'vodRaw') {
+    const parsed = parseVodText(b.text);
+    if (!parsed.items.length) return { code: 422, body: { error: '没有读到片：每行写「片名,播放地址」（地址要 http(s)），分类用「分类名,#genre#」' + (parsed.bad.length ? `；第 ${parsed.bad.slice(0, 5).join('、')} 行格式不对` : '') } };
+    const file = LOCAL_VOD.test(str(b.api)) ? path.basename(str(b.api).slice(6)) : crypto.randomBytes(5).toString('hex') + '.txt';
+    await fsp.writeFile(path.join(VODS, file), str(b.text));
+    vodFileCache.clear();
+    broadcastReload();
+    return { body: { api: 'local:' + file, titles: parsed.items.length, cats: parsed.cats.length, bad: parsed.bad.length } };
   } else if (op === 'liveMerge') {
     // Merge several live sources into one local m3u: same group name joins, same stream url is kept once.
     const srcs = (Array.isArray(b.sources) ? b.sources : []).filter(s => s && s.url);
@@ -2358,15 +2489,21 @@ rpcHandlers.config = async ({ op, body: b }) => {
         haveText.add(textKey(l.text));
         const file = crypto.randomBytes(5).toString('hex') + '.m3u';
         await fsp.writeFile(path.join(LIVES, file), str(l.text));
-        lives.push({ name: str(l.name) || '剪贴板频道', url: 'local:' + file });
-      } else if (/^https?:\/\//.test(str(l.url))) lives.push({ name: str(l.name) || hostOf(l.url), url: str(l.url) });
+        lives.push({ name: str(l.name) || '剪贴板频道', url: 'local:' + file, ...(Number(l.kids) ? { kids: 1 } : {}), ...(Number(l.adult) ? { adult: 1 } : {}) });
+      } else if (l.empty) continue;
+      else if (/^https?:\/\//.test(str(l.url))) lives.push({ name: str(l.name) || hostOf(l.url), url: str(l.url), ...(Number(l.kids) ? { kids: 1 } : {}), ...(Number(l.adult) ? { adult: 1 } : {}) });
     }
     const haveApi = new Set(config.sites.filter(s => !s.categories).map(s => normApi(s.api)));
     const incoming = Array.isArray(b.sites) ? b.sites : [];
     const apiOf = new Map(incoming.filter(s => !s.members).map(s => [str(s.key), s.api]));
     const fresh = incoming.filter(s => s.members || s.categories || !haveApi.has(normApi(s.api)));
-    const { sites, dropped: skippedEmpty } = await dropEmptySites(fresh);
-    const cls = await classifyNew(sites);
+    // Already probed (and classified) during recognition: saving does no network work. Only API callers that skip that pay for it here.
+    const probed = fresh.filter(s => s.probed), raw = fresh.filter(s => !s.probed);
+    const kept = await dropEmptySites(raw);
+    const sites = [...fresh.filter(s => s.probed ? !s.empty : kept.sites.includes(s))];
+    const skippedEmpty = probed.filter(s => s.empty).length + kept.dropped;
+    const cls = await classifyNew(sites.filter(s => !s.probed));
+    for (const s of sites) if (s.probed) { if (s.adult) cls.adult++; else if (s.kids) cls.kids++; }
     // A pasted group refers to its members by key; re-point them at whatever source has the same link here.
     for (const g of sites.filter(s => s.members)) {
       g.members = g.members.map(k => {
