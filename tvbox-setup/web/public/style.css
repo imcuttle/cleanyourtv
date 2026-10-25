@@ -888,6 +888,26 @@ body.sov-open { overflow: hidden; }
 .menu.shist .sov-row em:hover { background: #ffffff26; color: #fff; }
 @media (hover: none) { .menu.shist .sov-row em { opacity: 1; } }
 
+/* 搜索框清除: while focused and holding text, the left magnifier turns into a ⊗ that clears it (the native × on the right is gone) */
+.search input::-webkit-search-cancel-button, .sov-pill input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; display: none; }
+.s-clear { display: none; flex: none; width: 17px; height: 17px; padding: 0; border: 0; background: none; color: #ffffffb3; cursor: pointer; transition: color .15s; }
+.s-clear svg { display: block; width: 100%; height: 100%; fill: currentColor; }
+.s-clear:hover { color: #fff; }
+.search:focus-within:has(input:not(:placeholder-shown)) .s-ico, .sov-pill:focus-within:has(input:not(:placeholder-shown)) .s-ico { display: none; }
+.search:focus-within:has(input:not(:placeholder-shown)) .s-clear, .sov-pill:focus-within:has(input:not(:placeholder-shown)) .s-clear { display: block; }
+.sov-pill .s-clear { width: 18px; height: 18px; }
+
+/* ---------- 大屏搜索历史下拉 ---------- */
+.menu.shist { left: 0; right: auto; width: 100%; min-width: 280px; padding: 6px 6px 8px; }
+.menu.shist .mhead { display: flex; justify-content: space-between; align-items: center; }
+.menu.shist .mre { cursor: pointer; }
+.menu.shist .sov-row { padding: 9px 10px; border: 0; border-radius: 6px; font-size: 14px; cursor: pointer; }
+.menu.shist .sov-row:hover, .menu.shist .sov-row.sel { background: #ffffff1a; }
+.menu.shist .sov-row em { width: 26px; height: 26px; margin: -4px -2px -4px 0; border-radius: 50%; font-size: 17px; opacity: 0; transition: opacity .12s, background .12s; }
+.menu.shist .sov-row:hover em, .menu.shist .sov-row.sel em { opacity: 1; }
+.menu.shist .sov-row em:hover { background: #ffffff26; color: #fff; }
+@media (hover: none) { .menu.shist .sov-row em { opacity: 1; } }
+
 /* 搜索框清除按钮: the native one turned a muddy gold on dark; draw a neutral grey circled × instead */
 .search input::-webkit-search-cancel-button, .sov-pill input::-webkit-search-cancel-button {
   -webkit-appearance: none; appearance: none; width: 16px; height: 16px; margin: 0 4px 0 6px; cursor: pointer; background: #ffffff8c;

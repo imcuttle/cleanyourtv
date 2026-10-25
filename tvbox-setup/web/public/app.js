@@ -584,6 +584,15 @@ function paintHist() {
 function openHist() { if (smallScreen.matches) return; closeScope(); closeMenu(); paintHist(); }
 const closeHist = () => { hist_.hidden = true; histSel = -1; };
 $('#q').addEventListener('click', () => { if (!smallScreen.matches && hist_.hidden) openHist(); });
+// ⊗ on the left of the pill: clear the text, keep the focus (mousedown must not steal it)
+for (const clr of $$('.s-clear')) {
+  clr.addEventListener('mousedown', e => e.preventDefault());
+  clr.addEventListener('click', () => {
+    const inp = clr.parentElement.querySelector('input');
+    inp.value = ''; inp.focus();
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
 $('#q').addEventListener('input', () => { if (!smallScreen.matches && document.activeElement === $('#q')) paintHist(); });
 $('#q').addEventListener('keydown', e => {
   if (hist_.hidden && e.key === 'ArrowDown' && !smallScreen.matches) return paintHist();
