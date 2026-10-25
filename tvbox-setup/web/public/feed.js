@@ -549,6 +549,8 @@ function setRate(r) { cur().video.playbackRate = r; rateEl.hidden = r === 1; }
 root.addEventListener('pointerdown', e => {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   if (e.target.closest(IGNORE)) return;
+  // nothing starts in the home-bar / screen-edge zones: iOS owns swipes there
+  if (e.pointerType === 'touch' && (e.clientY > innerHeight - 44 || e.clientX < 16 || e.clientX > innerWidth - 16)) return;
   if (!menuEl.hidden || !sheetEl.hidden) { closeOverlays(); return; }
   if (g) return;
   const s = cur();

@@ -2,6 +2,8 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $('#view');
+// No pinch zoom (Safari reports it as gesture events).
+for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) addEventListener(ev, e => e.preventDefault());
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // 豆瓣/javdb image CDNs refuse requests without their Referer → go through the server's /img relay.
 const img = u => /^https?:\/\/[^/]*(doubanio|jdbstatic|javdb)\.com\//.test(u || '') ? '/img?u=' + encodeURIComponent(u) : (u || '');
@@ -659,7 +661,8 @@ addEventListener('keydown', e => { if (e.key === 'Escape') closeSov(); });
 smallScreen.addEventListener('change', () => { if (!smallScreen.matches) closeSov(); syncScope(); });
 addEventListener('hashchange', closeSov);
 syncScope();
-addEventListener('scroll', () => $('#top').classList.toggle('solid', scrollY > 30));
+// The page scrolls inside #view (not the window), so the scrollbar belongs to the content and the header / tab bar stay put.
+view.addEventListener('scroll', () => $('#top').classList.toggle('solid', view.scrollTop > 30), { passive: true });
 addEventListener('hashchange', () => route({ nav: true }));
 
 let heroTimer, pageTimer;
@@ -681,12 +684,12 @@ const saveScroll = (k, y) => {
   const ks = Object.keys(scrollMap); if (ks.length > 80) for (const x of ks.slice(0, ks.length - 80)) delete scrollMap[x];
   clearTimeout(scrollSave); scrollSave = setTimeout(() => { try { sessionStorage.scrolls = JSON.stringify(scrollMap); } catch {} }, 400);
 };
-addEventListener('scroll', () => {
+view.addEventListener('scroll', () => {
   if (scrollTick) return;
   scrollTick = requestAnimationFrame(() => {
     scrollTick = 0;
     const k = history.state?.sk;
-    if (k && !scrollGuard) saveScroll(k, scrollY);
+    if (k && !scrollGuard) saveScroll(k, view.scrollTop);
   });
 }, { passive: true });
 // Returns the saved offset when this entry has been visited before; otherwise gives it a key.
@@ -699,22 +702,25 @@ function entryScroll() {
 function restoreScroll(y) {
   restoreCtl?.();
   const t0 = Date.now();
-  let ro = null, timer = 0;
+  let ro = null, mo = null, timer = 0;
   const stop = () => {
-    ro?.disconnect(); clearTimeout(timer);
+    ro?.disconnect(); mo?.disconnect(); clearTimeout(timer);
     for (const ev of ['wheel', 'touchstart', 'keydown', 'mousedown']) removeEventListener(ev, stop, true);
     if (restoreCtl === stop) restoreCtl = null;
     scrollGuard = false;
   };
   restoreCtl = stop;
   const apply = () => {
-    const max = document.documentElement.scrollHeight - innerHeight;
-    scrollTo(0, Math.min(y, Math.max(0, max)));
+    const max = view.scrollHeight - view.clientHeight;
+    view.scrollTo(0, Math.min(y, Math.max(0, max)));
     return max >= y - 2;
   };
   if (apply()) return stop();
   ro = new ResizeObserver(() => { if (apply()) stop(); });
-  ro.observe(document.documentElement);
+  const watch = () => { ro.observe(view); for (const c of view.children) ro.observe(c); };
+  watch();
+  mo = new MutationObserver(watch);
+  mo.observe(view, { childList: true });
   timer = setTimeout(stop, 5000);                       // content never got that tall (list got shorter): give up
   for (const ev of ['wheel', 'touchstart', 'keydown', 'mousedown']) addEventListener(ev, stop, { capture: true, passive: true });
 }
@@ -767,7 +773,12 @@ async function route(opts = {}) {
       view.classList.add('restoring');
       setTimeout(() => { if (seq === routeSeq) view.classList.remove('restoring'); }, 3000);
     }, 150);
-  } else scrollTo(0, 0);
+  } else {
+    view.scrollTo(0, 0);
+    // Pages that wait for the network before drawing: show the title and a spinner right away, so the tap never looks dead.
+    const early = { settings: '设置', downloads: '下载', charts: '榜单' }[page];
+    if (early) view.innerHTML = `<div class="page"><h1>${early}</h1>${spinner}</div>`;
+  }
   try {
     if (page === 'live') return await renderLive();
     if (page === 'settings') return await renderSettings();
@@ -1123,8 +1134,8 @@ async function renderCategory(t, name, siteKey) {
       if (t && !busy && pg < count && t.getBoundingClientRect().top < innerHeight + 600) more().catch(() => { busy = false; });
     });
   };
-  addEventListener('scroll', onScroll, { passive: true });
-  sig.addEventListener('abort', () => { removeEventListener('scroll', onScroll); cancelAnimationFrame(tick); });
+  view.addEventListener('scroll', onScroll, { passive: true });
+  sig.addEventListener('abort', () => { view.removeEventListener('scroll', onScroll); cancelAnimationFrame(tick); });
 }
 
 // ---------- search (all sources) ----------
@@ -1681,9 +1692,7 @@ function openPlayer(startAt) {
   if (!playerOpen() || !history.state?.player) { player.hidden = false; history.pushState({ player: 1 }, ''); document.body.style.overflow = 'hidden'; }
   $('.ptitle').textContent = cur.kind === 'live' ? e.name : (cur.eps.length > 1 ? `${cur.title} · ${e.name}` : cur.title);
   const live = cur.kind === 'live';
-  $('[data-act=prev]').textContent = live ? '上一台' : '上一集';
-  $('[data-act=next]').textContent = live ? '下一台' : '下一集';
-  $('[data-act=list]').textContent = live ? '频道' : '选集';
+  setL('prev', live ? '上一台' : '上一集'); setL('next', live ? '下一台' : '下一集'); setL('list', live ? '频道' : '选集');
   $('[data-act=prev]').hidden = cur.ep <= 0;
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
@@ -1692,7 +1701,7 @@ function openPlayer(startAt) {
   $('[data-act=star]').hidden = !live;
   paintVodActs();
   $('[data-act=ext]').hidden = !(cur.kind === 'vod' && cur.d.local && serverInfo?.loopback);
-  if (live) $('[data-act=star]').textContent = liveFavs.has(e.url) ? '★ 已收藏' : '☆ 收藏';
+  if (live) paintStar(liveFavs.has(e.url));
   renderPlist();
   const local = cur.kind === 'vod' ? dlFor(cur.d.site, cur.d.id, e.url) : null;
   const useLocal = cur.kind === 'local' || local?.status === 'done';
@@ -1707,10 +1716,15 @@ function paintVodActs() {
   const fav = $('[data-act=vfav]'), dl = $('[data-act=dl]');
   fav.hidden = !v || kidsMode(); dl.hidden = !v;
   if (!v) return;
-  fav.textContent = favs.has(cur.d.site, cur.d.id) ? '✓ 已收藏' : '＋ 收藏'; fav.classList.toggle('on', favs.has(cur.d.site, cur.d.id));
+  const on = favs.has(cur.d.site, cur.d.id);
+  setL('vfav', on ? '已收藏' : '收藏'); fav.classList.toggle('on', on);
   const j = dlFor(cur.d.site, cur.d.id, cur.eps[cur.ep].url);
-  dl.textContent = !j ? '⬇ 下载' : j.status === 'done' ? '✓ 已下载' : ACTIVE.includes(j.status) ? `⏳ ${j.pct || 0}%` : j.status === 'paused' ? '▶ 继续下载' : '⟳ 重试下载';
+  setL('dl', !j ? '下载' : j.status === 'done' ? '已下载' : ACTIVE.includes(j.status) ? `${j.pct || 0}%` : j.status === 'paused' ? '继续' : '重试');
+  dl.classList.toggle('on', j?.status === 'done');
 }
+// The player's buttons are an icon plus a small label (shown on touch screens, a tooltip on desktop).
+function setL(act, text) { const b = $(`[data-act=${act}]`); if (!b) return; const l = $('.l', b); if (l) l.textContent = text; b.title = text; }
+function paintStar(on) { const b = $('[data-act=star]'); b.classList.toggle('on', on); setL('star', on ? '已收藏' : '收藏'); }
 function msg(t) { $('.pmsg').textContent = t || ''; }
 function load(url, startAt, viaProxy, isLocal) {
   if (hls) { hls.destroy(); hls = null; }
@@ -1774,7 +1788,7 @@ function closePlayer() {
   video.pause(); video.removeAttribute('src'); video.load();
   if (ms) { try { ms.metadata = null; ms.playbackState = 'none'; } catch {} }
   if (pipOn) { pipOn = false; player.classList.remove('pip'); document.exitPictureInPicture?.().catch(() => {}); }
-  player.hidden = true; togglePlist(false); msg('');
+  player.hidden = true; togglePlist(false); msg(''); setLock(false); setBright(1);
   if (!$('#modal')) document.body.style.overflow = '';
   $('#modal')?.refresh?.();
   cur = null;
@@ -1794,21 +1808,32 @@ player.addEventListener('click', e => {
     if (j) return req('PATCH', `/api/downloads?id=${j.id}&action=${ACTIVE.includes(j.status) ? 'pause' : 'resume'}`).then(() => refreshDownloads()).then(paintVodActs, err => toast(err.message));
     return enqueue(cur.d, cur.line, [cur.ep]).then(paintVodActs, err => toast(err.message));
   }
-  if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); $('[data-act=star]').textContent = liveFavs.has(c.url) ? '★ 已收藏' : '☆ 收藏'; return; }
-  if (!$('.plist').hidden && !e.target.closest('.plist, .pbar')) togglePlist(false);
+  if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); paintStar(liveFavs.has(c.url)); return; }
+  if (act === 'rate') return cycleRate();
+  if (act === 'fs') return toggleFs();
+  if (act === 'lock') return setLock(true);
+  if (!$('.plist').hidden && !e.target.closest('.plist, .pbar, .pacts')) togglePlist(false);
 });
-function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && !scrubbing && !$('.ctrl').matches(':hover') && player.classList.add('idle'), 3000); }
-player.addEventListener('mousemove', poke); player.addEventListener('touchstart', poke);
+function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && !scrubbing && !gesturing && !(fineCursor && ctrl.matches(':hover')) && player.classList.add('idle'), fineCursor ? 3000 : 4000); }
+player.addEventListener('mousemove', poke);
+// touch: a tap on the picture shows / hides the controls (see below); only touches on the controls themselves keep them up
+player.addEventListener('touchstart', e => { if (e.target.closest('.ctrl, .pbar, .pcenter, .plist')) poke(); }, { passive: true });
 
-// ---------- player controls (mouse devices) ----------
-// Native controls can't tell us where the pointer is on the timeline, so on hover-capable screens the
+// ---------- player controls ----------
+// Native controls can't tell us where the pointer is on the timeline, so the
 // player gets its own bar. Hovering the timeline seeks a second, muted, lowest-quality copy of the stream
-// to that moment and shows its frame. Touch screens keep the native controls.
+// to that moment and shows its frame (hover on a mouse, dragging on a touch screen).
 const fineCursor = matchMedia('(hover: hover) and (pointer: fine)').matches;
 const ctrl = $('.ctrl'), tl = $('.tl'), tip = $('.tip'), seekV = $('.tip video');
 let playingSrc = null, pvHls = null, pvKey = '', pvWant = null, pvBusy = false, pvTimer = 0, scrubbing = false;
-video.controls = !fineCursor;
-ctrl.hidden = !fineCursor;
+// Every screen gets the same custom player (Netflix-style). On touch screens the centre carries the transport buttons, the
+// timeline sits well above the bottom edge (iPhone's home-bar swipe lives there) and the picture takes gestures.
+video.controls = false;
+let gesturing = false;
+document.documentElement.classList.toggle('touchui', !fineCursor);
+const pacts = $('.pacts');
+if (!fineCursor) ctrl.append(pacts);
+$('[data-c=pip]').hidden = !pipSupported();
 const fmtT = s => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = String(s % 60).padStart(2, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`; };
 const isVodTime = () => Number.isFinite(video.duration) && video.duration > 0;
 function paintCtrl() {
@@ -1817,7 +1842,7 @@ function paintCtrl() {
   player.classList.toggle('muted', video.muted || video.volume === 0);
   $('.vol').value = video.muted ? 0 : video.volume;
   tl.hidden = !isVodTime();
-  $('.time').textContent = isVodTime() ? `${fmtT(t)} / ${fmtT(d)}` : cur?.kind === 'live' ? '● 直播' : '';
+  $('.rem').textContent = isVodTime() ? '-' + fmtT(d - t) : cur?.kind === 'live' ? '● 直播' : '';
   if (!isVodTime()) return;
   if (!scrubbing) tl.style.setProperty('--p', (t / d) * 100 + '%');
   let end = 0;
@@ -1826,19 +1851,27 @@ function paintCtrl() {
 }
 for (const ev of ['timeupdate', 'durationchange', 'progress', 'play', 'pause', 'volumechange', 'loadedmetadata']) video.addEventListener(ev, paintCtrl);
 const togglePlay = () => (video.paused ? video.play().catch(() => {}) : video.pause());
-const toggleFs = () => (document.fullscreenElement ? document.exitFullscreen() : player.requestFullscreen().catch(() => {}));
+// iPhone can only fullscreen the <video> itself (its native player then takes over); everything else fullscreens the player.
+const toggleFs = () => {
+  if (document.fullscreenElement || document.webkitFullscreenElement) return (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  if (player.requestFullscreen) return player.requestFullscreen().catch(() => {});
+  video.webkitEnterFullscreen?.();
+};
 const RATES = [1, 1.25, 1.5, 2, 0.75];
-ctrl.addEventListener('click', e => {
+const cycleRate = () => { video.playbackRate = RATES[(RATES.indexOf(video.playbackRate) + 1) % RATES.length]; };
+video.addEventListener('ratechange', () => { const t = video.playbackRate + 'x'; $('[data-c=rate]').textContent = t; setL('rate', t); $('[data-act=rate]').title = '倍速 ' + t; });
+const onCtrl = e => {
   const c = e.target.closest('[data-c]')?.dataset.c; if (!c) return;
   e.stopPropagation(); poke();
   if (c === 'play') togglePlay();
-  if (c === 'back') video.currentTime -= 10;
+  if (c === 'back') video.currentTime = Math.max(0, video.currentTime - 10);
   if (c === 'fwd') video.currentTime += 10;
   if (c === 'mute') { video.muted = !video.muted; if (!video.muted && !video.volume) video.volume = 0.5; }
   if (c === 'fs') toggleFs();
   if (c === 'pip') togglePip();
-  if (c === 'rate') { video.playbackRate = RATES[(RATES.indexOf(video.playbackRate) + 1) % RATES.length]; e.target.closest('button').textContent = video.playbackRate + 'x'; }
-});
+  if (c === 'rate') cycleRate();
+};
+ctrl.addEventListener('click', onCtrl); $('.pcenter').addEventListener('click', onCtrl);
 $('.vol').oninput = e => { video.volume = +e.target.value; video.muted = video.volume === 0; };
 if (fineCursor) {
   video.addEventListener('click', () => { if (!player.hidden && $('.plist').hidden) { togglePlay(); poke(); } });
@@ -1847,9 +1880,10 @@ if (fineCursor) {
 
 // Timeline: hover → time + frame, press/drag → seek.
 const tlFrac = e => { const r = tl.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
-function hoverAt(e) {
+function hoverAt(e) { showAt(tlFrac(e)); }
+function showAt(f) {
   if (!isVodTime()) return;
-  const f = tlFrac(e), t = f * video.duration, r = tl.getBoundingClientRect();
+  const t = f * video.duration, r = tl.getBoundingClientRect();
   tl.style.setProperty('--h', f * 100 + '%');
   tip.hidden = false;
   $('span', tip).textContent = fmtT(t);
@@ -1868,8 +1902,90 @@ tl.addEventListener('pointerup', e => {
   if (!scrubbing) return;
   scrubbing = false; tl.classList.remove('drag');
   video.currentTime = tlFrac(e) * video.duration;
-  if (!tl.matches(':hover')) tip.hidden = true;
+  if (!fineCursor || !tl.matches(':hover')) { tip.hidden = true; tl.style.setProperty('--h', '0%'); }
 });
+tl.addEventListener('pointercancel', () => { scrubbing = false; tl.classList.remove('drag'); tip.hidden = true; tl.style.setProperty('--h', '0%'); });
+
+// ---------- touch: gestures on the picture, double-tap skip, screen lock ----------
+// Tap shows / hides the controls; double-tap the left / right side skips 10 s (middle: play / pause); a horizontal drag scrubs
+// with the frame preview above the timeline; a vertical drag on the left side changes brightness, on the right side the volume.
+// No pinch / double-tap zoom anywhere, and nothing starts within reach of the screen edges (iOS swipes live there).
+const hud = $('.phud'), skipEl = $('.pskip'), lockBtn = $('.plock');
+let bright = 1, hudTimer = 0, skipTimer = 0, lockTimer = 0;
+const volOk = (() => { try { const v = document.createElement('video'); v.volume = .5; return v.volume === .5; } catch { return false; } })();   // iOS keeps volume to the hardware keys
+const clamp01 = x => Math.min(1, Math.max(0, x));
+function showHud(kind, f) {
+  hud.dataset.k = kind; $('i', hud).style.width = f * 100 + '%'; hud.hidden = false;
+  clearTimeout(hudTimer); hudTimer = setTimeout(() => { hud.hidden = true; }, 900);
+}
+function setBright(b) { bright = Math.min(1.6, Math.max(.25, b)); video.style.filter = bright === 1 ? '' : `brightness(${bright})`; }
+function skip(n) {
+  if (!isVodTime()) return;
+  video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + n));
+  skipEl.className = 'pskip ' + (n < 0 ? 'l' : 'r'); skipEl.textContent = (n < 0 ? '« ' : '') + Math.abs(n) + ' 秒' + (n > 0 ? ' »' : '');
+  skipEl.hidden = false; void skipEl.offsetWidth; skipEl.classList.add('go');
+  clearTimeout(skipTimer); skipTimer = setTimeout(() => { skipEl.hidden = true; }, 600);
+}
+function showLockBtn() { lockBtn.classList.add('show'); clearTimeout(lockTimer); lockTimer = setTimeout(() => lockBtn.classList.remove('show'), 2500); }
+function setLock(on) {
+  player.classList.toggle('locked', on); lockBtn.hidden = !on; lockBtn.classList.remove('show');
+  if (on) { clearTimeout(idleTimer); togglePlist(false); showLockBtn(); } else poke();
+}
+lockBtn.onclick = e => { e.stopPropagation(); setLock(false); };
+if (!fineCursor) {
+  let g = null, lastTap = { t: 0, f: 0 }, tapTimer = 0;
+  const EDGE = 26;
+  video.addEventListener('pointerdown', e => {
+    if (player.classList.contains('locked') || !$('.plist').hidden) return;
+    const r = video.getBoundingClientRect();
+    if (e.clientX - r.left < EDGE || r.right - e.clientX < EDGE || r.bottom - e.clientY < 80) return;
+    g = { id: e.pointerId, x: e.clientX, y: e.clientY, r, axis: '', left: e.clientX - r.left < r.width / 2, t0: video.currentTime, b0: bright, v0: video.volume, target: 0 };
+    video.setPointerCapture(e.pointerId);
+  });
+  video.addEventListener('pointermove', e => {
+    if (!g || e.pointerId !== g.id) return;
+    const dx = e.clientX - g.x, dy = e.clientY - g.y;
+    if (!g.axis && Math.max(Math.abs(dx), Math.abs(dy)) > 10) g.axis = Math.abs(dx) > Math.abs(dy) ? (isVodTime() ? 'x' : 'none') : 'y';
+    if (g.axis === 'x') {
+      const d = video.duration, span = Math.min(Math.max(d * .35, 60), 600);
+      g.target = Math.min(d, Math.max(0, g.t0 + dx / g.r.width * span));
+      if (!gesturing) { gesturing = true; player.classList.remove('idle'); clearTimeout(idleTimer); }
+      tl.style.setProperty('--p', g.target / d * 100 + '%');
+      showAt(g.target / d);
+    } else if (g.axis === 'y') {
+      const k = -dy / (g.r.height * .7);
+      if (g.left) { setBright(g.b0 + k * 1.35); showHud('sun', (bright - .25) / 1.35); }
+      else if (volOk) { video.muted = false; video.volume = clamp01(g.v0 + k); showHud('vol', video.volume); }
+      else if (!g.said) { g.said = true; toast('音量请用手机侧边的音量键'); }
+    }
+  });
+  const end = (e, ok) => {
+    if (!g || e.pointerId !== g.id) return;
+    const x = g; g = null;
+    if (x.axis === 'x') {
+      if (ok) video.currentTime = x.target;
+      gesturing = false; tip.hidden = true; tl.style.setProperty('--h', '0%'); poke();
+    }
+  };
+  video.addEventListener('pointerup', e => end(e, true));
+  video.addEventListener('pointercancel', e => end(e, false));
+  video.addEventListener('click', e => {
+    if (player.classList.contains('locked')) return showLockBtn();
+    if (!$('.plist').hidden) return;
+    const r = video.getBoundingClientRect(), f = (e.clientX - r.left) / r.width, now = performance.now();
+    if (now - lastTap.t < 300 && Math.abs(f - lastTap.f) < .25) {
+      clearTimeout(tapTimer); lastTap.t = 0;
+      if (f < .38) skip(-10); else if (f > .62) skip(10); else togglePlay();
+      poke();
+    } else {
+      lastTap = { t: now, f };
+      tapTimer = setTimeout(() => {
+        if (player.classList.contains('idle') || video.paused) poke();
+        else { clearTimeout(idleTimer); player.classList.add('idle'); }
+      }, 260);
+    }
+  });
+}
 
 // The preview copy: same source the player ended up using (direct or relayed), lowest level, tiny buffer.
 function previewAt(t) {
@@ -2760,7 +2876,7 @@ async function renderSettings() {
       };
       const tick = () => {
         const edge = 90, top = (parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--hh')) || 64) + 56;
-        if (y < top + edge * .4) scrollBy(0, -14); else if (y > innerHeight - edge) scrollBy(0, 14);
+        if (y < top + edge * .4) view.scrollBy(0, -14); else if (y > innerHeight - edge) view.scrollBy(0, 14);
         mark();
       };
       unit.forEach(x => x.classList.add('dragging')); document.body.classList.add('sorting');
