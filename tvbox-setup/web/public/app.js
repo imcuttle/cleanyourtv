@@ -396,15 +396,39 @@ const javCode = s => {
   for (const [re, fmt] of pats) for (const m of up.matchAll(re)) { const c = fmt(m); if (c) return c; }
   return '';
 };
+// A title that BEGINS with a 番号 (SSIS-001 …, [FC2-PPV-123] …, 第一会所@SONE-123 …) is a JAV title whether or not its source is flagged 成人.
+// Only meaningful with 安全级别「全部」: the server answers nothing else.
+const javLead = name => {
+  if (state.level !== 'all') return '';
+  const n = String(name ?? '').trim();
+  const code = javCode(n);
+  if (!code) return '';
+  // Position of the 番号 in the ORIGINAL title (CJK text counts): it must open the title, a short site tag in front is fine.
+  const parts = code.split('-'), lead = parts[0], tail = parts[parts.length - 1].replace(/^0+/, '');
+  const re = new RegExp(parts.length > 2 ? parts.join('[\\s\\-_]?') : lead + '[\\s\\-_]?0*' + tail, 'i');
+  const at = n.search(re);
+  return at >= 0 && at <= 10 ? code : '';
+};
+const isJav = it => !!(it && (it.adult || javLead(it.name)));
 const javCache = JSON.parse(localStorage.javdb || '{}');
+// Cached: found for 30 days; "javdb has no such code" for 3 days (a real answer). Errors / unreachable mirrors are never cached.
+// Concurrent asks for one code share a single request.
+const javBusy = new Map();
+const saveJav = () => { try { localStorage.javdb = JSON.stringify(javCache); } catch { for (const k of Object.keys(javCache).slice(0, 200)) delete javCache[k]; } };
 function javMeta(code) {
-  const c = javCache[code];
-  if (c && c.found && c.v === 2 && Date.now() - c.at < 30 * 86400e3) return Promise.resolve(c);
-  return api('javdb', { code }, null).catch(() => ({ found: false })).then(r => {
+  const c = javCache[code], age = c ? Date.now() - c.at : Infinity;
+  if (c && c.found && c.v === 2 && age < 30 * 86400e3) return Promise.resolve(c);
+  if (c && c.found === false && age < 3 * 86400e3) return Promise.resolve(c);
+  if (javBusy.has(code)) return javBusy.get(code);
+  const p = api('javdb', { code }, null).catch(e => ({ found: false, error: e.message })).then(r => {
+    javBusy.delete(code);
     const v = { ...r, at: Date.now() };
-    if (r.found) { javCache[code] = v; localStorage.javdb = JSON.stringify(javCache); }
+    if (r.found) { javCache[code] = v; saveJav(); }
+    else if (!r.error) { javCache[code] = { found: false, at: v.at }; saveJav(); }
     return v;
   });
+  javBusy.set(code, p);
+  return p;
 }
 // Cards: javdb 优先补封面+评分；没番号 / 匹配不到 / 抓取失败 → 豆瓣兜底（成人条目不预先走豆瓣）。
 const javIO = new IntersectionObserver(es => es.forEach(e => {
@@ -941,9 +965,9 @@ function card(it, opts = {}) {
   const pct = h && h.dur ? Math.min(100, (h.t / h.dur) * 100) : 0;
   const href = it.douban ? `#/find/${encodeURIComponent(it.name)}` : vodHref(it.site, it.id);
   const pv = it.site === 'local' && /^\/media\/p\//.test(it.pic || '') ? ` data-pv="${esc(it.pic.replace('/media/p/', '/media/g/'))}"` : '';
-  const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"${it.adult ? ` data-jav="${esc(javCode(it.name))}"` : ''}`;
+  const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"${isJav(it) ? ` data-jav="${esc(javCode(it.name))}"` : ''}`;
   const rate = it.douban ? (it.rate ? `<span class="db">${esc(it.rate)}</span>` : '')
-    : it.adult ? `<span class="db" hidden data-javfb data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`
+    : isJav(it) ? `<span class="db" hidden data-javfb data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`
     : it.site === 'local' ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
   return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}${pv}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
     <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${qChip(vodQ(it))}${rate}${opts.dup > 1 ? `<span class="dup" title="${esc(opts.dupTitle || '')}">${opts.dup} 源</span>` : ''}
@@ -1185,7 +1209,7 @@ function hero(items) {
     el.querySelector('.more').onclick = () => openDetail(it.site, it.id);
     $$('.dots i', el).forEach(d => d.onclick = () => { i = +d.dataset.k; show(); });
     const dbTag = r => { if (items[i] !== it) return; const t = el.querySelector('.dbtag'); if (t && r.rate) { t.textContent = '豆瓣 ' + r.rate; t.hidden = false; } };
-    if (it.adult) {
+    if (isJav(it)) {
       const code = javCode(it.name);
       if (code) javMeta(code).then(r => {
         if (items[i] !== it) return;
@@ -1719,7 +1743,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
       t.textContent = r.rate ? '豆瓣 ' + r.rate : '豆瓣 暂无评分'; t.href = `https://movie.douban.com/subject/${r.id}/`; t.hidden = false;
     };
     // 成人条目: javdb 优先补全标题/封面/演员/评分，匹配不到或失败再走豆瓣兜底。
-    if (d.adult) {
+    if (isJav(d)) {
       const code = javCode(d.name);
       if (code) javMeta(code).then(r => {
         if (!m.isConnected) return;

@@ -1380,7 +1380,9 @@ async function doubanHot(type) {
 // is scraped for the title/cover/date/score and, best-effort, the video page for the cast. Requests are
 // serialized with a polite gap (Cloudflare rate-limits) and cached in data/javdb.json + a memory LRU.
 // When the official host is unreachable, set JAVDB_URL to a mirror/proxy of the same site.
-const JAVDB_URL = (process.env.JAVDB_URL || 'https://javdb.com').replace(/\/+$/, '');
+// JAVDB_URL may list several hosts separated by commas (mirrors); they are tried in order and the one that answered last is tried first.
+const JAVDB_HOSTS = (process.env.JAVDB_URL || 'https://javdb.com').split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
+let JAVDB_URL = JAVDB_HOSTS[0];
 const JAVDB_FILE = path.join(DATA, 'javdb.json');
 const javdbCache = readJson(JAVDB_FILE, {}); // 番号 -> {found, title, cover, date, score, actors, id, at}
 let javDirty = false;
@@ -1391,9 +1393,20 @@ function javText(url) {
   const hit = javMem.get(url);
   if (hit && Date.now() - hit.at < 24 * 3600e3) return Promise.resolve(hit.body);
   const run = javChain.then(async () => {
-    const r = await fetch(url, { headers: { 'User-Agent': DB_UA, Referer: JAVDB_URL + '/', Accept: 'text/html' }, signal: AbortSignal.timeout(15000) });
-    if (!r.ok) throw new Error(`javdb HTTP ${r.status}`);
-    const body = await r.text();
+    // `url` is written against JAVDB_URL; on failure the same path is tried on the other hosts.
+    const path_ = url.slice(JAVDB_URL.length);
+    const order = [JAVDB_URL, ...JAVDB_HOSTS.filter(h => h !== JAVDB_URL)];
+    let body = '', lastErr = null;
+    for (const host of order) {
+      try {
+        const r = await fetch(host + path_, { headers: { 'User-Agent': DB_UA, Referer: host + '/', Accept: 'text/html' }, signal: AbortSignal.timeout(order.length > 1 ? 9000 : 15000) });
+        if (!r.ok) throw new Error(`javdb HTTP ${r.status}`);
+        const t = await r.text();
+        if (/<title>\s*(Redirecting|Just a moment)/i.test(t)) throw new Error('javdb 需要人机验证，换一个镜像（环境变量 JAVDB_URL）');
+        body = t; JAVDB_URL = host; lastErr = null; break;
+      } catch (e) { lastErr = e; }
+    }
+    if (lastErr) throw lastErr;
     javMem.set(url, { at: Date.now(), body });
     if (javMem.size > 500) javMem.delete(javMem.keys().next().value);
     await new Promise(ok => setTimeout(ok, 400));
