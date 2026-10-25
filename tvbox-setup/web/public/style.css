@@ -841,7 +841,7 @@ html.wide-cards .metaRow { line-height: 1.9; }
 
 /* 安全级别: a tiny superscript on the logo corner (无限 / 少儿), nothing for 标准 */
 .logo { position: relative; display: inline-block; }
-.logo .level { position: absolute; top: -3px; right: -4px; transform: translateX(100%); padding: 1px 4px; border-radius: 3px; font-size: 9px; font-weight: 700; line-height: 1.25; letter-spacing: 0; vertical-align: baseline; }
+.logo .level { display: inline-block; vertical-align: top; margin: 2px 0 0 3px; padding: 1px 4px; border-radius: 3px; font-size: 9px; font-weight: 700; line-height: 1.25; letter-spacing: 0; }
 .logo .level[hidden] { display: none; }
 .logo .level.all { background: #ffffff26; color: #ddd; }
 .logo .level.kids { background: #46d369; color: #000; }
