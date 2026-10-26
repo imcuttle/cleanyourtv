@@ -3300,14 +3300,14 @@ async function renderSettings() {
     if (!url) return toast('先填接口地址');
     if (isGroup) {
       if (!keys.length) return toast('这个聚合源没有成员');
-      if (!confirm(`把聚合源「${name}」转成一个本地片单？\n\n· 会取 ${keys.length} 个成员各自全部页的片（含封面和详情，片多时需要几分钟），同名同年的自动合并成一部（线路包含所有成员的线路）\n· 转换后它变成普通的本地点播源，不再是聚合源：成员不再被实时聚合，之后新增的片不会自动出现\n· 只含能直接播放的线路；原来的成员源本身不受影响\n\n继续？`)) return;
+      if (!confirm(`把聚合源「${name}」转成本地片单？\n成员源会被隐藏，之后可以撤销。`)) return;
     }
     const m = document.createElement('div');
     let editorOf = null;
     m.className = 'modal'; m.id = 'textModal';
     m.innerHTML = `<div class="sheet editor"><div class="body"><h3>编辑「${esc(name)}」<span class="lan" id="chCount"></span></h3>
-      <p class="hint">每行一部：<code>片名,播放地址</code>（m3u8 / mp4）；多集写成 <code>片名,第1集$地址#第2集$地址</code>，或同名再写一行追加一集；分类用 <code>分类名,#genre#</code>。${url.startsWith('local:') ? '' : '网页源这里是它全部页的完整副本（含封面、年份、地区、演员、简介；按页面等级拉取：前 20 页最先拉完，页数很多时可以随时「先用已拉到的」），保存后改读服务端本地文件，不再请求原接口。可在片名行后用 <code> ## pic=封面地址 ## year=2020</code> 补充信息。'}</p>
-      <div id="liveText" class="edhost"><p class="lan edload">${url.startsWith('local:') ? '加载中…' : isGroup ? `正在从 ${keys.length} 个成员拉取全部页并合并，片多时需要几分钟…` : '正在从源上拉取全部页，片多时需要几分钟…'}</p></div>
+      <p class="hint">每行一部：<code>片名,播放地址</code>；分类写 <code>分类名,#genre#</code>。</p>
+      <div id="liveText" class="edhost"><p class="lan edload">${url.startsWith('local:') ? '加载中…' : '正在拉取…'}</p></div>
       <div class="actions"><button class="btn red" id="ltSave" disabled>保存</button><button class="small" id="ltCancel">取消</button></div></div></div>`;
     document.body.append(m); document.body.style.overflow = 'hidden';
     const jobId = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -3333,7 +3333,7 @@ async function renderSettings() {
           let p; try { p = await api('vod/snap', { id: jobId }); bad = 0; } catch { if (++bad > 30) return { text: '', error: '和服务端失去联系了' }; continue; }
           if (p.error && p.state !== 'error') return { text: '', error: p.error };
           const el = $('.edload', m);
-          if (el && p.total) el.textContent = (p.stopping ? '收尾中…  ' : '正在拉取  ') + p.tier.map((t, i) => t.total ? `${TIER[i]} ${t.done}/${t.total}` : '').filter(Boolean).join(' · ') + `  · 已读到 ${p.titles} 部（靠前的页先拉，越往后越慢，片多时可以「先用已拉到的」）`;
+          if (el && p.total) el.textContent = `${p.stopping ? '收尾中' : '正在拉取'} ${p.done}/${p.total} 页 · ${p.titles} 部`;
           if (p.state === 'done') return await api('vod/snap', { id: jobId, text: '1' });
           if (p.state === 'error') return { text: '', error: p.error };
         }
@@ -3343,10 +3343,10 @@ async function renderSettings() {
     const j = await (url.startsWith('local:') ? api('vod/raw', { api: url }).catch(e => ({ text: '', error: e.message })) : runSnap());
     if (!m.isConnected) return;
     if (j.error) toast(j.error + (isGroup ? '' : '，可以直接手写片单'));
-    else if (j.partial) toast('没有拉完全部页，现在只有靠前的部分' + (j.totalPages ? `（${j.pages}/${j.totalPages} 页）` : '') + '，保存后就只有这些');
+    else if (j.partial) toast(`只拉了前 ${j.pages} 页`);
     if (isGroup && j.members) {
       const bad = j.members.filter(x => !x.ok);
-      toast(`已合并 ${j.titles} 部（其中 ${j.merged} 部有多个来源）${bad.length ? `；${bad.length} 个成员没取到：${bad.map(x => x.name).join('、')}` : ''}`);
+      if (bad.length) toast(`${bad.length} 个成员没取到：${bad.map(x => x.name).join('、')}`);
     }
     const ta = await textEditor($('#liveText'), { value: j.text || '我的分类,#genre#\n片名,https://example.com/movie.m3u8\n剧名,第1集$https://example.com/1.m3u8#第2集$https://example.com/2.m3u8\n' });
     if (!m.isConnected) { ta.dispose(); return; }
@@ -3370,14 +3370,14 @@ async function renderSettings() {
           r.replaceWith(plain);
           close();
           await persist(current());
-          toast(`已转成本地片单：${out.titles} 部 / ${out.cats} 个分类（已不再是聚合源）${out.bad ? `，有 ${out.bad} 行格式不对被跳过` : ''}`);
+          toast(`已转成本地片单（${out.titles} 部）`);
           return renderSettings();
         }
         if (!url.startsWith('local:') && !isGroup) { r.dataset.from = url; r.dataset.restore = JSON.stringify({ api: url }); }
         $('.url', r).value = out.api;
         close();
         await persist(current());
-        toast(`已存成本地片单：${out.titles} 部 / ${out.cats} 个分类${out.bad ? `（有 ${out.bad} 行格式不对被跳过）` : ''}`);
+        toast(`已存成本地片单（${out.titles} 部）`);
         renderSettings();
       } catch (err) { toast(err.message); b.disabled = false; b.textContent = '保存'; }
     };
@@ -3453,7 +3453,7 @@ async function renderSettings() {
     if (op === 'undo') {
       let rs; try { rs = JSON.parse(r.dataset.restore || 'null'); } catch {}
       if (!rs) return toast('没有可以撤销的记录');
-      if (!confirm(rs.group ? `撤销转换：把「${$('.nm', r).value.trim()}」恢复成聚合源（${rs.group.members.length} 个成员）？\n本地片单文件会留在服务器上，不会删除。` : `撤销转换：把「${$('.nm', r).value.trim()}」恢复成原来的点播源接口？\n${rs.api}\n本地片单文件会留在服务器上，不会删除。`)) return;
+      if (!confirm(rs.group ? '撤销转换，恢复成聚合源？' : '撤销转换，恢复成原来的接口？')) return;
       if (rs.group) {
         const g = rs.group, mem = g.members.map(k => $$('#sites .srow[data-key]').find(x => x.dataset.key === k && x !== r && !x.dataset.members)).filter(Boolean);
         if (!mem.length) return toast('原来的成员源都不在列表里了，没法恢复成聚合源');

@@ -2774,11 +2774,14 @@ function send(res, code, body, type = 'application/json; charset=utf-8') {
   res.writeHead(code, headers);
   res.end(buf);
 }
-function readBody(req) {
+function readBody(req, max = 2e6) {
   return new Promise((ok, fail) => {
-    let b = '';
-    req.on('data', c => { b += c; if (b.length > 2e6) req.destroy(); });
-    req.on('end', () => { try { ok(b ? JSON.parse(b) : {}); } catch { fail(new Error('bad json')); } });
+    const parts = []; let n = 0, over = false;
+    req.on('data', c => { n += c.length; if (n > max) { over = true; parts.length = 0; } else if (!over) parts.push(c); });   // 超限: 把剩下的读掉再报错 (直接断开的话浏览器只看到 fetch failed)
+    req.on('end', () => {
+      if (over) return fail(new Error(`内容太大（超过 ${Math.round(max / 1048576)} MB）`));
+      try { const b = Buffer.concat(parts).toString('utf8'); ok(b ? JSON.parse(b) : {}); } catch { fail(new Error('bad json')); }
+    });
     req.on('error', fail);
   });
 }
@@ -2985,7 +2988,7 @@ async function api(route, q, res, req) {
       catch (e) { return send(res, 200, { text: '', error: e.message }); }
     }
     if (!pinOk(req)) return needPin(res);
-    return leader('config', { op: 'vodRaw', body: await readBody(req) });
+    return leader('config', { op: 'vodRaw', body: await readBody(req, 512e6) });
   }
   if (route === 'live/raw') {
     if (req.method === 'GET') {
@@ -2993,7 +2996,7 @@ async function api(route, q, res, req) {
       catch (e) { return send(res, 200, { text: '', error: e.message }); }
     }
     if (!pinOk(req)) return needPin(res);
-    return leader('config', { op: 'liveRaw', body: await readBody(req) });
+    return leader('config', { op: 'liveRaw', body: await readBody(req, 512e6) });
   }
   // 编辑文本 in VS Code (this machine only): the list becomes a local file under data/lives and that file is opened in the
   // editor; saved edits are read from disk on every load, so nothing else has to be done afterwards.
