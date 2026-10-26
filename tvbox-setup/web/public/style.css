@@ -50,7 +50,7 @@ nav a:hover { color: #b3b3b3; }
 .menu button i + em.x { margin-left: 6px; }
 .menu button span + em.x { margin-left: auto; }
 .menu button em.x:hover { background: #ff4d4f33; color: #ff6b6d; }
-.menu .mre { float: right; cursor: pointer; color: #54b9c5; }
+.menu .mre { float: right; cursor: pointer; color: #bbb; transition: color .15s; } .menu .mre:hover { color: #fff; }
 .menu .hs { margin-left: auto; font-weight: 400; font-size: 11px; color: #888; }
 .menu .hs.ok { color: #46d369; } .menu .hs.bad { color: #f5a623; }
 .menu .hs + em.x { margin-left: 8px; }
@@ -583,7 +583,9 @@ nav a svg { display: none; }
 .lpr em.x { flex: none; font-style: normal; padding: 0 7px; border-radius: 4px; color: #888; font-size: 16px; opacity: 0; }
 .lpr:hover em.x { opacity: 1; } .lpr em.x:hover { background: #ff4d4f33; color: #ff6b6d; }
 @media (hover: none) { .lpr em.x { display: none; } }
-.lm-foot { display: flex; justify-content: space-between; align-items: center; padding: 0 4px; }
+.lm-head { padding: 0 4px 2px; } .lm-head .mre { float: none; margin-left: auto; }
+.lm-head { display: flex; align-items: center; }
+.lm-foot { display: flex; justify-content: flex-end; align-items: center; padding: 0 4px; }
 /* phone: the picker is a bottom sheet (a popover would run off the screen), roomy rows, 16px inputs (no iOS zoom) */
 @media (max-width: 760px) {
   .lpick { position: static; }
@@ -917,11 +919,11 @@ body.sov-open { overflow: hidden; }
 @media (hover: none) { .menu.shist .sov-row em { opacity: 1; } }
 
 /* 搜索框清除按钮: the native one turned a muddy gold on dark; draw a neutral grey circled × instead */
-.search input::-webkit-search-cancel-button, .sov-pill input::-webkit-search-cancel-button {
+.search input::-webkit-search-cancel-button, .sov-pill input::-webkit-search-cancel-button, .find::-webkit-search-cancel-button {
   -webkit-appearance: none; appearance: none; width: 16px; height: 16px; margin: 0 4px 0 6px; cursor: pointer; background: #ffffff8c;
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 16A8 8 0 108 0a8 8 0 000 16zM5.2 4.1L8 6.9l2.8-2.8 1.1 1.1L9.1 8l2.8 2.8-1.1 1.1L8 9.1l-2.8 2.8-1.1-1.1L6.9 8 4.1 5.2z'/%3E%3C/svg%3E") center/contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 16A8 8 0 108 0a8 8 0 000 16zM5.2 4.1L8 6.9l2.8-2.8 1.1 1.1L9.1 8l2.8 2.8-1.1 1.1L8 9.1l-2.8 2.8-1.1-1.1L6.9 8 4.1 5.2z'/%3E%3C/svg%3E") center/contain no-repeat; }
-.search input::-webkit-search-cancel-button:hover, .sov-pill input::-webkit-search-cancel-button:hover { background: #fff; }
+.search input::-webkit-search-cancel-button:hover, .sov-pill input::-webkit-search-cancel-button:hover, .find::-webkit-search-cancel-button:hover { background: #fff; }
 
 /* ---------- 小屏: 页面永远不能横向滚动 / 顶栏内容只收缩不溢出 ---------- */
 html { overflow-x: hidden; }

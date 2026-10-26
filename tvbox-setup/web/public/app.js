@@ -141,6 +141,18 @@ let admEs = null;   // 设置页「管理员」的 SSE 连接: 离开设置页 /
 const closeAdminEs = () => { if (admEs) { admEs.close(); admEs = null; } };
 addEventListener('pagehide', closeAdminEs);
 const isAbort = e => e?.name === 'AbortError';
+// 预览: a source's own front page (点播) / channel list (直播) in a new tab, without adding it. Pasted lists (no URL) are parked on the server first.
+function previewSource(kind, { url = '', name = '', cats = '', text = '' } = {}) {
+  if (state.level !== 'all') return toast('预览只能在安全级别「全部」下使用');
+  const page = qs => 'preview.html?' + new URLSearchParams({ kind, name, ...qs });
+  if (text) {
+    const w = window.open('', '_blank');
+    return req('POST', '/api/preview/stash', { text }).then(j => { if (w) w.location = page({ stash: j.id }); }, e => { if (w) w.close(); toast(e.message); });
+  }
+  url = String(url).trim();
+  if (!(kind === 'vod' ? /^https?:\/\/|^local:[\w.-]+\.txt$/ : /^https?:\/\/|^local:[\w.-]+$/).test(url)) return toast('这个地址没法预览');
+  window.open(page(kind === 'vod' ? { api: url, ...(cats ? { cats } : {}) } : { u: url }), '_blank');
+}
 async function req(method, path, body, retried, signal) {
   const headers = { 'Content-Type': 'application/json' };
   if (sessionStorage.pin) headers['X-Pin'] = sessionStorage.pin;
@@ -2596,7 +2608,7 @@ function lmRender() {
       <span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${s ? `<b class="hs ${s.cls}">${esc(s.text)}</b>` : ''}
       ${state.level === 'all' ? `<em class="x" data-del="${esc(l.key)}" title="删除这个直播源">×</em>` : ''}</div>`;
   }).join('') || '<div class="lan" style="padding:10px">没有匹配的直播源</div>';
-  $('#lmCount').textContent = `${state.lives.length} 个直播源`;
+  $('#lmCount').textContent = lm.q ? `${rows.length} / ${state.lives.length}` : state.lives.length;
   lmWatch();
 }
 async function lmSave(mutate) {
@@ -2630,6 +2642,18 @@ function lmQueue(k) {
   if (!url || h === 'busy' || (h && (h.ok ? Date.now() - h.at < LIVE_TTL : h.at >= lmEpoch))) return;
   lmQ = [k, ...lmQ.filter(x => x !== k)];
   lmMark(k); lmDrain();
+}
+// 重测: forget the results of the rows in view (all rows when none is measurable by geometry) and queue them again.
+function lmRetest() {
+  const box = $('#llist'), b = box.getBoundingClientRect();
+  let keys = $$('#llist .lpr').filter(r => { const x = r.getBoundingClientRect(); return x.height && x.bottom > b.top && x.top < b.bottom; }).map(r => r.dataset.k);
+  if (!keys.length) keys = lmVisible().map(l => l.key);
+  keys = keys.filter(k => liveUrlOf(k) && liveHealth.get(liveUrlOf(k)) !== 'busy');
+  if (!keys.length) return toast('没有可重测的直播源');
+  keys.forEach(k => liveHealth.delete(liveUrlOf(k)));
+  [...keys].reverse().forEach(k => lmQueue(k));
+  keys.forEach(lmMark);
+  toast(`重测 ${keys.length} 个直播源`);
 }
 function lmUnqueue(k) { if (lmQ.includes(k)) { lmQ = lmQ.filter(x => x !== k); lmMark(k); } }
 function lmDrain() {
@@ -2678,8 +2702,9 @@ async function renderLive() {
         <div id="liveMenu" class="menu lmenu" hidden>
           <div id="lmTabs"></div>
           <div class="lm-top"><input id="lmq" class="find" type="search" placeholder="搜直播源" autocomplete="off"></div>
+          <div class="mhead lm-head"><span>直播源 · <span id="lmCount"></span></span><span class="mre" data-re="1" title="重新测速当前可见的直播源">重测</span></div>
           <div class="lm-list" id="llist"></div>
-          <div class="lm-foot"><span id="lmCount" class="lan"></span><a href="#/settings" class="lan"><u>在设置里管理</u></a></div>
+          <div class="lm-foot"><a href="#/settings" class="lan"><u>在设置里管理</u></a></div>
         </div></div>
       <input id="chq" class="find" type="search" placeholder="搜频道"></div>
       <div id="liveBody"></div></div>`;
@@ -2690,6 +2715,7 @@ async function renderLive() {
     };
     $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lmRender(); };
     $('#liveMenu').onclick = e => {
+      if (e.target.closest('[data-re]')) { e.stopPropagation(); return lmRetest(); }
       const lt = e.target.closest('[data-ltab]');
       if (lt) { e.stopPropagation(); lm.tab = lt.dataset.ltab; lmRender(); return; }
       const del = e.target.closest('[data-del]');
@@ -3150,7 +3176,7 @@ async function renderSettings() {
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="${esc(kind === 'site' ? x.api : x.url)}" placeholder="${kind === 'site' ? 'https://example.com/api.php/provide/vod' : 'https://…/live.m3u / .m3u8 / .txt'}">
-      <span class="ops">${kind === 'site' ? `${String(x.api).startsWith('local:') ? '<span class="tagl">本地片单</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit" title="把片单存成服务端本地文本再编辑">编辑文本</button>${x.restore && String(x.api).startsWith('local:') ? '<button data-op="undo" title="撤销转换：恢复成转换前的' + (x.restore.group ? '聚合源' : '点播源接口') + '">撤销转换</button>' : ''}<button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
+      <span class="ops">${kind === 'site' ? `${String(x.api).startsWith('local:') ? '<span class="tagl">本地片单</span>' : ''}${flags(x)}${stOf(x)}<button data-op="preview" title="新开页面看这个源自己的首页效果（不含豆瓣）">预览</button><button data-op="test">测速</button><button data-op="edit" title="把片单存成服务端本地文本再编辑">编辑文本</button>${x.restore && String(x.api).startsWith('local:') ? '<button data-op="undo" title="撤销转换：恢复成转换前的' + (x.restore.group ? '聚合源' : '点播源接口') + '">撤销转换</button>' : ''}<button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${flags(x)}${stOf(x)}<button data-op="preview" title="新开页面看这个直播源的分组和频道，可试播">预览</button><button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
         <button data-op="del">删除</button></span></div>`;
   const rowsHtml = (list, kind) => list.map((x, i) => rowHtml(x, kind, i)).join('');
   // 点播源 list: a 聚合源 row carries its members right under it (collapsed); they are not listed on their own any more.
@@ -3528,6 +3554,10 @@ async function renderSettings() {
     if (e.target.classList.contains('sel')) return refreshCount();
     const op = e.target.dataset.op; if (!op) return;
     const r = e.target.closest('.srow');
+    if (op === 'preview') {
+      let cats = ''; try { cats = (JSON.parse(r.dataset.cats || '[]') || []).length ? r.dataset.cats : ''; } catch {}
+      return previewSource(r.closest('#sites') ? 'vod' : 'live', { url: $('.url', r).value, name: $('.nm', r).value, cats });
+    }
     if (op === 'test') {
       if (r.dataset.members) { const ms = blockOf(r).slice(1); return ms.length ? testMany(ms) : toast('这个聚合源没有成员'); }
       return test(r);
@@ -3968,13 +3998,13 @@ function openClipSession() {
   const close = () => { closed = true; clearInterval(poll); clearInterval(tick); ctl.abort(); closeBulkMenus(); m.remove(); clipSess = null; if (!$('#modal')) document.body.style.overflow = ''; };
   // Same per-row controls as the settings list: 少儿 / 成人 checkboxes, then the status.
   const flagsHtml = (x, i) => { const off = x.exists || x.empty ? 'disabled' : ''; return `<label class="flag"><input type="checkbox" class="ckids" data-i="${i}" ${x.kids ? 'checked' : ''} ${off}>少儿</label><label class="flag"><input type="checkbox" class="cadult" data-i="${i}" ${x.adult ? 'checked' : ''} ${off}>成人</label>`; };
-  const keyOf = x => x.kind === 'site' ? (x.text ? 't|' + x.text : x.members ? 'g|' + x.name + '|' + x.members.join(',') : 'a|' + x.api + '|' + (x.categories || []).join(','))
+  const keyOf = x => x.kind === 'site' ? (x.text ? 't|' + x.text : x.members ? 'g|' + x.name + '|' + x.members.join(',') : 'a|' + x.api)
     : (x.text ? 't|' + x.text : 'u|' + x.url);
   const rowHtml = (x, i) => `<div class="crow ${x.exists || x.empty ? 'dim' : ''}" data-i="${i}">
       <input type="checkbox" class="csel" data-i="${i}" ${x.exists || x.empty ? 'disabled' : x._sel ? 'checked' : ''}>
       <input class="cname" data-i="${i}" value="${esc(x.name)}" ${x.exists ? 'disabled' : ''}>
       <span class="curl">${esc(x.kind === 'site' ? x.api || '分享的片单（存成本地文本）' : x.url || '粘贴的频道列表（存成本地文本）')}</span>
-      <span class="cops">${flagsHtml(x, i)}<span class="cstat ${x.exists ? '' : x.ok === true ? 'ok' : x.ok === false ? 'bad' : ''}">${x.exists ? '已存在' : esc(x.info || (x.ok === false ? '不通' : '未验证'))}</span></span></div>`;
+      <span class="cops">${x.members || (x.kind === 'site' && x.text) ? '' : `<button type="button" class="small" data-cprev="${i}" title="新开页面预览，不用先添加">预览</button>`}${flagsHtml(x, i)}<span class="cstat ${x.exists ? '' : x.ok === true ? 'ok' : x.ok === false ? 'bad' : ''}">${x.exists ? '已存在' : esc(x.info || (x.ok === false ? '不通' : '未验证'))}</span></span></div>`;
   const section = (title, kind) => {
     const items = all.map((x, i) => [x, i]).filter(([x]) => x.kind === kind);
     return items.length ? `<h4>${title} · 新 ${items.filter(([x]) => !x.exists).length} / 共 ${items.length}</h4>${items.map(([x, i]) => rowHtml(x, i)).join('')}` : '';
@@ -4010,7 +4040,13 @@ function openClipSession() {
   };
   const merge = r => {
     for (const x of [...r.sites.map(x => ({ ...x, kind: 'site' })), ...r.lives.map(x => ({ ...x, kind: 'live' }))]) {
-      const k = keyOf(x); if (keys.has(k)) continue;
+      const k = keyOf(x);
+      if (keys.has(k)) {
+        // Same link already listed: a plain copy replaces a category-whitelisted one that arrived earlier.
+        const j = all.findIndex(y => keyOf(y) === k);
+        if (j >= 0 && x.kind === 'site' && all[j].categories && !x.categories && !x.members && !x.text) { x._sel = !x.exists && !x.empty && x.ok !== false; all[j] = x; }
+        continue;
+      }
       if (/^0 ?(个频道|部|台)/.test(x.info || '')) { x.empty = true; x.ok = false; }   // 0 channels / 0 titles: never selectable, never default-selected
       keys.add(k); x._sel = !x.exists && !x.empty && x.ok !== false; all.push(x);
     }
@@ -4087,6 +4123,11 @@ function openClipSession() {
   m.oninput = e => { if (e.target.classList.contains('cname')) { const x = all[+e.target.dataset.i]; if (x) x.name = e.target.value; } };
   m.onclick = async e => {
     if (e.target === m && !saving) return close();
+    const pv = e.target.closest('[data-cprev]');
+    if (pv && !saving) {
+      const x = all[+pv.dataset.cprev]; if (!x) return;
+      return previewSource(x.kind === 'site' ? 'vod' : 'live', { url: x.kind === 'site' ? x.api : x.url, name: x.name, text: x.kind === 'live' ? x.text || '' : '', cats: x.categories?.length ? JSON.stringify(x.categories) : '' });
+    }
     const op = e.target.dataset.cbulk; if (!op || saving) return;
     if (op === 'cat') return toggleBulkMenu(e.target);
     closeBulkMenus();

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>预览</title>
+<link rel="icon" href="icon.svg">
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#141414;color:#fff;font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+header{position:sticky;top:0;z-index:5;background:#141414ee;backdrop-filter:blur(8px);padding:12px 20px;border-bottom:1px solid #2a2a2a}
+h1{margin:0;font-size:17px}
+h1 small{color:#8a8a8a;font-weight:400;font-size:12px;margin-left:10px;word-break:break-all}
+.tip{color:#8a8a8a;font-size:12px;margin-top:2px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.chips button{background:#2a2a2a;color:#ddd;border:0;border-radius:16px;padding:4px 12px;font:inherit;font-size:13px;cursor:pointer}
+.chips button.on{background:#e50914;color:#fff}
+main{padding:16px 20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px}
+.card .pic{aspect-ratio:2/3;background:#222 center/cover no-repeat;border-radius:6px;position:relative;overflow:hidden}
+.card .pic em{position:absolute;left:0;right:0;bottom:0;padding:14px 6px 4px;font-style:normal;font-size:12px;background:linear-gradient(transparent,#000c);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .nm{margin-top:6px;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card .sub{color:#8a8a8a;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg{color:#8a8a8a;padding:40px 0;text-align:center}
+.msg.err{color:#f5a623}
+.more{display:block;margin:22px auto;background:#2a2a2a;color:#fff;border:0;border-radius:6px;padding:8px 26px;font:inherit;cursor:pointer}
+.more:disabled{opacity:.5}
+#pl{display:none;position:sticky;top:96px;z-index:4;background:#000;margin:-16px -20px 14px}
+#pl.on{display:block}
+#pl video{width:100%;max-height:44vh;background:#000;display:block}
+#pl .bar{display:flex;gap:10px;align-items:center;padding:6px 20px;font-size:13px;color:#ddd}
+#pl .bar button{margin-left:auto;background:#2a2a2a;color:#fff;border:0;border-radius:4px;padding:2px 10px;cursor:pointer}
+h3{margin:18px 0 8px;font-size:14px;color:#bbb}
+.chs{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+.ch{display:flex;align-items:center;gap:8px;background:#1f1f1f;border:1px solid #2a2a2a;border-radius:6px;padding:8px 10px;cursor:pointer;min-width:0;text-align:left;color:#fff;font:inherit}
+.ch:hover{border-color:#555}.ch.on{border-color:#e50914}
+.ch img{width:28px;height:28px;object-fit:contain;flex:none}
+.ch span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">预览</h1>
+  <div class="tip" id="tip"></div>
+  <div class="chips" id="chips"></div>
+</header>
+<main>
+  <div id="pl"><video id="video" controls playsinline autoplay></video><div class="bar"><span id="now"></span><button id="stop">关闭播放</button></div></div>
+  <div id="body"><div class="msg">加载中…</div></div>
+</main>
+<script src="vendor/hls.min.js"></script>
+<script>
+(() => {
+  const P = new URLSearchParams(location.search), kind = P.get('kind'), name = P.get('name') || '', $ = s => document.querySelector(s);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const body = $('#body'), chips = $('#chips');
+  const token = (() => { try { return localStorage.getItem('tvbox_token') || ''; } catch (e) { return ''; } })();
+  const get = async url => {
+    const r = await fetch(url, { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401) throw new Error('还没登录：先在主页输入访问令牌，再点预览');
+    if (!r.ok) throw new Error(j.error || '请求失败 ' + r.status);
+    return j;
+  };
+  const fail = e => { body.innerHTML = '<div class="msg err">' + esc(e.message || e) + '</div>'; };
+  const setTitle = (sub, tip) => { document.title = '预览 · ' + (name || sub); $('#title').innerHTML = '预览 · ' + esc(name || '未命名') + '<small>' + esc(sub) + '</small>'; $('#tip').textContent = tip; };
+
+  if (kind === 'vod') {
+    const api = P.get('api') || '', cats = P.get('cats') || '';
+    let t = '', page = 1, pagecount = 1, loading = false;
+    const q = extra => '/api/preview/vod?' + new URLSearchParams(Object.assign({ api, name }, cats ? { cats } : {}, extra));
+    setTitle(api, '这个源自己的首页效果（最新 + 它的分类），不含豆瓣榜单。');
+    const card = it => '<div class="card"><div class="pic"' + (it.pic ? ' style="background-image:url(&quot;' + esc(it.pic) + '&quot;)"' : '') + '>' + (it.remarks ? '<em>' + esc(it.remarks) + '</em>' : '') + '</div>'
+      + '<div class="nm" title="' + esc(it.name) + '">' + esc(it.name) + '</div><div class="sub">' + esc([it.year, it.type].filter(Boolean).join(' · ')) + '</div></div>';
+    const load = async (more, cat) => {
+      if (loading) return; loading = true;
+      const btn = $('.more'); if (btn) { btn.disabled = true; btn.textContent = '加载中…'; }
+      try {
+        if (!more) body.innerHTML = '<div class="msg">加载中…</div>';
+        const j = await get(q(Object.assign(cat !== undefined ? { t: cat } : {}, { pg: more ? page + 1 : 1 })));
+        page = j.page; pagecount = j.pagecount;
+        if (!more) {
+          t = cat !== undefined ? cat : j.t;
+          if (!chips.children.length) chips.innerHTML = (cats ? '' : '<button data-t="">最新</button>') + j.categories.map(c => '<button data-t="' + esc(c.id) + '">' + esc(c.name) + '</button>').join('');
+          for (const b of chips.children) b.classList.toggle('on', b.dataset.t === t);
+          $('#tip').textContent = '这个源自己的首页效果（最新 + 它的分类），不含豆瓣榜单。共 ' + (j.total || '?') + ' 部，' + j.categories.length + ' 个分类。';
+          body.innerHTML = j.list.length ? '<div class="grid"></div>' : '<div class="msg">这里没有内容</div>';
+        }
+        const grid = $('.grid'); if (grid) grid.insertAdjacentHTML('beforeend', j.list.map(card).join(''));
+        const old = $('.more'); if (old) old.remove();
+        if (page < pagecount && grid) { body.insertAdjacentHTML('beforeend', '<button class="more">加载更多</button>'); $('.more').onclick = () => load(true); }
+      } catch (e) { if (more) { const b = $('.more'); if (b) { b.disabled = false; b.textContent = '失败，点击重试'; } } else fail(e); }
+      loading = false;
+    };
+    chips.onclick = e => { const b = e.target.closest('button'); if (b) load(false, b.dataset.t); };
+    load(false);
+  } else if (kind === 'live') {
+    const u = P.get('u') || '', stash = P.get('stash') || '';
+    setTitle(u || '粘贴的频道列表', '这个直播源解析出的分组和频道，点频道可以试播（走服务端中转）。');
+    let hls = null;
+    const video = $('#video');
+    const clearOn = () => document.querySelectorAll('.ch.on').forEach(x => x.classList.remove('on'));
+    $('#stop').onclick = () => { if (hls) { hls.destroy(); hls = null; } video.pause(); video.removeAttribute('src'); video.load(); $('#pl').classList.remove('on'); clearOn(); };
+    const play = (ch, el) => {
+      if (hls) { hls.destroy(); hls = null; }
+      clearOn(); el.classList.add('on');
+      $('#pl').classList.add('on'); $('#now').textContent = ch.name;
+      const src = '/hls?u=' + encodeURIComponent(ch.url);
+      if (!/\.(mp4|flv|ts)(\?|$)/i.test(ch.url) && window.Hls && Hls.isSupported()) {
+        hls = new Hls({ xhrSetup: x => { x.withCredentials = true; } });
+        hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) $('#now').textContent = ch.name + '（播不了）'; });
+        hls.loadSource(src); hls.attachMedia(video);
+      } else video.src = src;
+      video.play().catch(() => {});
+    };
+    get('/api/preview/live?' + new URLSearchParams(Object.assign({ name }, stash ? { stash } : { u }))).then(j => {
+      const groups = j.groups || [];
+      if (!groups.length) return fail(new Error('没解析出任何频道'));
+      const total = groups.reduce((n, g) => n + g.channels.length, 0);
+      $('#tip').textContent = groups.length + ' 个分组，共 ' + total + ' 个频道。点频道可以试播（走服务端中转）。';
+      let cur = '';
+      const chBtn = (c, gi, ci) => '<button class="ch" data-g="' + gi + '" data-c="' + ci + '">' + (c.logo ? '<img src="' + esc(c.logo) + '" loading="lazy" onerror="this.remove()">' : '') + '<span>' + esc(c.name) + '</span></button>';
+      const show = () => {
+        chips.innerHTML = '<button data-g=""' + (cur === '' ? ' class="on"' : '') + '>全部 ' + total + '</button>' + groups.map((g, i) => '<button data-g="' + (i + 1) + '"' + (cur === String(i + 1) ? ' class="on"' : '') + '>' + esc(g.name) + ' ' + g.channels.length + '</button>').join('');
+        const cap = cur === '' ? 60 : 1e9;
+        body.innerHTML = groups.map((g, gi) => (cur === '' || cur === String(gi + 1)) ? '<h3>' + esc(g.name) + '</h3><div class="chs">' + g.channels.slice(0, cap).map((c, ci) => chBtn(c, gi, ci)).join('') + '</div>'
+          + (g.channels.length > cap ? '<div class="tip" style="margin-top:6px">只列前 ' + cap + ' 个，点上面的分组看全部 ' + g.channels.length + ' 个</div>' : '') : '').join('');
+      };
+      chips.onclick = e => { const b = e.target.closest('button'); if (b) { cur = b.dataset.g; show(); } };
+      body.onclick = e => { const b = e.target.closest('.ch'); if (b) play(groups[+b.dataset.g].channels[+b.dataset.c], b); };
+      show();
+    }).catch(fail);
+  } else fail(new Error('参数不对'));
+})();
+</script>
+</body>
+</html>

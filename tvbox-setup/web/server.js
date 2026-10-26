@@ -1209,7 +1209,7 @@ async function recognize(input, emit = () => {}) {
   const plainApi = new Set(sites.filter(s => s.api && !s.categories && !s.members).map(s => normApi(s.api)));
   sites = sites.filter(s => {
     if (s.categories && !s.members && plainApi.has(normApi(s.api))) return false;   // the plain copy already covers it
-    const k = s.text ? 't|' + textKey(s.text) : s.members ? 'g|' + s.name + '|' + s.members.join(',') : normApi(s.api) + '|' + (s.categories || []).join(',');
+    const k = s.text ? 't|' + textKey(s.text) : s.members ? 'g|' + s.name + '|' + s.members.join(',') : normApi(s.api);
     return !seenS.has(k) && seenS.add(k);
   })
     .map(s => s.text ? { ...s, exists: haveVodText.has(textKey(s.text)) } : s.members ? { ...s, exists: config.sites.some(g => g.members && g.name === s.name) } : { ...s, api: normApi(s.api), exists: !s.categories && haveApi.has(normApi(s.api)) });
@@ -2879,6 +2879,7 @@ async function captureApi(route, params, req) {
     return { status: cap.code, body };
   } catch (e) { return { status: 502, body: { error: e.message || String(e) } }; }
 }
+const PREVIEWS = path.join(DATA, 'previews');
 async function api(route, q, res, req) {
   const SITES = visibleSites();
   const write = req.method !== 'GET';
@@ -2996,6 +2997,40 @@ async function api(route, q, res, req) {
     const b = await readBody(req);
     const apis = (Array.isArray(b.apis) ? b.apis : []).map(str).filter(u => /^https?:\/\//.test(u)).slice(0, 200);
     return send(res, 200, { results: await classifyApis(apis), ratio: CLS_RATIO });
+  }
+  // Preview a source that is not (or not yet) in the config: its own front page / its channel list, nothing from 豆瓣.
+  // Unfiltered, so only at 安全级别「全部」. Pasted live lists (no URL) are parked in memory for a moment: POST → id.
+  if (route.startsWith('preview/')) {
+    if (safety.level !== 'all') return send(res, 403, { error: '预览只能在安全级别「全部」下使用' });
+    if (route === 'preview/stash' && write) {
+      const id = crypto.randomBytes(6).toString('hex');
+      await fsp.mkdir(PREVIEWS, { recursive: true });
+      // a file, not memory: requests may land on any worker process; old ones are swept away
+      for (const n of await fsp.readdir(PREVIEWS).catch(() => [])) { const p = path.join(PREVIEWS, n); if (Date.now() - (await fsp.stat(p).catch(() => ({ mtimeMs: 0 }))).mtimeMs > 3600e3) fsp.unlink(p).catch(() => {}); }
+      await fsp.writeFile(path.join(PREVIEWS, id), str((await readBody(req)).text));
+      return send(res, 200, { id });
+    }
+    if (route === 'preview/vod') {
+      const api = str(q.get('api')).trim();
+      if (!/^https?:\/\//.test(api) && !LOCAL_VOD.test(api)) return send(res, 400, { error: '不是可预览的接口地址' });
+      let cats = []; try { cats = JSON.parse(q.get('cats') || '[]').map(String).filter(Boolean); } catch {}
+      const site = { key: 'preview', name: str(q.get('name')) || '预览', api, ...(cats.length ? { categories: cats } : {}) };
+      const categoriesList = await categories(site);
+      let t = q.get('t') || '';
+      if (!t && site.categories) t = categoriesList[0]?.id || '';
+      const b = await cmsGet(site, { ac: 'detail', t, pg: q.get('pg') || '1' }, true);
+      return send(res, 200, { categories: categoriesList, t, list: (b.list || []).map(x => item(site, x)),
+        page: Number(b.page) || 1, pagecount: Number(b.pagecount) || 1, total: Number(b.total) || 0 });
+    }
+    if (route === 'preview/live') {
+      const u = str(q.get('u')).trim(), sid = q.get('stash');
+      let text;
+      if (sid) { text = /^[a-f0-9]{12}$/.test(sid) ? await fsp.readFile(path.join(PREVIEWS, sid), 'utf8').catch(() => null) : null; if (text === null) return send(res, 404, { error: '预览内容已过期，回到设置页重新点预览' }); }
+      else if (/^https?:\/\//.test(u) || /^local:[\w.-]+$/.test(u)) text = await liveText(u, true);
+      else return send(res, 400, { error: '不是可预览的直播源地址' });
+      return send(res, 200, parseLive(text, { url: u, name: str(q.get('name')) }));
+    }
+    return send(res, 404, { error: 'unknown api' });
   }
   if (route === 'recognize' && write) return send(res, 200, await recognize((await readBody(req)).text));
   if (route === 'recognize/stream' && write) {
