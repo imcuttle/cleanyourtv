@@ -277,6 +277,7 @@ function normalize(cfg) {
       else if (rs.group && Array.isArray(rs.group.members) && rs.group.members.length) {
         const g = rs.group;
         site.restore = { group: { key: str(g.key).trim(), name: str(g.name).trim(), members: g.members.map(x => str(x).trim()).filter(Boolean),
+          ...(Array.isArray(g.unhide) && g.unhide.length ? { unhide: g.unhide.map(x => str(x).trim()).filter(Boolean) } : {}),
           ...(Number(g.kids) ? { kids: 1 } : {}), ...(Number(g.adult) ? { adult: 1 } : {}), ...(Number(g.hidden) ? { hidden: 1 } : {}) } };
       }
     }
@@ -530,89 +531,140 @@ const lineTexts = d => lines(d).map(l => ({ name: str(l.name).replace(/[@|,\n$#]
 const metaClean = v => str(v).replace(/\s+/g, ' ').replace(/\s##\s/g, ' # ').trim();
 const metaOf = d => ({ pic: metaClean(d.vod_pic), remarks: metaClean(d.vod_remarks), year: metaClean(d.vod_year), area: metaClean(d.vod_area),
   actor: metaClean(d.vod_actor), director: metaClean(d.vod_director), lang: metaClean(d.vod_lang), desc: metaClean(clean(d.vod_content)).slice(0, 600) });
-// Every page of a CMS source (page 1 tells the page count; the rest are fetched a few at a time, one retry each, in page order).
-async function allPages(site, onPage, prog) {
+// ---- 分级拉取: 页越靠前越值钱 (最新更新 / 最热在前面)，所以按「页面等级」分配资源 ----
+//   一档 前 20 页       并发最高、最先拉完        (几十秒内就有一份能用的片单)
+//   二档 21 – 200 页    并发居中
+//   三档 200 页之后     并发最低 (几千页的源这部分最慢，随时可以「先用已拉到的」收工)
+// 页按顺序领取，所以任何时候已拉到的基本都是连续的前 N 页。
+const PAGE_TIERS = [{ upto: 20, conc: 16 }, { upto: 200, conc: 10 }, { upto: Infinity, conc: 6 }];
+const tierOf = pg => PAGE_TIERS.findIndex(t => pg <= t.upto);
+// prog: { done, total, titles, tier: [{done,total}×3], cancel, stop }. cancel → 抛 '已取消'; stop → 正常返回已拉到的。
+// share: 一个任务里有几个源 (聚合源的成员) 一起拉时, 每个源按比例分并发, 总量不变。
+async function allPages(site, onPage, prog, share = 1) {
   const first = await cmsGet(site, { ac: 'detail', pg: '1' }, true, 15000);
   const total = Math.max(1, Number(first.pagecount || 1));
-  if (prog) prog.total += total;
-  const pages = new Array(total + 1); pages[1] = first; onPage(1, first); if (prog) prog.done++;
-  let next = 2, failed = 0;
-  await Promise.all(Array.from({ length: Math.min(6, total - 1) }, async () => {
-    while (next <= total && !prog?.cancel) {
-      const pg = next++;
-      let b = null;
-      for (let k = 0; k < 2 && !b; k++) b = await cmsGet(site, { ac: 'detail', pg: String(pg) }, true, 15000).catch(() => null);
-      if (b) { pages[pg] = b; onPage(pg, b); } else failed++;
-      if (prog) prog.done++;
+  if (prog) {
+    prog.total += total; prog.done++;
+    prog.tier ||= PAGE_TIERS.map(() => ({ done: 0, total: 0 }));
+    for (let pg = 1, t = 0; t < PAGE_TIERS.length; t++) { const hi = Math.min(total, PAGE_TIERS[t].upto); if (hi >= pg) prog.tier[t].total += hi - pg + 1; pg = hi + 1; }
+    prog.tier[0].done++;
+  }
+  onPage(1, first);
+  let next = 2, failed = 0, inflight = 0;
+  const limit = pg => Math.max(1, Math.floor(PAGE_TIERS[tierOf(pg)].conc / share));
+  const stopped = () => prog?.cancel || prog?.stop;
+  await Promise.all(Array.from({ length: Math.max(0, Math.min(PAGE_TIERS[0].conc, total - 1)) }, async () => {
+    while (next <= total && !stopped()) {
+      if (inflight >= limit(next)) { await new Promise(r => setTimeout(r, 40)); continue; }   // 这一档的名额满了, 等一等
+      const pg = next++; inflight++;
+      try {
+        let b = null;
+        for (let k = 0; k < 2 && !b && !stopped(); k++) b = await cmsGet(site, { ac: 'detail', pg: String(pg) }, true, tierOf(pg) === 0 ? 15000 : 10000).catch(() => null);
+        if (b) onPage(pg, b); else if (!stopped()) failed++;
+      } finally { inflight--; }
+      if (prog) { prog.done++; prog.tier[tierOf(pg)].done++; }
     }
   }));
   return { total, failed };
 }
+const catsText = byCat => [...byCat].map(([c, rows]) => `${c},#genre#\n${rows.join('\n')}`).join('\n\n') + '\n';
+// A web source as list text. Returns a collector so the text can be taken at any moment (「先用已拉到的」).
+function vodCollector(api, prog) {
+  const byCat = new Map(), seen = new Set();
+  let n = 0, total = 0, failed = 0;
+  const run = async () => {
+    ({ total, failed } = await allPages({ name: '', api }, (pg, b) => {
+      for (const d of b.list || []) {
+        const ls = lineTexts(d); if (!ls.length) continue;
+        const cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类', name = str(d.vod_name).replace(/[,\n]/g, ' ').trim();
+        if (!name || seen.has(cat + '|' + str(d.vod_id))) continue;
+        seen.add(cat + '|' + str(d.vod_id));
+        if (!byCat.has(cat)) byCat.set(cat, []);
+        byCat.get(cat).push(vodRow(name, ls, metaOf(d))); n++;
+      }
+      if (prog) prog.titles = n;
+    }, prog));
+    if (prog?.cancel) throw new Error('已取消');
+    if (!n) throw new Error('这个源里没有可直接播放的片');
+  };
+  return { run, result: () => ({ text: catsText(byCat), titles: n, pages: prog?.done || total, totalPages: total, failedPages: failed, partial: !!prog?.stop && (prog.done < prog.total) }) };
+}
 async function vodText(api, prog) {
   if (LOCAL_VOD.test(api)) return fsp.readFile(path.join(VODS, path.basename(api.slice(6))), 'utf8');
   if (!/^https?:\/\//.test(api)) throw new Error('不是点播源地址');
-  const byCat = new Map(), seen = new Set();
-  let n = 0;
-  const { total, failed } = await allPages({ name: '', api }, (pg, b) => {
-    for (const d of b.list || []) {
-      const ls = lineTexts(d); if (!ls.length) continue;
-      const cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类', name = str(d.vod_name).replace(/[,\n]/g, ' ').trim();
-      if (!name || seen.has(cat + '|' + str(d.vod_id))) continue;
-      seen.add(cat + '|' + str(d.vod_id));
-      if (!byCat.has(cat)) byCat.set(cat, []);
-      byCat.get(cat).push(vodRow(name, ls, metaOf(d))); n++;
-    }
-    if (prog) prog.titles = n;
-  }, prog);
-  if (prog?.cancel) throw new Error('已取消');
-  if (!n) throw new Error('这个源里没有可直接播放的片');
-  return { text: [...byCat].map(([c, rows]) => `${c},#genre#\n${rows.join('\n')}`).join('\n\n') + '\n', titles: n, pages: total, failedPages: failed };
+  const c = vodCollector(api, prog); await c.run(); return c.result();
 }
 // 聚合源 → one local list: every page of every member, same title (name + year) merged into one row whose lines are all the
 // members' lines (each line named after its member); cover / details come from the first member that has them.
-// Returns { text, titles, merged, members: [{name, ok, n, err}] }.
-async function groupText(g, prog) {
+function groupCollector(g, prog) {
   const merged = new Map(), report = [];
-  await Promise.all(g.memberSites.map(async m => {
-    const r = { name: m.name, ok: false, n: 0, err: '' };
-    report.push(r);
-    try {
-      const { failed } = await allPages(m, (pg, b) => {
-        for (const d of b.list || []) {
-          const it = item(m, d), ls = lineTexts(d).map(l => ({ ...l, name: `${m.name}${l.name && l.name !== m.name ? '·' + l.name : ''}`.replace(/[@|,\n$#]/g, ' ') }));
-          if (!ls.length || !it.name) continue;
-          const k = dedupKey(it), cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类', meta = metaOf(d);
-          if (!merged.has(k)) merged.set(k, { name: it.name.replace(/[,\n]/g, ' ').trim(), cat, lines: [], meta: {} });
-          const t = merged.get(k);
-          t.lines.push(...ls); r.n++;
-          for (const f in meta) if (!t.meta[f] && meta[f]) t.meta[f] = meta[f];
-        }
-        if (prog) prog.titles = merged.size;
-      }, prog);
-      r.ok = true; if (failed) r.err = `${failed} 页没取到`;
-    } catch (e) { r.err = (e.message || '').replace(new RegExp('^' + m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '：'), '').slice(0, 60); }
-  }));
-  if (prog?.cancel) throw new Error('已取消');
-  if (!merged.size) throw new Error('成员里没有取到可直接播放的片' + (report.length ? '（' + report.map(r => `${r.name}：${r.err || '没有内容'}`).join('；') + '）' : ''));
-  const byCat = new Map();
-  for (const t of merged.values()) { if (!byCat.has(t.cat)) byCat.set(t.cat, []); byCat.get(t.cat).push(vodRow(t.name, t.lines, t.meta)); }
-  const multi = [...merged.values()].filter(t => t.lines.length > 1).length;
-  return { text: [...byCat].map(([c, rows]) => `${c},#genre#\n${rows.join('\n')}`).join('\n\n') + '\n', titles: merged.size, merged: multi,
-    members: report.map(r => ({ name: r.name, ok: r.ok, n: r.n, err: r.err })) };
+  const run = async () => {
+    await Promise.all(g.memberSites.map(async m => {
+      const r = { name: m.name, ok: false, n: 0, err: '' };
+      report.push(r);
+      try {
+        const { failed } = await allPages(m, (pg, b) => {
+          for (const d of b.list || []) {
+            const it = item(m, d), ls = lineTexts(d).map(l => ({ ...l, name: `${m.name}${l.name && l.name !== m.name ? '·' + l.name : ''}`.replace(/[@|,\n$#]/g, ' ') }));
+            if (!ls.length || !it.name) continue;
+            const k = dedupKey(it), cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类', meta = metaOf(d);
+            if (!merged.has(k)) merged.set(k, { name: it.name.replace(/[,\n]/g, ' ').trim(), cat, lines: [], meta: {} });
+            const t = merged.get(k);
+            t.lines.push(...ls); r.n++;
+            for (const f in meta) if (!t.meta[f] && meta[f]) t.meta[f] = meta[f];
+          }
+          if (prog) prog.titles = merged.size;
+        }, prog, g.memberSites.length);
+        r.ok = true; if (failed) r.err = `${failed} 页没取到`;
+      } catch (e) { r.err = (e.message || '').replace(new RegExp('^' + m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '：'), '').slice(0, 60); }
+    }));
+    if (prog?.cancel) throw new Error('已取消');
+    if (!merged.size) throw new Error('成员里没有取到可直接播放的片' + (report.length ? '（' + report.map(r => `${r.name}：${r.err || '没有内容'}`).join('；') + '）' : ''));
+  };
+  const result = () => {
+    const byCat = new Map();
+    for (const t of merged.values()) { if (!byCat.has(t.cat)) byCat.set(t.cat, []); byCat.get(t.cat).push(vodRow(t.name, t.lines, t.meta)); }
+    return { text: catsText(byCat), titles: merged.size, merged: [...merged.values()].filter(t => t.lines.length > 1).length,
+      members: report.map(r => ({ name: r.name, ok: r.ok, n: r.n, err: r.err })), partial: !!prog?.stop && prog.done < prog.total };
+  };
+  return { run, result };
 }
-// Progress of a running snapshot (client passes ?job=…, polls vod/progress); closing the request cancels it. Several worker
-// processes serve requests, so the numbers go through a small file in the temp dir rather than a Map.
-const progFile = id => path.join(os.tmpdir(), 'tvbox-vodprog-' + String(id).replace(/[^\w]/g, '').slice(0, 24));
-function startProg(id, res) {
-  const p = { done: 0, total: 0, titles: 0, cancel: false };
-  if (id) {
-    const f = progFile(id);
-    p.timer = setInterval(() => fs.writeFile(f, JSON.stringify({ done: p.done, total: p.total, titles: p.titles }), () => {}), 700);
-    res.on('close', () => { if (!res.writableFinished) p.cancel = true; });
+async function groupText(g, prog) { const c = groupCollector(g, prog); await c.run(); return c.result(); }
+// ---- 拉取任务: 在 leader 进程里跑，页面轮询进度 / 随时「先用已拉到的」/ 关掉页面 (超过 60 秒没人问) 自动取消 ----
+const snapJobs = new Map();
+function snapMembers(keys) {
+  return keys.map(k => config.sites.find(x => x.key === k && x.api && !x.members)).filter(Boolean).filter(m => safety.level === 'all' || !m.adult);
+}
+rpcHandlers.vodSnap = async ({ op, id, api, keys, withText }) => {
+  const j = snapJobs.get(id);
+  if (op === 'start') {
+    if (snapJobs.size >= 4) return { error: '同时拉取的任务太多了，等一个结束再试' };
+    let col;
+    const prog = { done: 0, total: 0, titles: 0, tier: PAGE_TIERS.map(() => ({ done: 0, total: 0 })), cancel: false, stop: false };
+    if (Array.isArray(keys)) {
+      const members = snapMembers(keys);
+      if (!members.length) return { error: '这个聚合源的成员都不在已保存的源里（先点「保存」再试），或当前安全级别下不可用' };
+      col = groupCollector({ memberSites: members }, prog);
+    } else {
+      if (!/^https?:\/\//.test(str(api))) return { error: '不是点播源地址' };
+      col = vodCollector(str(api), prog);
+    }
+    const job = { id, prog, col, state: 'running', error: '', polled: Date.now(), at: Date.now() };
+    snapJobs.set(id, job);
+    job.timer = setInterval(() => { if (job.state === 'running' && Date.now() - job.polled > 60e3) prog.cancel = true; }, 5000);
+    col.run().then(() => { job.state = 'done'; }, e => { job.state = 'error'; job.error = e.message; }).finally(() => {
+      clearInterval(job.timer); setTimeout(() => snapJobs.delete(id), 10 * 60e3).unref?.();
+    });
+    return { id };
   }
-  return p;
-}
-const endProg = (id, p) => { if (!id) return; clearInterval(p.timer); setTimeout(() => fs.unlink(progFile(id), () => {}), 3000); };
+  if (!j) return { error: '这个拉取任务已经结束或不存在' };
+  j.polled = Date.now();
+  if (op === 'stop') { j.prog.stop = true; return { ok: true }; }
+  if (op === 'cancel') { j.prog.cancel = true; return { ok: true }; }
+  const p = j.prog;
+  return { state: j.state, error: j.error, done: p.done, total: p.total, titles: p.titles, tier: p.tier, stopping: p.stop && j.state === 'running',
+    ...(withText && j.state === 'done' ? j.col.result() : {}) };
+};
 async function cmsGet(site, params, fresh = false, ms = 15000) {
   if (site.local) return localCms(params, '');
   if (LOCAL_VOD.test(str(site.api))) return fileCms(site.api, params);
@@ -2915,18 +2967,22 @@ async function api(route, q, res, req) {
     const members = keys.map(k => config.sites.find(x => x.key === k && x.api && !x.members)).filter(Boolean)
       .filter(m => safety.level === 'all' || !m.adult);
     if (!members.length) return send(res, 200, { text: '', error: '这个聚合源的成员都不在已保存的源里（先点「保存」再试），或当前安全级别下不可用' });
-    const prog = startProg(q.get('job'), res);
-    try { return send(res, 200, await groupText({ memberSites: members }, prog)); }
+    try { return send(res, 200, await groupText({ memberSites: members }, { done: 0, total: 0, titles: 0, cancel: false })); }
     catch (e) { return send(res, 200, { text: '', error: e.message }); }
-    finally { endProg(q.get('job'), prog); }
   }
-  if (route === 'vod/progress') { return send(res, 200, readJson(progFile(q.get('job') || ''), { done: 0, total: 0, titles: 0 })); }
+  if (route === 'vod/snap') {
+    const body = write ? await readBody(req) : {};
+    const id = String(write ? body.id : q.get('id') || '').replace(/[^\w]/g, '').slice(0, 24);
+    if (!id) return send(res, 400, { error: 'missing id' });
+    const op = !write ? 'status' : ['start', 'stop', 'cancel'].includes(body.op) ? body.op : '';
+    if (!op) return send(res, 400, { error: 'bad op' });
+    const r = await rpc('vodSnap', { op, id, api: body.api, keys: Array.isArray(body.keys) ? body.keys.map(String) : undefined, withText: q.get('text') === '1' });
+    return send(res, 200, r);
+  }
   if (route === 'vod/raw') {
     if (req.method === 'GET') {
-      const prog = startProg(q.get('job'), res);
-      try { return send(res, 200, await vodText(q.get('api') || '', prog).then(r => typeof r === 'string' ? { text: r } : r)); }
+      try { return send(res, 200, await vodText(q.get('api') || '', { done: 0, total: 0, titles: 0, cancel: false }).then(r => typeof r === 'string' ? { text: r } : r)); }
       catch (e) { return send(res, 200, { text: '', error: e.message }); }
-      finally { endProg(q.get('job'), prog); }
     }
     if (!pinOk(req)) return needPin(res);
     return leader('config', { op: 'vodRaw', body: await readBody(req) });

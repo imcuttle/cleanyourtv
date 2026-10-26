@@ -137,6 +137,9 @@ applyCardMode();
 // Every read belongs to the current page: switching pages aborts what the old one still had in flight, so
 // slow sources / 豆瓣 / covers don't hold the browser's ~6 connections per host and stall the next page.
 let pageCtl = new AbortController();
+let admEs = null;   // 设置页「管理员」的 SSE 连接: 离开设置页 / 关页面就由客户端断开 (回来时 initAdmin 会按进行中的任务重新接上)
+const closeAdminEs = () => { if (admEs) { admEs.close(); admEs = null; } };
+addEventListener('pagehide', closeAdminEs);
 const isAbort = e => e?.name === 'AbortError';
 async function req(method, path, body, retried, signal) {
   const headers = { 'Content-Type': 'application/json' };
@@ -797,6 +800,7 @@ addEventListener('hashchange', () => route({ nav: true }));
 
 let heroTimer, pageTimer;
 function newPage() {
+  closeAdminEs();
   pageCtl.abort();
   pageCtl = new AbortController();
   thumbQueue.length = 0;
@@ -2912,7 +2916,7 @@ const isStandalone = () => matchMedia('(display-mode: standalone)').matches || n
 const admApi = (method, path, body) => req(method, '/api/admin/' + path, body, false, null);
 const fmtUp = sec => { sec = Math.max(0, sec | 0); const d = Math.floor(sec / 86400), h = Math.floor(sec / 3600) % 24, m = Math.floor(sec / 60) % 60; return d ? `${d} 天 ${h} 小时` : h ? `${h} 小时 ${m} 分` : `${m} 分钟`; };
 const ago = t => { const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? '刚刚' : s < 3600 ? Math.floor(s / 60) + ' 分钟前' : s < 86400 ? Math.floor(s / 3600) + ' 小时前' : Math.floor(s / 86400) + ' 天前'; };
-let admPoll = 0, admEs = null;
+let admPoll = 0;
 async function initAdmin() {
   const box = $('#adminSec'); if (!box) return;
   const alive = () => box.isConnected;
@@ -2994,7 +2998,7 @@ async function initAdmin() {
   };
   // 任务进度: SSE (/api/admin/events) 服务端有变化就推; 断了浏览器自动重连。服务重启时连接断开, 重连后 boot 变了就刷新页面, 用上新代码。
   let esBoot = null, esLabel = '', esDownAt = 0;
-  const stopWatch = () => { if (admEs) { admEs.close(); admEs = null; } clearTimeout(admPoll); };
+  const stopWatch = () => { closeAdminEs(); clearTimeout(admPoll); };
   const watch = (label, r) => {
     st.job = r?.job || st.job; busy = ''; paint();
     esLabel = label || esLabel || '操作'; esBoot = st.boot; esDownAt = 0;
@@ -3302,23 +3306,44 @@ async function renderSettings() {
     let editorOf = null;
     m.className = 'modal'; m.id = 'textModal';
     m.innerHTML = `<div class="sheet editor"><div class="body"><h3>编辑「${esc(name)}」<span class="lan" id="chCount"></span></h3>
-      <p class="hint">每行一部：<code>片名,播放地址</code>（m3u8 / mp4）；多集写成 <code>片名,第1集$地址#第2集$地址</code>，或同名再写一行追加一集；分类用 <code>分类名,#genre#</code>。${url.startsWith('local:') ? '' : '网页源这里是它全部页的完整副本（含封面、年份、地区、演员、简介），保存后改读服务端本地文件，不再请求原接口。可在片名行后用 <code> ## pic=封面地址 ## year=2020</code> 补充信息。'}</p>
+      <p class="hint">每行一部：<code>片名,播放地址</code>（m3u8 / mp4）；多集写成 <code>片名,第1集$地址#第2集$地址</code>，或同名再写一行追加一集；分类用 <code>分类名,#genre#</code>。${url.startsWith('local:') ? '' : '网页源这里是它全部页的完整副本（含封面、年份、地区、演员、简介；按页面等级拉取：前 20 页最先拉完，页数很多时可以随时「先用已拉到的」），保存后改读服务端本地文件，不再请求原接口。可在片名行后用 <code> ## pic=封面地址 ## year=2020</code> 补充信息。'}</p>
       <div id="liveText" class="edhost"><p class="lan edload">${url.startsWith('local:') ? '加载中…' : isGroup ? `正在从 ${keys.length} 个成员拉取全部页并合并，片多时需要几分钟…` : '正在从源上拉取全部页，片多时需要几分钟…'}</p></div>
       <div class="actions"><button class="btn red" id="ltSave" disabled>保存</button><button class="small" id="ltCancel">取消</button></div></div></div>`;
     document.body.append(m); document.body.style.overflow = 'hidden';
-    const ctl = new AbortController();
-    const close = () => { editorOf?.dispose(); m.remove(); document.body.style.overflow = ''; ctl.abort(); };
+    const jobId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    let gone = false, started = false;
+    const close = () => { gone = true; editorOf?.dispose(); m.remove(); document.body.style.overflow = ''; if (started) req('POST', '/api/vod/snap', { id: jobId, op: 'cancel' }).catch(() => {}); };
     m.onclick = e => { if (e.target === m) close(); };
     $('#ltCancel').onclick = close;
-    const job = Math.random().toString(36).slice(2);
-    const poll = url.startsWith('local:') ? 0 : setInterval(async () => {
-      const p = await api('vod/progress', { job }).catch(() => null), el = $('.edload', m);
-      if (p && el && p.total) el.textContent = `正在拉取 ${p.done}/${p.total} 页 · 已读到 ${p.titles} 部…`;
-    }, 1000);
-    const j = await (isGroup ? api('vod/group', { keys: keys.join(','), job }, AbortSignal.any([ctl.signal, AbortSignal.timeout(30 * 60e3)])) : api('vod/raw', { api: url, job }, AbortSignal.any([ctl.signal, AbortSignal.timeout(30 * 60e3)]))).catch(e => ({ text: '', error: e.message }));
-    clearInterval(poll);
+    // 网页源: 服务端分级拉取 (前 20 页并发最高、先拉完；之后逐档降速)，这里每秒看一次进度；随时可以「先用已拉到的」收工。
+    const TIER = ['前 20 页', '21–200 页', '200 页之后'];
+    const runSnap = async () => {
+      const st = await req('POST', '/api/vod/snap', isGroup ? { id: jobId, op: 'start', keys } : { id: jobId, op: 'start', api: url }).catch(e => ({ error: e.message }));
+      if (st.error) return { text: '', error: st.error };
+      started = true;
+      const early = document.createElement('button'); early.className = 'small'; early.id = 'ltEarly'; early.textContent = '先用已拉到的';
+      early.title = '停止继续拉取，用已经拉到的部分（靠前的页）先编辑保存';
+      early.onclick = () => { early.disabled = true; early.textContent = '收尾中…'; req('POST', '/api/vod/snap', { id: jobId, op: 'stop' }).catch(() => {}); };
+      $('#ltCancel').before(early);
+      let bad = 0;
+      try {
+        while (!gone) {
+          await new Promise(r => setTimeout(r, 1000));
+          if (gone) break;
+          let p; try { p = await api('vod/snap', { id: jobId }); bad = 0; } catch { if (++bad > 30) return { text: '', error: '和服务端失去联系了' }; continue; }
+          if (p.error && p.state !== 'error') return { text: '', error: p.error };
+          const el = $('.edload', m);
+          if (el && p.total) el.textContent = (p.stopping ? '收尾中…  ' : '正在拉取  ') + p.tier.map((t, i) => t.total ? `${TIER[i]} ${t.done}/${t.total}` : '').filter(Boolean).join(' · ') + `  · 已读到 ${p.titles} 部（靠前的页先拉，越往后越慢，片多时可以「先用已拉到的」）`;
+          if (p.state === 'done') return await api('vod/snap', { id: jobId, text: '1' });
+          if (p.state === 'error') return { text: '', error: p.error };
+        }
+      } finally { early.remove(); }
+      return { text: '', error: '已取消' };
+    };
+    const j = await (url.startsWith('local:') ? api('vod/raw', { api: url }).catch(e => ({ text: '', error: e.message })) : runSnap());
     if (!m.isConnected) return;
     if (j.error) toast(j.error + (isGroup ? '' : '，可以直接手写片单'));
+    else if (j.partial) toast('没有拉完全部页，现在只有靠前的部分' + (j.totalPages ? `（${j.pages}/${j.totalPages} 页）` : '') + '，保存后就只有这些');
     if (isGroup && j.members) {
       const bad = j.members.filter(x => !x.ok);
       toast(`已合并 ${j.titles} 部（其中 ${j.merged} 部有多个来源）${bad.length ? `；${bad.length} 个成员没取到：${bad.map(x => x.name).join('、')}` : ''}`);
@@ -3335,8 +3360,11 @@ async function renderSettings() {
         const out = await req('PUT', '/api/vod/raw', { api: isGroup ? 'new' : url, text: ta.value });
         if (isGroup) {
           // The group row turns into an ordinary 本地片单 source: swap it for a plain row in place (its members stay in the list).
+          // 聚合源转成本地片单后，原来的成员源不再单独露出：标为「隐藏」(只在菜单的「隐藏」标签里)，撤销时再恢复
+          const memRows = blockOf(r).slice(1), unhide = memRows.filter(m => !$('.hid', m).checked).map(m => m.dataset.key);
+          memRows.forEach(m => { $('.hid', m).checked = true; });
           const tpl = document.createElement('div');
-          tpl.innerHTML = rowHtml({ name: $('.nm', r).value.trim(), api: out.api, restore: { group: { key: r.dataset.key, name: $('.nm', r).value.trim(), members: keys, ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}), ...($('.hid', r).checked ? { hidden: 1 } : {}) } }, kids: $('.kids', r).checked ? 1 : 0, adult: $('.adult', r).checked ? 1 : 0, hidden: $('.hid', r).checked ? 1 : 0 }, 'site', +r.dataset.i || 0);
+          tpl.innerHTML = rowHtml({ name: $('.nm', r).value.trim(), api: out.api, restore: { group: { key: r.dataset.key, unhide, name: $('.nm', r).value.trim(), members: keys, ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}), ...($('.hid', r).checked ? { hidden: 1 } : {}) } }, kids: $('.kids', r).checked ? 1 : 0, adult: $('.adult', r).checked ? 1 : 0, hidden: $('.hid', r).checked ? 1 : 0 }, 'site', +r.dataset.i || 0);
           const plain = tpl.firstElementChild;
           blockOf(r).slice(1).forEach(unMem);
           r.replaceWith(plain);
@@ -3434,7 +3462,7 @@ async function renderSettings() {
         const head = tpl.firstElementChild;
         r.replaceWith(head);
         let at = head;
-        for (const m of mem) { m.classList.add('mem'); m.dataset.parent = g.key; m.hidden = true; at.after(m); at = m; }
+        for (const m of mem) { m.classList.add('mem'); m.dataset.parent = g.key; m.hidden = true; at.after(m); at = m; if ((g.unhide || []).includes(m.dataset.key)) $('.hid', m).checked = false; }
       } else {
         $('.url', r).value = rs.api; delete r.dataset.restore; delete r.dataset.from;
       }
