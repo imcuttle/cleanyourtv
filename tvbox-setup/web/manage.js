@@ -268,12 +268,6 @@ function doInfo() {
 // 服务以脱离终端的后台进程运行，输出写进 data/server.log；这个脚本启动完就退出，关窗口 / 退出脚本都不影响服务。
 const LOG = path.join(ROOT, 'data', 'server.log');
 const urlOf = () => `http://localhost:${PORT}`;
-function openBrowser() {
-  try {
-    if (WIN) spawn('cmd', ['/c', 'start', '', urlOf()], { stdio: 'ignore', windowsHide: true }).unref();
-    else spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [urlOf()], { stdio: 'ignore' }).unref();
-  } catch {}
-}
 async function start() {
   fs.mkdirSync(path.dirname(LOG), { recursive: true });
   try { if (fs.statSync(LOG).size > 5 * 1048576) fs.renameSync(LOG, LOG + '.old'); } catch {}   // 日志超过 5MB 就换一个新文件，只留一份旧的
@@ -294,7 +288,6 @@ async function start() {
   ok(`已在后台运行 (进程 ${child.pid})  ${urlOf()}`);
   say(`${C.d}日志: ${LOG}${C.x}`);
   say(`${C.d}关掉这个窗口不影响服务；再次运行本脚本可重启 / 更新 / 停止 / 看日志。${C.x}`);
-  if (process.env.TVBOX_NO_OPEN !== '1') openBrowser();
 }
 function tail(file, n) {
   try { return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).slice(-n); } catch { return []; }

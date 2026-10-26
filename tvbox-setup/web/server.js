@@ -269,6 +269,7 @@ function normalize(cfg) {
     const site = { key, name, type: 1, api };
     if (Number(s.kids)) site.kids = 1;
     if (Number(s.adult)) site.adult = 1;
+    if (Number(s.hidden)) site.hidden = 1;
     if (categories.length) site.categories = categories;
     out.push(site);
   }
@@ -283,11 +284,11 @@ function normalize(cfg) {
     let key = written, n = 2;
     while (keys.has(key)) key = `${written}${n++}`;
     keys.add(key);
-    sites.push({ key, name, type: 1, members, ...(Number(g.kids) ? { kids: 1 } : {}), ...(Number(g.adult) ? { adult: 1 } : {}) });
+    sites.push({ key, name, type: 1, members, ...(Number(g.kids) ? { kids: 1 } : {}), ...(Number(g.adult) ? { adult: 1 } : {}), ...(Number(g.hidden) ? { hidden: 1 } : {}) });
   }
   const liveSeen = new Set();
   const lives = (cfg.lives || []).filter(l => l && typeof l.url === 'string' && l.url.trim())
-    .map(l => ({ name: str(l.name || l.url).trim(), url: l.url.trim(), ...(l.from ? { from: str(l.from) } : {}), ...(Number(l.kids) ? { kids: 1 } : {}), ...(Number(l.adult) ? { adult: 1 } : {}) }))
+    .map(l => ({ name: str(l.name || l.url).trim(), url: l.url.trim(), ...(l.from ? { from: str(l.from) } : {}), ...(Number(l.kids) ? { kids: 1 } : {}), ...(Number(l.adult) ? { adult: 1 } : {}), ...(Number(l.hidden) ? { hidden: 1 } : {}) }))
     .filter(l => { const k = /^https?:\/\//.test(l.url) ? normUrl(l.url) : l.url; return !liveSeen.has(k) && liveSeen.add(k); });
   return { sites, lives };
 }
@@ -450,6 +451,8 @@ async function cachedText(url) {
 //   片名,https://…/a.m3u8                one title; the same title again adds another episode
 //   片名,第1集$https://…#第2集$https://…   episodes written out; // starts a comment
 //   片名,线路甲@@第1集$…#第2集$… || 线路乙@@第1集$…   several lines (sources) of one title, separated by ' || '
+//   片名,… ## pic=封面地址 ## year=2020 ## remarks=更新至8集   optional details after ' ## ' (pic remarks year area actor director lang desc)
+const VOD_META = ['pic', 'remarks', 'year', 'area', 'actor', 'director', 'lang', 'desc'];
 function parseVodText(text) {
   const cats = new Map(), titles = new Map(), bad = [];
   let cat = '未分类';
@@ -461,7 +464,10 @@ function parseVodText(text) {
     const line = raw.trim();
     if (!line || line.startsWith('//') || line.startsWith('#')) return;
     const i = line.indexOf(',');
-    const name = i > 0 ? line.slice(0, i).trim() : '', rest = i > 0 ? line.slice(i + 1).trim() : '';
+    const name = i > 0 ? line.slice(0, i).trim() : '';
+    const [rest = '', ...metaParts] = (i > 0 ? line.slice(i + 1).trim() : '').split(/\s##\s/).map(x => x.trim());
+    const meta = {};
+    for (const p of metaParts) { const j = p.indexOf('='), k = p.slice(0, j).trim(); if (j > 0 && VOD_META.includes(k) && p.slice(j + 1).trim()) meta[k] = p.slice(j + 1).trim(); }
     if (rest === '#genre#') { cat = name || '未分类'; return; }
     const lines = rest.split(/\s\|\|\s/).map((seg, k) => {
       const at = seg.indexOf('@@'), hasName = at > 0 && !/^https?:/i.test(seg.slice(0, at));
@@ -470,8 +476,9 @@ function parseVodText(text) {
     if (!name || !lines.length) return bad.push(n + 1);
     const key = cat + '|' + name;
     if (!cats.has(cat)) cats.set(cat, 'c' + crypto.createHash('sha1').update(cat).digest('hex').slice(0, 6));
-    if (!titles.has(key)) titles.set(key, { id: 'v' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 10), name: name.replace(/[$#]/g, ' '), cat, lines: [] });
+    if (!titles.has(key)) titles.set(key, { id: 'v' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 10), name: name.replace(/[$#]/g, ' '), cat, lines: [], meta: {} });
     const t = titles.get(key);
+    for (const k in meta) if (!t.meta[k]) t.meta[k] = meta[k];
     for (const l of lines) {
       // Same-named line again, or a plain line with no name: more episodes of the first line; a new name is a new line.
       const ex = l.name ? t.lines.find(x => x.name === l.name) : t.lines[0];
@@ -501,61 +508,101 @@ function fileCms(api, params) {
   const page = ids.length ? list : list.slice((pg - 1) * VOD_PAGE, pg * VOD_PAGE);
   return { code: 1, msg: '数据列表', page: pg, pagecount: Math.max(1, Math.ceil(list.length / VOD_PAGE)), limit: String(VOD_PAGE), total: list.length,
     class: hit.cats.map(c => ({ type_id: c.id, type_pid: 0, type_name: c.name })),
-    list: page.map(it => ({ vod_id: it.id, vod_name: it.name, vod_pic: '', type_id: catId.get(it.cat), type_name: it.cat,
-      vod_remarks: it.eps.length > 1 ? `${it.eps.length}集` : '', vod_play_from: it.lines.map(l => l.name).join('$$$'),
+    list: page.map(it => ({ vod_id: it.id, vod_name: it.name, vod_pic: it.meta.pic || '', type_id: catId.get(it.cat), type_name: it.cat,
+      vod_remarks: it.meta.remarks || (it.eps.length > 1 ? `${it.eps.length}集` : ''), vod_year: it.meta.year || '', vod_area: it.meta.area || '',
+      vod_actor: it.meta.actor || '', vod_director: it.meta.director || '', vod_lang: it.meta.lang || '', vod_content: it.meta.desc || '', vod_play_from: it.lines.map(l => l.name).join('$$$'),
       vod_play_url: it.lines.map(l => l.eps.map(e => `${e.name}$${e.url}`).join('#')).join('$$$') })) };
 }
-// Text for the editor: the local file itself, or (for a web source) a snapshot of its first pages — only titles with a directly playable line.
-const vodRow = (name, ls) => `${name},${ls.length === 1 && ls[0].name === '' ? ls[0].eps : ls.map(l => `${l.name}@@${l.eps}`).join(' || ')}`;
+// Text for the editor: the local file itself, or (for a web source) a full copy of it — every page, with cover / year / area / cast / remarks.
+// Only titles with a directly playable line are kept. `prog` ({done,total,titles,cancel}) is updated while it runs.
+const vodRow = (name, ls, meta) => `${name},${ls.length === 1 && ls[0].name === '' ? ls[0].eps : ls.map(l => `${l.name}@@${l.eps}`).join(' || ')}${Object.entries(meta || {}).filter(([, v]) => v).map(([k, v]) => ` ## ${k}=${v}`).join('')}`;
 const lineTexts = d => lines(d).map(l => ({ name: str(l.name).replace(/[@|,\n$#]/g, ' ').trim(), eps: l.episodes.map(e => `${str(e.name).replace(/[$#\n]/g, ' ').trim() || '播放'}$${e.url}`).join('#') }));
-async function vodText(api, progress) {
+const metaClean = v => str(v).replace(/\s+/g, ' ').replace(/\s##\s/g, ' # ').trim();
+const metaOf = d => ({ pic: metaClean(d.vod_pic), remarks: metaClean(d.vod_remarks), year: metaClean(d.vod_year), area: metaClean(d.vod_area),
+  actor: metaClean(d.vod_actor), director: metaClean(d.vod_director), lang: metaClean(d.vod_lang), desc: metaClean(clean(d.vod_content)).slice(0, 600) });
+// Every page of a CMS source (page 1 tells the page count; the rest are fetched a few at a time, one retry each, in page order).
+async function allPages(site, onPage, prog) {
+  const first = await cmsGet(site, { ac: 'detail', pg: '1' }, true, 15000);
+  const total = Math.max(1, Number(first.pagecount || 1));
+  if (prog) prog.total += total;
+  const pages = new Array(total + 1); pages[1] = first; onPage(1, first); if (prog) prog.done++;
+  let next = 2, failed = 0;
+  await Promise.all(Array.from({ length: Math.min(6, total - 1) }, async () => {
+    while (next <= total && !prog?.cancel) {
+      const pg = next++;
+      let b = null;
+      for (let k = 0; k < 2 && !b; k++) b = await cmsGet(site, { ac: 'detail', pg: String(pg) }, true, 15000).catch(() => null);
+      if (b) { pages[pg] = b; onPage(pg, b); } else failed++;
+      if (prog) prog.done++;
+    }
+  }));
+  return { total, failed };
+}
+async function vodText(api, prog) {
   if (LOCAL_VOD.test(api)) return fsp.readFile(path.join(VODS, path.basename(api.slice(6))), 'utf8');
   if (!/^https?:\/\//.test(api)) throw new Error('不是点播源地址');
-  const byCat = new Map();
+  const byCat = new Map(), seen = new Set();
   let n = 0;
-  for (let pg = 1; pg <= 3; pg++) {
-    const b = await cmsGet({ name: '', api }, { ac: 'detail', pg: String(pg) }, true, 12000);
+  const { total, failed } = await allPages({ name: '', api }, (pg, b) => {
     for (const d of b.list || []) {
       const ls = lineTexts(d); if (!ls.length) continue;
       const cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类', name = str(d.vod_name).replace(/[,\n]/g, ' ').trim();
-      if (!name) continue;
+      if (!name || seen.has(cat + '|' + str(d.vod_id))) continue;
+      seen.add(cat + '|' + str(d.vod_id));
       if (!byCat.has(cat)) byCat.set(cat, []);
-      byCat.get(cat).push(vodRow(name, ls)); n++;
+      byCat.get(cat).push(vodRow(name, ls, metaOf(d))); n++;
     }
-    if (pg >= Number(b.pagecount || 1)) break;
-  }
-  if (!n) throw new Error('这个源前几页里没有可直接播放的片');
-  return [...byCat].map(([c, rows]) => `${c},#genre#\n${rows.join('\n')}`).join('\n\n') + '\n';
+    if (prog) prog.titles = n;
+  }, prog);
+  if (prog?.cancel) throw new Error('已取消');
+  if (!n) throw new Error('这个源里没有可直接播放的片');
+  return { text: [...byCat].map(([c, rows]) => `${c},#genre#\n${rows.join('\n')}`).join('\n\n') + '\n', titles: n, pages: total, failedPages: failed };
 }
-// 聚合源 → one local list: every member's first PAGES pages, same title (name + year) merged into one row whose lines are all the
-// members' lines (each line named after its member). Returns { text, titles, merged, members: [{name, ok, n, err}] }.
-async function groupText(g, pages = 3) {
+// 聚合源 → one local list: every page of every member, same title (name + year) merged into one row whose lines are all the
+// members' lines (each line named after its member); cover / details come from the first member that has them.
+// Returns { text, titles, merged, members: [{name, ok, n, err}] }.
+async function groupText(g, prog) {
   const merged = new Map(), report = [];
   await Promise.all(g.memberSites.map(async m => {
     const r = { name: m.name, ok: false, n: 0, err: '' };
     report.push(r);
     try {
-      for (let pg = 1; pg <= pages; pg++) {
-        const b = await cmsGet(m, { ac: 'detail', pg: String(pg) }, true, 12000);
+      const { failed } = await allPages(m, (pg, b) => {
         for (const d of b.list || []) {
           const it = item(m, d), ls = lineTexts(d).map(l => ({ ...l, name: `${m.name}${l.name && l.name !== m.name ? '·' + l.name : ''}`.replace(/[@|,\n$#]/g, ' ') }));
           if (!ls.length || !it.name) continue;
-          const k = dedupKey(it), cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类';
-          if (!merged.has(k)) merged.set(k, { name: it.name.replace(/[,\n]/g, ' ').trim(), cat, lines: [] });
-          merged.get(k).lines.push(...ls); r.n++;
+          const k = dedupKey(it), cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类', meta = metaOf(d);
+          if (!merged.has(k)) merged.set(k, { name: it.name.replace(/[,\n]/g, ' ').trim(), cat, lines: [], meta: {} });
+          const t = merged.get(k);
+          t.lines.push(...ls); r.n++;
+          for (const f in meta) if (!t.meta[f] && meta[f]) t.meta[f] = meta[f];
         }
-        r.ok = true;
-        if (pg >= Number(b.pagecount || 1)) break;
-      }
+        if (prog) prog.titles = merged.size;
+      }, prog);
+      r.ok = true; if (failed) r.err = `${failed} 页没取到`;
     } catch (e) { r.err = (e.message || '').replace(new RegExp('^' + m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '：'), '').slice(0, 60); }
   }));
+  if (prog?.cancel) throw new Error('已取消');
   if (!merged.size) throw new Error('成员里没有取到可直接播放的片' + (report.length ? '（' + report.map(r => `${r.name}：${r.err || '没有内容'}`).join('；') + '）' : ''));
   const byCat = new Map();
-  for (const t of merged.values()) { if (!byCat.has(t.cat)) byCat.set(t.cat, []); byCat.get(t.cat).push(vodRow(t.name, t.lines)); }
+  for (const t of merged.values()) { if (!byCat.has(t.cat)) byCat.set(t.cat, []); byCat.get(t.cat).push(vodRow(t.name, t.lines, t.meta)); }
   const multi = [...merged.values()].filter(t => t.lines.length > 1).length;
   return { text: [...byCat].map(([c, rows]) => `${c},#genre#\n${rows.join('\n')}`).join('\n\n') + '\n', titles: merged.size, merged: multi,
     members: report.map(r => ({ name: r.name, ok: r.ok, n: r.n, err: r.err })) };
 }
+// Progress of a running snapshot (client passes ?job=…, polls vod/progress); closing the request cancels it. Several worker
+// processes serve requests, so the numbers go through a small file in the temp dir rather than a Map.
+const progFile = id => path.join(os.tmpdir(), 'tvbox-vodprog-' + String(id).replace(/[^\w]/g, '').slice(0, 24));
+function startProg(id, res) {
+  const p = { done: 0, total: 0, titles: 0, cancel: false };
+  if (id) {
+    const f = progFile(id);
+    p.timer = setInterval(() => fs.writeFile(f, JSON.stringify({ done: p.done, total: p.total, titles: p.titles }), () => {}), 700);
+    res.on('close', () => { if (!res.writableFinished) p.cancel = true; });
+  }
+  return p;
+}
+const endProg = (id, p) => { if (!id) return; clearInterval(p.timer); setTimeout(() => fs.unlink(progFile(id), () => {}), 3000); };
 async function cmsGet(site, params, fresh = false, ms = 15000) {
   if (site.local) return localCms(params, '');
   if (LOCAL_VOD.test(str(site.api))) return fileCms(site.api, params);
@@ -2837,13 +2884,18 @@ async function api(route, q, res, req) {
     const members = keys.map(k => config.sites.find(x => x.key === k && x.api && !x.members)).filter(Boolean)
       .filter(m => safety.level === 'all' || !m.adult);
     if (!members.length) return send(res, 200, { text: '', error: '这个聚合源的成员都不在已保存的源里（先点「保存」再试），或当前安全级别下不可用' });
-    try { return send(res, 200, await groupText({ memberSites: members })); }
+    const prog = startProg(q.get('job'), res);
+    try { return send(res, 200, await groupText({ memberSites: members }, prog)); }
     catch (e) { return send(res, 200, { text: '', error: e.message }); }
+    finally { endProg(q.get('job'), prog); }
   }
+  if (route === 'vod/progress') { return send(res, 200, readJson(progFile(q.get('job') || ''), { done: 0, total: 0, titles: 0 })); }
   if (route === 'vod/raw') {
     if (req.method === 'GET') {
-      try { return send(res, 200, { text: await vodText(q.get('api') || '') }); }
+      const prog = startProg(q.get('job'), res);
+      try { return send(res, 200, await vodText(q.get('api') || '', prog).then(r => typeof r === 'string' ? { text: r } : r)); }
       catch (e) { return send(res, 200, { text: '', error: e.message }); }
+      finally { endProg(q.get('job'), prog); }
     }
     if (!pinOk(req)) return needPin(res);
     return leader('config', { op: 'vodRaw', body: await readBody(req) });
@@ -2921,7 +2973,7 @@ async function api(route, q, res, req) {
   if (route === 'sites') {
     const inGroup = new Map();
     for (const g of SITES) for (const m of g.memberSites || []) if (!inGroup.has(m.key)) inGroup.set(m.key, g.key);
-    return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: config.lives.map((l, i) => ({ key: String(i), name: l.name, kids: !!l.kids, adult: !!l.adult })).filter(l => safety.level === 'all' || !l.adult) });
+    return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, hidden, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(hidden ? { hidden: true } : {}), ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: config.lives.map((l, i) => ({ key: String(i), name: l.name, kids: !!l.kids, adult: !!l.adult, ...(l.hidden ? { hidden: true } : {}) })).filter(l => safety.level === 'all' || !l.adult) });
   }
   if (route === 'live') {
     const src = config.lives[Number(q.get('src')) || 0];

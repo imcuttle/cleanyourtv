@@ -482,7 +482,8 @@ const isBusy = s => s.group ? !!groupHealth(s)?.busy : healthBusy.has(s.api);
 const isDead = s => { if (s.group) { const g = groupHealth(s); return !!g && !g.busy && g.all && !g.ok; } const h = siteHealth.get(s.api); return !!h && !h.ok && !healthBusy.has(s.api); };
 const healthCell = (s, busy) => busy ? '<b class="hs">测速中…</b>' : s.group ? (g => !g || !g.all ? `<b class="hs">聚合 ${s.group}</b>` : `<b class="hs ${g.ok ? (g.okN === g.n ? 'ok' : '') : 'bad'}" title="成员里能连上的">${g.okN}/${g.n} 可用</b>`)(groupHealth(s)) : !s.api || s.local ? ''
   : !siteHealth.get(s.api) ? '<b class="hs">…</b>' : siteHealth.get(s.api).ok ? `<b class="hs ok">${siteHealth.get(s.api).ms}ms</b>` : '<b class="hs bad">不通</b>';
-let menuQ = '';
+let menuQ = '', menuTab = 'vis';   // menuTab: 'vis' = 可见的点播源, 'hid' = 在设置里标为隐藏的
+const menuTabs = (n, h, tab, attr) => h ? `<div class="mtabs"><button type="button" ${attr}="vis" class="${tab === 'vis' ? 'on' : ''}">可见 ${n}</button><button type="button" ${attr}="hid" class="${tab === 'hid' ? 'on' : ''}">隐藏 ${h}</button></div>` : '';
 function filterMenu() {
   const q = menuQ.toLowerCase(), rows = $$('#siteMenu button[data-k]');
   let n = 0;
@@ -492,7 +493,9 @@ function filterMenu() {
   if (!$('#siteMenu').hidden) requestAnimationFrame(() => pingMenu());
 }
 function renderMenu() {
-  $('#siteMenu').innerHTML = `<div class="msearch"><input id="menuQ" class="find" type="search" placeholder="搜点播源" autocomplete="off" value="${esc(menuQ)}"></div><div class="mhead">点播源 · <span class="mcount"></span><span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + state.sites.filter(s => !s.inGroup).map(s =>
+  const top = state.sites.filter(s => !s.inGroup), nHid = top.filter(s => s.hidden).length;
+  if (!nHid) menuTab = 'vis';
+  $('#siteMenu').innerHTML = menuTabs(top.length - nHid, nHid, menuTab, 'data-mtab') + `<div class="msearch"><input id="menuQ" class="find" type="search" placeholder="搜点播源" autocomplete="off" value="${esc(menuQ)}"></div><div class="mhead">点播源 · <span class="mcount"></span><span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + top.filter(s => !!s.hidden === (menuTab === 'hid')).map(s =>
     `<button data-k="${esc(s.key)}" data-n="${esc((s.name + ' ' + s.key).toLowerCase())}" class="${s.key === state.site ? 'on' : ''}${isDead(s) ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, isBusy(s))}${s.key === 'local' || s.local || state.level !== 'all' ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('')
     + `<div class="mempty" hidden>没有匹配的点播源</div>`;
   filterMenu();
@@ -583,7 +586,7 @@ async function loadSites() {
   renderMenu();
   autoPing();
 }
-$('#siteBtn').onclick = e => { e.stopPropagation(); closeScope(); $('#siteMenu').hidden = !$('#siteMenu').hidden; if (!$('#siteMenu').hidden) healthEpoch = Date.now(); $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) { requestAnimationFrame(() => pingMenu()); if (matchMedia('(hover:hover)').matches) $('#menuQ')?.focus(); $('#siteMenu button.on')?.scrollIntoView({ block: 'nearest' }); } };
+$('#siteBtn').onclick = e => { e.stopPropagation(); closeScope(); if ($('#siteMenu').hidden) { menuTab = state.sites.find(s => s.key === state.site)?.hidden ? 'hid' : 'vis'; renderMenu(); } $('#siteMenu').hidden = !$('#siteMenu').hidden; if (!$('#siteMenu').hidden) healthEpoch = Date.now(); $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) { requestAnimationFrame(() => pingMenu()); if (matchMedia('(hover:hover)').matches) $('#menuQ')?.focus(); $('#siteMenu button.on')?.scrollIntoView({ block: 'nearest' }); } };
 $('#siteMenu').oninput = e => { if (e.target.id === 'menuQ') { menuQ = e.target.value.trim(); filterMenu(); } };
 $('#siteMenu').onkeydown = e => {
   if (e.target.id !== 'menuQ') return;
@@ -591,10 +594,8 @@ $('#siteMenu').onkeydown = e => {
   else if (e.key === 'Escape') { if (menuQ) { e.target.value = menuQ = ''; filterMenu(); } else closeMenu(); }
 };
 $('#siteMenu').onclick = async e => {
-  const cm = e.target.closest('[data-cardmode]');
-  if (cm) { e.stopPropagation(); setCardMode(cm.dataset.cardmode); return; }
-  const csz = e.target.closest('[data-csz]');
-  if (csz) { e.stopPropagation(); setCardScale(csz.dataset.csz === '0' ? 1 : cardScale() + (csz.dataset.csz === '+' ? CS_STEP : -CS_STEP), true); return; }
+  const mt = e.target.closest('[data-mtab]');
+  if (mt) { e.stopPropagation(); menuTab = mt.dataset.mtab; renderMenu(); requestAnimationFrame(() => pingMenu()); return; }
   if (e.target.closest('[data-re]')) { e.stopPropagation(); return pingMenu(true); }
   const del = e.target.closest('[data-del]');
   if (del) {
@@ -2488,10 +2489,10 @@ const thumbIO = new IntersectionObserver(es => es.forEach(e => {
 
 // ---- 直播源 picker: one fixed-size button + a popover (desktop) / bottom sheet (phone). Search, click to switch, × to delete — same feel as the 点播源 menu. ----
 const liveHealth = new Map();           // url -> { ok, text, at } | 'busy'
-const lm = { cfg: [], q: '' };
+const lm = { cfg: [], q: '', tab: 'vis' };
 const liveUrlOf = key => lm.cfg[Number(key)]?.url || '';
 async function lmRefresh() { lm.cfg = (await get('/api/config', null)).lives || []; }
-const lmVisible = () => { const q = lm.q.toLowerCase(); return state.lives.filter(l => !q || l.name.toLowerCase().includes(q)); };
+const lmVisible = () => { const q = lm.q.toLowerCase(); return state.lives.filter(l => !!l.hidden === (lm.tab === 'hid') && (!q || l.name.toLowerCase().includes(q))); };
 // Status text of a row: running → 测速中, waiting in the queue → 排队中, else the last result.
 function lmStatus(k) {
   const h = liveHealth.get(liveUrlOf(k));
@@ -2502,6 +2503,9 @@ function lmStatus(k) {
 function lmRender() {
   const box = $('#llist'); if (!box) return;
   const cur = localStorage.live;
+  const nHid = state.lives.filter(l => l.hidden).length;
+  if (!nHid) lm.tab = 'vis';
+  const tabs = $('#lmTabs'); if (tabs) tabs.innerHTML = menuTabs(state.lives.length - nHid, nHid, lm.tab, 'data-ltab');
   const rows = lmVisible();
   box.innerHTML = rows.map(l => {
     const s = lmStatus(l.key), h = liveHealth.get(liveUrlOf(l.key));
@@ -2589,6 +2593,7 @@ async function renderLive() {
     view.innerHTML = `<div class="page"><div class="pagehead" id="liveHead"><h1>直播</h1>
       <div class="lpick"><button id="liveBtn" class="sitebtn lbtn" type="button"><span id="lmName"></span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <div id="liveMenu" class="menu lmenu" hidden>
+          <div id="lmTabs"></div>
           <div class="lm-top"><input id="lmq" class="find" type="search" placeholder="搜直播源" autocomplete="off"></div>
           <div class="lm-list" id="llist"></div>
           <div class="lm-foot"><span id="lmCount" class="lan"></span><a href="#/settings" class="lan"><u>在设置里管理</u></a></div>
@@ -2597,11 +2602,13 @@ async function renderLive() {
       <div id="liveBody"></div></div>`;
     $('#liveBtn').onclick = async e => {
       e.stopPropagation();
-      const m = $('#liveMenu'); m.hidden = !m.hidden; if (!m.hidden) lmEpoch = Date.now(); $('#liveBtn').classList.toggle('open', !m.hidden);
+      const m = $('#liveMenu'); if (m.hidden) lm.tab = state.lives.find(l => l.key === localStorage.live)?.hidden ? 'hid' : 'vis'; m.hidden = !m.hidden; if (!m.hidden) lmEpoch = Date.now(); $('#liveBtn').classList.toggle('open', !m.hidden);
       if (!m.hidden) { lmRender(); await lmRefresh().catch(() => {}); lmRender(); $('.lpr.on', m)?.scrollIntoView({ block: 'nearest' }); }
     };
     $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lmRender(); };
     $('#liveMenu').onclick = e => {
+      const lt = e.target.closest('[data-ltab]');
+      if (lt) { e.stopPropagation(); lm.tab = lt.dataset.ltab; lmRender(); return; }
       const del = e.target.closest('[data-del]');
       if (del) {
         e.stopPropagation();
@@ -3033,7 +3040,7 @@ async function renderSettings() {
   localP.catch(() => {});
   const [cfg, info, safety] = await Promise.all([get('/api/config'), get('/api/info').catch(() => ({ urls: [] })), get('/api/safety')]);
   const locked = safety.level !== 'all'; // source settings are read-only outside 全部 (the server refuses the writes as well)
-  const flags = x => `<label class="flag"><input type="checkbox" class="kids" ${x.kids ? 'checked' : ''}>少儿</label><label class="flag"><input type="checkbox" class="adult" ${x.adult ? 'checked' : ''}>成人</label>`;
+  const flags = x => `<label class="flag"><input type="checkbox" class="kids" ${x.kids ? 'checked' : ''}>少儿</label><label class="flag"><input type="checkbox" class="adult" ${x.adult ? 'checked' : ''}>成人</label><label class="flag" title="隐藏后只在点播源 / 直播源菜单的「隐藏」标签里"><input type="checkbox" class="hid" ${x.hidden ? 'checked' : ''}>隐藏</label>`;
   const cacheOf = x => testCache.get(String(x.api || x.url || '').trim());
   const stOf = x => { const t = cacheOf(x); return t ? `<span class="${t.cls}" title="${esc(t.title)}">${esc(t.text)}</span>` : '<span class="status"></span>'; };
   const dragH = '<span class="drag" title="按住拖动排序">⋮⋮</span>';
@@ -3077,6 +3084,7 @@ async function renderSettings() {
       <button class="small" data-bulk="invert">反选</button><button class="small" data-bulk="delsel">删除选中</button>
       <span class="bwrap"><button class="small" data-bulk="cat">设分类 ▾</button><div class="bmenu" hidden>
         <button data-bulk="setkids">设为 少儿</button><button data-bulk="setadult">设为 成人</button><button data-bulk="setstd">设为 标准（去掉标记）</button></div></span>
+      <button class="small" data-bulk="hide">隐藏选中</button><button class="small" data-bulk="show">取消隐藏</button>
       <span class="bwrap"><button class="small" data-bulk="more">更多 ▾</button><div class="bmenu" hidden>
         <button data-bulk="merge" title="${kind === 'live' ? '把选中的直播源合成一个频道列表（同分组归并、相同地址去重）' : '把选中的点播源聚合成一个入口：搜索/浏览/播放线路同时覆盖所有成员，同名影片合并'}">${kind === 'live' ? '合并选中' : '聚合选中'}</button>
         <button data-bulk="export">导出选中</button>
@@ -3120,11 +3128,12 @@ async function renderSettings() {
 
   const collect = (box, kind) => $$('.srow', box).map(r => {
     const name = $('.nm', r).value.trim(), url = $('.url', r).value.trim();
-    if (r.dataset.members) return { key: r.dataset.key, name: name || r.dataset.key, type: 1, members: JSON.parse(r.dataset.members), api: 'group', ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}) };
-    if (kind !== 'site') return { name: name || url, url, ...(r.dataset.from ? { from: r.dataset.from } : {}), ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}) };
+    if (r.dataset.members) return { key: r.dataset.key, name: name || r.dataset.key, type: 1, members: JSON.parse(r.dataset.members), api: 'group', ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}), ...($('.hid', r).checked ? { hidden: 1 } : {}) };
+    if (kind !== 'site') return { name: name || url, url, ...(r.dataset.from ? { from: r.dataset.from } : {}), ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}), ...($('.hid', r).checked ? { hidden: 1 } : {}) };
     const s = { key: r.dataset.key || name || url, name: name || url, type: 1, api: url };
     if ($('.kids', r).checked) s.kids = 1;
     if ($('.adult', r).checked) s.adult = 1;
+    if ($('.hid', r).checked) s.hidden = 1;
     if (r.dataset.cats) s.categories = JSON.parse(r.dataset.cats);
     return s;
   }).filter(x => (x.api || x.url));
@@ -3265,7 +3274,7 @@ async function renderSettings() {
     if (st && $('.url', r).value.trim() && !r.dataset.members) { st.className = 'status'; st.textContent = '排队中'; st.title = ''; }
     testQ.push({ r, tok: claim(r), epoch: stopEpoch, done }); sumGroups(); pump();
   })));
-  // 点播源: the title list becomes a text file on the server (a web source starts from a snapshot of its first pages).
+  // 点播源: the title list becomes a text file on the server (a web source starts from a full copy).
   const editVodText = async r => {
     const isGroup = !!r.dataset.members, keys = isGroup ? JSON.parse(r.dataset.members) : [];
     const url = isGroup ? 'group:' + r.dataset.key : $('.url', r).value.trim(), name = $('.nm', r).value.trim() || url;
@@ -3278,14 +3287,21 @@ async function renderSettings() {
     let editorOf = null;
     m.className = 'modal'; m.id = 'textModal';
     m.innerHTML = `<div class="sheet editor"><div class="body"><h3>编辑「${esc(name)}」<span class="lan" id="chCount"></span></h3>
-      <p class="hint">每行一部：<code>片名,播放地址</code>（m3u8 / mp4）；多集写成 <code>片名,第1集$地址#第2集$地址</code>，或同名再写一行追加一集；分类用 <code>分类名,#genre#</code>。${url.startsWith('local:') ? '' : '网页源这里是它前 3 页的快照，保存后改读服务端本地文件，不再请求原接口。'}</p>
-      <div id="liveText" class="edhost"><p class="lan edload">${url.startsWith('local:') ? '加载中…' : isGroup ? `正在从 ${keys.length} 个成员拉取并合并，最多几十秒…` : '正在从源上拉取前 3 页片单，最多十几秒…'}</p></div>
+      <p class="hint">每行一部：<code>片名,播放地址</code>（m3u8 / mp4）；多集写成 <code>片名,第1集$地址#第2集$地址</code>，或同名再写一行追加一集；分类用 <code>分类名,#genre#</code>。${url.startsWith('local:') ? '' : '网页源这里是它全部页的完整副本（含封面、年份、地区、演员、简介），保存后改读服务端本地文件，不再请求原接口。可在片名行后用 <code> ## pic=封面地址 ## year=2020</code> 补充信息。'}</p>
+      <div id="liveText" class="edhost"><p class="lan edload">${url.startsWith('local:') ? '加载中…' : isGroup ? `正在从 ${keys.length} 个成员拉取全部页并合并，片多时需要几分钟…` : '正在从源上拉取全部页，片多时需要几分钟…'}</p></div>
       <div class="actions"><button class="btn red" id="ltSave" disabled>保存</button><button class="small" id="ltCancel">取消</button></div></div></div>`;
     document.body.append(m); document.body.style.overflow = 'hidden';
-    const close = () => { editorOf?.dispose(); m.remove(); document.body.style.overflow = ''; };
+    const ctl = new AbortController();
+    const close = () => { editorOf?.dispose(); m.remove(); document.body.style.overflow = ''; ctl.abort(); };
     m.onclick = e => { if (e.target === m) close(); };
     $('#ltCancel').onclick = close;
-    const j = await (isGroup ? api('vod/group', { keys: keys.join(',') }, AbortSignal.timeout(90e3)) : api('vod/raw', { api: url }, AbortSignal.timeout(40e3))).catch(e => ({ text: '', error: e.message }));
+    const job = Math.random().toString(36).slice(2);
+    const poll = url.startsWith('local:') ? 0 : setInterval(async () => {
+      const p = await api('vod/progress', { job }).catch(() => null), el = $('.edload', m);
+      if (p && el && p.total) el.textContent = `正在拉取 ${p.done}/${p.total} 页 · 已读到 ${p.titles} 部…`;
+    }, 1000);
+    const j = await (isGroup ? api('vod/group', { keys: keys.join(','), job }, AbortSignal.any([ctl.signal, AbortSignal.timeout(30 * 60e3)])) : api('vod/raw', { api: url, job }, AbortSignal.any([ctl.signal, AbortSignal.timeout(30 * 60e3)]))).catch(e => ({ text: '', error: e.message }));
+    clearInterval(poll);
     if (!m.isConnected) return;
     if (j.error) toast(j.error + (isGroup ? '' : '，可以直接手写片单'));
     if (isGroup && j.members) {
@@ -3305,7 +3321,7 @@ async function renderSettings() {
         if (isGroup) {
           // The group row turns into an ordinary 本地片单 source: swap it for a plain row in place (its members stay in the list).
           const tpl = document.createElement('div');
-          tpl.innerHTML = rowHtml({ name: $('.nm', r).value.trim(), api: out.api, kids: $('.kids', r).checked ? 1 : 0, adult: $('.adult', r).checked ? 1 : 0 }, 'site', +r.dataset.i || 0);
+          tpl.innerHTML = rowHtml({ name: $('.nm', r).value.trim(), api: out.api, kids: $('.kids', r).checked ? 1 : 0, adult: $('.adult', r).checked ? 1 : 0, hidden: $('.hid', r).checked ? 1 : 0 }, 'site', +r.dataset.i || 0);
           const plain = tpl.firstElementChild;
           blockOf(r).slice(1).forEach(unMem);
           r.replaceWith(plain);
@@ -3453,6 +3469,12 @@ async function renderSettings() {
       for (const r of sel) { $('.kids', r).checked = op === 'setkids'; $('.adult', r).checked = op === 'setadult'; }
       dirty();
       return toast(`已把 ${sel.length} 个设为${({ setkids: '少儿', setadult: '成人', setstd: '标准' })[op]}，点「保存」后生效`);
+    }
+    if (op === 'hide' || op === 'show') {
+      if (!sel.length) return toast('先勾选要设置的源');
+      for (const r of sel) $('.hid', r).checked = op === 'hide';
+      dirty();
+      return toast(`已${op === 'hide' ? '隐藏' : '取消隐藏'} ${sel.length} 个，点「保存」后生效`);
     }
     if (op === 'all') { rows.forEach(r => { $('.sel', r).checked = btn.checked; }); return refreshCount(); }
     if (op === 'invert') { rows.forEach(r => { $('.sel', r).checked = !$('.sel', r).checked; }); return refreshCount(); }

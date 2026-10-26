@@ -1335,3 +1335,10 @@ html.cs-big .card .img img { image-rendering: auto; }
 .admprog .bar i.ind { animation: admind 1.2s linear infinite; background: linear-gradient(90deg, #333, var(--red), #333); background-size: 200% 100%; }
 @keyframes admind { to { background-position: -200% 0; } }
 .admprog span { display: block; margin-top: 6px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* 点播源 / 直播源菜单顶部: 可见 | 隐藏 */
+.mtabs { display: flex; gap: 2px; padding: 2px; margin: 2px 4px 6px; border-radius: 7px; background: #ffffff14; }
+.menu .mtabs button { flex: 1; width: auto; padding: 5px 10px; border-radius: 5px; font-size: 12px; color: #bbb; text-align: center; justify-content: center; }
+.menu .mtabs button.on { background: #fff; color: #000; font-weight: 700; }
+.menu .mtabs button.on::before { display: none; }
+#lmTabs:empty { display: none; }
