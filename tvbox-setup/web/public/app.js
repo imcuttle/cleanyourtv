@@ -417,7 +417,7 @@ const javLead = name => {
 // a remote source's own cover stays. javdb is still used for the score / cast / title either way.
 const javCoverWanted = it => !!it && (it.site === 'local' || !it.pic);
 const cardPic = it => { const c = it && isJav(it) && javCoverWanted(it) ? javCache[javCode(it.name)] : null; return (c && c.found && c.cover) || it?.pic || ''; };
-const isJav = it => !!(it && (it.adult || javLead(it.name)));
+const isJav = it => !!(it && (it.adult || (it.site && it.site !== 'local' && state.sites.find(s => s.key === it.site)?.adult) || javLead(it.name)));
 const javCache = JSON.parse(localStorage.javdb || '{}');
 // Cached: found for 30 days; "javdb has no such code" for 3 days (a real answer). Errors / unreachable mirrors are never cached.
 // Concurrent asks for one code share a single request.

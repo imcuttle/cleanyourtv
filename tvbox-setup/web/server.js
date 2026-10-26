@@ -850,7 +850,7 @@ async function groupList(g, t, pg) {
     if (e) { e.parts.push([m.key, it.id]); if (!e.pic) e.pic = it.pic; }
     else merged.set(k, { ...it, parts: [[m.key, it.id]] });
   }
-  return { list: [...merged.values()].map(({ parts, ...it }) => ({ ...it, typeId: catKey(it.type), site: g.key, siteName: g.name, id: packParts(parts), sources: parts.length })),
+  return { list: [...merged.values()].map(({ parts, ...it }) => ({ ...it, ...(g.adult ? { adult: 1 } : {}), typeId: catKey(it.type), site: g.key, siteName: g.name, id: packParts(parts), sources: parts.length })),
     page: Number(pg) || 1, pagecount: Math.max(1, ...res.map(r => r.v.pagecount)) };
 }
 async function groupDetail(g, id) {
@@ -3112,17 +3112,19 @@ async function api(route, q, res, req) {
   }
 
   // ---- 点播 ----
+  // 一个源 / 聚合源的搜索范围; 聚合源标了成人时，它的成员在这里也按成人算 (评分 / 封面走 javdb)
+  const scopeSites = only => only.memberSites ? only.memberSites.map(m => only.adult && !m.adult ? { ...m, adult: 1 } : m) : [only];
   if (route === 'person') {
     const name = (q.get('name') || '').trim();
     if (!name) return send(res, 400, { error: '缺少名字' });
     const only = SITES.find(s => s.key === q.get('site'));   // same scope switch as search: one source (a 聚合源 → its members) or all
-    return send(res, 200, { list: await person(name, q.get('role'), only ? (only.memberSites || [only]) : SITES.filter(s => !s.memberSites)) });
+    return send(res, 200, { list: await person(name, q.get('role'), only ? scopeSites(only) : SITES.filter(s => !s.memberSites)) });
   }
   if (route === 'search') {
     const wd = (q.get('wd') || '').trim();
     // `site` limits the search to one source (a 聚合源 → its members); without it every source is searched.
     const only = SITES.find(s => s.key === q.get('site'));
-    const targets = only ? (only.memberSites || [only]) : SITES.filter(s => !s.memberSites);
+    const targets = only ? scopeSites(only) : SITES.filter(s => !s.memberSites);
     // Many sources answer a keyword with loosely related (or unrelated) titles. Keep a title only when the query is in its
     // name / alias, or its name is inside the query (a longer phrase such as "名字 第二季"); actors / directors are covered below.
     const nq = searchNorm(wd);
@@ -3168,6 +3170,7 @@ async function api(route, q, res, req) {
     const gd = await groupDetail(site, q.get('id'));
     if (!gd) return send(res, 404, { error: '没有这部（聚合源里的成员都打不开或没有）' });
     const { first, all } = gd, it = item(first.m, first.d);
+    if (site.adult) it.adult = 1;   // 聚合源整体标了成人: 它的片都算成人 (成员自己没标也一样)
     if (!itemOk(first.m, it)) return send(res, 403, { error: '当前安全级别下不可看' });
     const ls = all.flatMap(({ m, d }) => lines(d).map(l => ({ ...l, name: `${m.name} · ${l.name}` })));
     const d = first.d;
