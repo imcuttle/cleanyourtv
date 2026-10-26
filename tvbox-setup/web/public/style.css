@@ -1342,3 +1342,15 @@ html.cs-big .card .img img { image-rendering: auto; }
 .menu .mtabs button.on { background: #fff; color: #000; font-weight: 700; }
 .menu .mtabs button.on::before { display: none; }
 #lmTabs:empty { display: none; }
+
+/* 设置页的源列表: 地址输入框至少留 260px。容器不够宽 (操作按钮 + 少儿/成人/隐藏 一长串) 时，操作区整行挪到下面，不再把地址框挤没 */
+.srow .url { min-width: 0; }
+#sites, #lives { container-type: inline-size; }
+@media (min-width: 761px) {
+  .srow { grid-template-columns: 74px 140px minmax(260px, 1fr) auto; }
+  @container (max-width: 1180px) {
+    .srow { grid-template-columns: 74px 140px minmax(0, 1fr); }
+    .srow .ops { grid-column: 1 / -1; justify-content: flex-end; overflow-x: auto; scrollbar-width: none; }
+    .srow .ops::-webkit-scrollbar { display: none; }
+  }
+}

@@ -3348,6 +3348,33 @@ async function renderSettings() {
       const bad = j.members.filter(x => !x.ok);
       if (bad.length) toast(`${bad.length} 个成员没取到：${bad.map(x => x.name).join('、')}`);
     }
+    const applyOut = async out => {
+    if (isGroup) {
+      // The group row turns into an ordinary 本地片单 source: swap it for a plain row in place (its members stay in the list).
+      // 聚合源转成本地片单后，原来的成员源不再单独露出：标为「隐藏」(只在菜单的「隐藏」标签里)，撤销时再恢复
+      const memRows = blockOf(r).slice(1), unhide = memRows.filter(m => !$('.hid', m).checked).map(m => m.dataset.key);
+      memRows.forEach(m => { $('.hid', m).checked = true; });
+      const tpl = document.createElement('div');
+      tpl.innerHTML = rowHtml({ name: $('.nm', r).value.trim(), api: out.api, restore: { group: { key: r.dataset.key, unhide, name: $('.nm', r).value.trim(), members: keys, ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}), ...($('.hid', r).checked ? { hidden: 1 } : {}) } }, kids: $('.kids', r).checked ? 1 : 0, adult: $('.adult', r).checked ? 1 : 0, hidden: $('.hid', r).checked ? 1 : 0 }, 'site', +r.dataset.i || 0);
+      const plain = tpl.firstElementChild;
+      blockOf(r).slice(1).forEach(unMem);
+      r.replaceWith(plain);
+      close();
+      await persist(current());
+      toast(`已转成本地片单（${out.titles} 部）`);
+      return renderSettings();
+    }
+    if (!url.startsWith('local:') && !isGroup) { r.dataset.from = url; r.dataset.restore = JSON.stringify({ api: url }); }
+    $('.url', r).value = out.api;
+    close();
+    await persist(current());
+    toast(`已存成本地片单（${out.titles} 部）`);
+    renderSettings();
+    };
+    if (j.big) {   // 片太多: 不放进编辑器，服务端把拉到的临时文件直接存成本地片单
+      try { await applyOut(await req('POST', '/api/vod/snap', { id: jobId, op: 'commit' })); } catch (err) { toast(err.message); close(); }
+      return;
+    }
     const ta = await textEditor($('#liveText'), { value: j.text || '我的分类,#genre#\n片名,https://example.com/movie.m3u8\n剧名,第1集$https://example.com/1.m3u8#第2集$https://example.com/2.m3u8\n' });
     if (!m.isConnected) { ta.dispose(); return; }
     editorOf = ta;
@@ -3356,30 +3383,8 @@ async function renderSettings() {
     $('#ltSave').disabled = false;
     $('#ltSave').onclick = async () => {
       const b = $('#ltSave'); b.disabled = true; b.textContent = '保存中…';
-      try {
-        const out = await req('PUT', '/api/vod/raw', { api: isGroup ? 'new' : url, text: ta.value });
-        if (isGroup) {
-          // The group row turns into an ordinary 本地片单 source: swap it for a plain row in place (its members stay in the list).
-          // 聚合源转成本地片单后，原来的成员源不再单独露出：标为「隐藏」(只在菜单的「隐藏」标签里)，撤销时再恢复
-          const memRows = blockOf(r).slice(1), unhide = memRows.filter(m => !$('.hid', m).checked).map(m => m.dataset.key);
-          memRows.forEach(m => { $('.hid', m).checked = true; });
-          const tpl = document.createElement('div');
-          tpl.innerHTML = rowHtml({ name: $('.nm', r).value.trim(), api: out.api, restore: { group: { key: r.dataset.key, unhide, name: $('.nm', r).value.trim(), members: keys, ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}), ...($('.hid', r).checked ? { hidden: 1 } : {}) } }, kids: $('.kids', r).checked ? 1 : 0, adult: $('.adult', r).checked ? 1 : 0, hidden: $('.hid', r).checked ? 1 : 0 }, 'site', +r.dataset.i || 0);
-          const plain = tpl.firstElementChild;
-          blockOf(r).slice(1).forEach(unMem);
-          r.replaceWith(plain);
-          close();
-          await persist(current());
-          toast(`已转成本地片单（${out.titles} 部）`);
-          return renderSettings();
-        }
-        if (!url.startsWith('local:') && !isGroup) { r.dataset.from = url; r.dataset.restore = JSON.stringify({ api: url }); }
-        $('.url', r).value = out.api;
-        close();
-        await persist(current());
-        toast(`已存成本地片单（${out.titles} 部）`);
-        renderSettings();
-      } catch (err) { toast(err.message); b.disabled = false; b.textContent = '保存'; }
+      try { await applyOut(await req('PUT', '/api/vod/raw', { api: isGroup ? 'new' : url, text: ta.value })); }
+      catch (err) { toast(err.message); b.disabled = false; b.textContent = '保存'; }
     };
   };
   const editText = async r => {

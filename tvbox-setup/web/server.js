@@ -513,7 +513,8 @@ function fileCms(api, params) {
   const ids = str(params.ids).split(',').map(x => x.trim()).filter(Boolean);
   const t = str(params.t), wd = str(params.wd).trim().toLowerCase();
   const catId = new Map(hit.cats.map(c => [c.name, c.id]));
-  const list = ids.length ? hit.items.filter(it => ids.includes(it.id))
+  if (!hit.byId) hit.byId = new Map(hit.items.map(it => [it.id, it]));
+  const list = ids.length ? ids.map(i => hit.byId.get(i)).filter(Boolean)
     : hit.items.filter(it => (!t || catId.get(it.cat) === t) && (!wd || it.name.toLowerCase().includes(wd)));
   const pg = Math.max(1, Number(params.pg) || 1);
   const page = ids.length ? list : list.slice((pg - 1) * VOD_PAGE, pg * VOD_PAGE);
@@ -536,7 +537,8 @@ const metaOf = d => ({ pic: metaClean(d.vod_pic), remarks: metaClean(d.vod_remar
 //   二档 21 – 200 页    并发居中
 //   三档 200 页之后     并发最低 (几千页的源这部分最慢，随时可以「先用已拉到的」收工)
 // 页按顺序领取，所以任何时候已拉到的基本都是连续的前 N 页。
-const PAGE_TIERS = [{ upto: 20, conc: 16 }, { upto: 200, conc: 10 }, { upto: Infinity, conc: 6 }];
+const PAGE_TIERS = [{ upto: 20, conc: 48 }, { upto: 200, conc: 32 }, { upto: Infinity, conc: 24 }];
+// 源站吃不消 (请求失败 / 超时) 时自动降速: 并发乘一个 0.25–1 的系数，失败就打折，连续成功再慢慢恢复。
 const tierOf = pg => PAGE_TIERS.findIndex(t => pg <= t.upto);
 // prog: { done, total, titles, tier: [{done,total}×3], cancel, stop }. cancel → 抛 '已取消'; stop → 正常返回已拉到的。
 // share: 一个任务里有几个源 (聚合源的成员) 一起拉时, 每个源按比例分并发, 总量不变。
@@ -550,8 +552,8 @@ async function allPages(site, onPage, prog, share = 1) {
     prog.tier[0].done++;
   }
   onPage(1, first);
-  let next = 2, failed = 0, inflight = 0;
-  const limit = pg => Math.max(1, Math.floor(PAGE_TIERS[tierOf(pg)].conc / share));
+  let next = 2, failed = 0, inflight = 0, factor = 1, okRun = 0;
+  const limit = pg => Math.max(1, Math.floor(PAGE_TIERS[tierOf(pg)].conc * factor / share));
   const stopped = () => prog?.cancel || prog?.stop;
   await Promise.all(Array.from({ length: Math.max(0, Math.min(PAGE_TIERS[0].conc, total - 1)) }, async () => {
     while (next <= total && !stopped()) {
@@ -560,7 +562,8 @@ async function allPages(site, onPage, prog, share = 1) {
       try {
         let b = null;
         for (let k = 0; k < 2 && !b && !stopped(); k++) b = await cmsGet(site, { ac: 'detail', pg: String(pg) }, true, tierOf(pg) === 0 ? 15000 : 10000).catch(() => null);
-        if (b) onPage(pg, b); else if (!stopped()) failed++;
+        if (b) { onPage(pg, b); if (++okRun >= 20) { okRun = 0; factor = Math.min(1, factor + 0.1); } }
+        else if (!stopped()) { failed++; okRun = 0; factor = Math.max(0.25, factor * 0.7); }
       } finally { inflight--; }
       if (prog) { prog.done++; prog.tier[tierOf(pg)].done++; }
     }
@@ -569,25 +572,43 @@ async function allPages(site, onPage, prog, share = 1) {
 }
 const catsText = byCat => [...byCat].map(([c, rows]) => `${c},#genre#\n${rows.join('\n')}`).join('\n\n') + '\n';
 // A web source as list text. Returns a collector so the text can be taken at any moment (「先用已拉到的」).
-function vodCollector(api, prog) {
-  const byCat = new Map(), seen = new Set();
-  let n = 0, total = 0, failed = 0;
+// 片多的源 (几十万部) 不能全放内存 / 全塞进编辑器: 单源直接边拉边追加写进磁盘上的临时文件；少于 BIG_TITLES 部才把文本交给编辑器。
+const BIG_TITLES = 30000;
+const spoolPath = id => path.join(VODS, '.snap-' + String(id).replace(/[^\w]/g, '') + '.tmp');
+function vodCollector(api, prog, spool) {
+  const byCat = new Map(), seen = new Set(), cats = new Set();
+  let n = 0, total = 0, failed = 0, fd = null;
+  if (spool) fd = fs.openSync(spool, 'w');
   const run = async () => {
-    ({ total, failed } = await allPages({ name: '', api }, (pg, b) => {
-      for (const d of b.list || []) {
-        const ls = lineTexts(d); if (!ls.length) continue;
-        const cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类', name = str(d.vod_name).replace(/[,\n]/g, ' ').trim();
-        if (!name || seen.has(cat + '|' + str(d.vod_id))) continue;
-        seen.add(cat + '|' + str(d.vod_id));
-        if (!byCat.has(cat)) byCat.set(cat, []);
-        byCat.get(cat).push(vodRow(name, ls, metaOf(d))); n++;
-      }
-      if (prog) prog.titles = n;
-    }, prog));
+    try {
+      ({ total, failed } = await allPages({ name: '', api }, (pg, b) => {
+        const page = new Map();
+        for (const d of b.list || []) {
+          const ls = lineTexts(d); if (!ls.length) continue;
+          const cat = str(d.type_name).replace(/[,\n]/g, ' ') || '未分类', name = str(d.vod_name).replace(/[,\n]/g, ' ').trim();
+          const sk = cat + '|' + str(d.vod_id);
+          if (!name || seen.has(sk)) continue;
+          seen.add(sk); cats.add(cat);
+          const row = vodRow(name, ls, metaOf(d));
+          const into = fd !== null ? page : byCat;
+          if (!into.has(cat)) into.set(cat, []);
+          into.get(cat).push(row); n++;
+        }
+        if (fd !== null && page.size) fs.writeSync(fd, catsText(page) + '\n');   // 同一个分类头可以出现多次，读取时自动归到一起
+        if (prog) prog.titles = n;
+      }, prog));
+    } finally { if (fd !== null) { fs.closeSync(fd); fd = null; } }
     if (prog?.cancel) throw new Error('已取消');
     if (!n) throw new Error('这个源里没有可直接播放的片');
   };
-  return { run, result: () => ({ text: catsText(byCat), titles: n, pages: prog?.done || total, totalPages: total, failedPages: failed, partial: !!prog?.stop && (prog.done < prog.total) }) };
+  const result = () => {
+    const base = { titles: n, cats: cats.size, pages: prog?.done || total, totalPages: total, failedPages: failed, partial: !!prog?.stop && (prog.done < prog.total) };
+    if (!spool) return { text: catsText(byCat), ...base };
+    if (n > BIG_TITLES) return { big: true, ...base };
+    const text = fs.readFileSync(spool, 'utf8'); fs.rmSync(spool, { force: true });
+    return { text, ...base };
+  };
+  return { run, result, file: spool || '' };
 }
 async function vodText(api, prog) {
   if (LOCAL_VOD.test(api)) return fsp.readFile(path.join(VODS, path.basename(api.slice(6))), 'utf8');
@@ -596,7 +617,7 @@ async function vodText(api, prog) {
 }
 // 聚合源 → one local list: every page of every member, same title (name + year) merged into one row whose lines are all the
 // members' lines (each line named after its member); cover / details come from the first member that has them.
-function groupCollector(g, prog) {
+function groupCollector(g, prog, spool) {
   const merged = new Map(), report = [];
   const run = async () => {
     await Promise.all(g.memberSites.map(async m => {
@@ -624,10 +645,14 @@ function groupCollector(g, prog) {
   const result = () => {
     const byCat = new Map();
     for (const t of merged.values()) { if (!byCat.has(t.cat)) byCat.set(t.cat, []); byCat.get(t.cat).push(vodRow(t.name, t.lines, t.meta)); }
-    return { text: catsText(byCat), titles: merged.size, merged: [...merged.values()].filter(t => t.lines.length > 1).length,
+    const base = { titles: merged.size, cats: byCat.size, merged: [...merged.values()].filter(t => t.lines.length > 1).length,
       members: report.map(r => ({ name: r.name, ok: r.ok, n: r.n, err: r.err })), partial: !!prog?.stop && prog.done < prog.total };
+    if (!spool || merged.size <= BIG_TITLES) return { text: catsText(byCat), ...base };
+    const fd = fs.openSync(spool, 'w');
+    try { for (const [c, rows] of byCat) for (let i = 0; i < rows.length; i += 2000) fs.writeSync(fd, (i ? '' : `${c},#genre#\n`) + rows.slice(i, i + 2000).join('\n') + '\n\n'); } finally { fs.closeSync(fd); }
+    return { big: true, ...base };
   };
-  return { run, result };
+  return { run, result, file: spool || '' };
 }
 async function groupText(g, prog) { const c = groupCollector(g, prog); await c.run(); return c.result(); }
 // ---- 拉取任务: 在 leader 进程里跑，页面轮询进度 / 随时「先用已拉到的」/ 关掉页面 (超过 60 秒没人问) 自动取消 ----
@@ -644,26 +669,40 @@ rpcHandlers.vodSnap = async ({ op, id, api, keys, withText }) => {
     if (Array.isArray(keys)) {
       const members = snapMembers(keys);
       if (!members.length) return { error: '这个聚合源的成员都不在已保存的源里（先点「保存」再试），或当前安全级别下不可用' };
-      col = groupCollector({ memberSites: members }, prog);
+      col = groupCollector({ memberSites: members }, prog, spoolPath(id));
     } else {
       if (!/^https?:\/\//.test(str(api))) return { error: '不是点播源地址' };
-      col = vodCollector(str(api), prog);
+      col = vodCollector(str(api), prog, spoolPath(id));
     }
     const job = { id, prog, col, state: 'running', error: '', polled: Date.now(), at: Date.now() };
     snapJobs.set(id, job);
     job.timer = setInterval(() => { if (job.state === 'running' && Date.now() - job.polled > 60e3) prog.cancel = true; }, 5000);
     col.run().then(() => { job.state = 'done'; }, e => { job.state = 'error'; job.error = e.message; }).finally(() => {
-      clearInterval(job.timer); setTimeout(() => snapJobs.delete(id), 10 * 60e3).unref?.();
+      clearInterval(job.timer);
+      setTimeout(() => { snapJobs.delete(id); if (!job.committed) fs.rm(spoolPath(id), { force: true }, () => {}); }, job.state === 'done' ? 30 * 60e3 : 10e3).unref?.();
     });
     return { id };
   }
   if (!j) return { error: '这个拉取任务已经结束或不存在' };
   j.polled = Date.now();
   if (op === 'stop') { j.prog.stop = true; return { ok: true }; }
-  if (op === 'cancel') { j.prog.cancel = true; return { ok: true }; }
+  if (op === 'cancel') { j.prog.cancel = true; if (j.state !== 'running' && !j.committed) fs.rm(spoolPath(id), { force: true }, () => {}); return { ok: true }; }
+  if (op === 'commit') {
+    // 片太多 (BIG_TITLES) 的结果不进编辑器: 临时文件直接变成服务端的本地片单文件
+    if (j.state !== 'done') return { error: '还没拉完' };
+    const r = (j.result ||= j.col.result());
+    if (!r.big) return { error: '这个结果要在编辑器里保存' };
+    if (j.committed) return { error: '已经保存过了' };
+    const file = crypto.randomBytes(5).toString('hex') + '.txt';
+    await fsp.rename(spoolPath(id), path.join(VODS, file));
+    j.committed = true;
+    vodFileCache.clear();
+    broadcastReload();
+    return { api: 'local:' + file, titles: r.titles, cats: r.cats };
+  }
   const p = j.prog;
   return { state: j.state, error: j.error, done: p.done, total: p.total, titles: p.titles, tier: p.tier, stopping: p.stop && j.state === 'running',
-    ...(withText && j.state === 'done' ? j.col.result() : {}) };
+    ...(withText && j.state === 'done' ? (j.result ||= j.col.result()) : {}) };
 };
 async function cmsGet(site, params, fresh = false, ms = 15000) {
   if (site.local) return localCms(params, '');
@@ -2977,7 +3016,7 @@ async function api(route, q, res, req) {
     const body = write ? await readBody(req) : {};
     const id = String(write ? body.id : q.get('id') || '').replace(/[^\w]/g, '').slice(0, 24);
     if (!id) return send(res, 400, { error: 'missing id' });
-    const op = !write ? 'status' : ['start', 'stop', 'cancel'].includes(body.op) ? body.op : '';
+    const op = !write ? 'status' : ['start', 'stop', 'cancel', 'commit'].includes(body.op) ? body.op : '';
     if (!op) return send(res, 400, { error: 'bad op' });
     const r = await rpc('vodSnap', { op, id, api: body.api, keys: Array.isArray(body.keys) ? body.keys.map(String) : undefined, withText: q.get('text') === '1' });
     return send(res, 200, r);
