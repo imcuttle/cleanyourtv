@@ -1110,6 +1110,9 @@ html.touchui .pitems { overscroll-behavior: contain; -webkit-overflow-scrolling:
 /* 输入框文字一律白色 (默认黑色在深色底上看不清) */
 input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=button]), textarea, select { color: #fff; caret-color: #fff; }
 select option { color: #fff; background: #222; }
+/* 设置页里不在 .field 里的输入框 (管理员令牌等): 和其它输入框一样的深色底, 不然白字落在浏览器默认的白底上看不见 */
+.actions input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=button]):not([type=file]) { background: #0009; border: 1px solid #ffffff40; padding: 0 12px; height: 36px; border-radius: 6px; font: inherit; font-size: 14px; outline: none; flex: 1 1 200px; min-width: 0; transition: border-color .15s; }
+.actions input:focus { border-color: #fff; }
 input::placeholder, textarea::placeholder { color: #ffffff80; opacity: 1; }
 
 /* 设置页: 复选框不吃文本框的样式 (宽度 / 内边距 / 最小宽度), 小屏下操作按钮换行 */
