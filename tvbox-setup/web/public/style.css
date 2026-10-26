@@ -800,14 +800,12 @@ nav a { white-space: nowrap; }
 .ctxm.ssheet button.on { color: #fff; font-weight: 700; background: #ffffff14; }
 .ctxm.ssheet button.on::after { content: ""; width: 18px; height: 18px; flex: none; background: var(--red); -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12.5l5 5L20 6.5'/%3E%3C/svg%3E") center / contain no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12.5l5 5L20 6.5'/%3E%3C/svg%3E") center / contain no-repeat; }
 @media (max-width: 760px) {
-  .stool { gap: 12px; margin-bottom: 16px; }
-  .stool .sseg { flex: 1 1 100%; }
-  .stool .sseg button { flex: 1 1 0; min-width: 0; padding: 9px 12px; font-size: 14px; text-align: center; }
-  .stool .swt { font-size: 14px; }
-  .stool .ssort { margin-left: auto; font-size: 14px; }
-  .stool > .ssort:only-child { margin-left: 0; }
+  /* 搜索页: 范围 + 合并开关照旧；状态文字(左) + 排序(右) 另起一行。
+     状态文字的基准宽度留出排序的位置，上一行放不下它就必然换行；排序在 DOM 里在状态前面，靠 order 换到右边 */
+  .stool .ssort { order: 2; gap: 6px; font-size: 13px; }
+  .stool .ssort + .lan { order: 1; flex: 1 1 calc(100% - 190px); min-width: 0; margin: 0; }
   .ssort select { display: none; }
-  .ssort .sbtn { display: block; height: 38px; max-width: 150px; padding: 0 34px 0 16px; font-size: 14px; }
+  .ssort .sbtn { display: block; height: 30px; max-width: 120px; padding: 0 28px 0 12px; font-size: 13px; background-position: right 11px center; }
 }
 .card .dup { position: absolute; top: 6px; right: 6px; z-index: 1; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; color: #fff; background: #000b; border: 1px solid #ffffff33; }
 .card .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

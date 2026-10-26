@@ -330,6 +330,13 @@ function liveFilter(groups, src) {
     .filter(g => g.channels.length);
 }
 
+// /api/sites 的内容：点播源 / 直播源列表 + 安全级别。入口页也把它直接写进 HTML（见 serveStatic），首屏不用再等一次请求。
+function sitesBody(SITES, pv) {
+  const inGroup = new Map();
+  for (const g of SITES) for (const m of g.memberSites || []) if (!inGroup.has(m.key)) inGroup.set(m.key, g.key);
+  return { level: safety.level, sites: SITES.map(({ key, name, kids, adult, hidden, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(hidden ? { hidden: true } : {}), ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: pv ? pv.liveList : config.lives.map((l, i) => ({ key: String(i), name: l.name, kids: !!l.kids, adult: !!l.adult, ...(l.hidden ? { hidden: true } : {}) })).filter(l => safety.level === 'all' || !l.adult) };
+}
+
 function visibleSites() {
   const ok = s => safety.level === 'kids' ? s.kids : safety.level === 'standard' ? !s.adult : true;
   const all = new Map(config.sites.filter(s => !s.members).map(s => [s.key, s]));
@@ -731,19 +738,46 @@ rpcHandlers.vodSnap = async ({ op, id, api, keys, withText }) => {
   return { state: j.state, error: j.error, done: p.done, total: p.total, titles: p.titles, tier: p.tier, stopping: p.stop && j.state === 'running',
     ...(withText && j.state === 'done' ? (j.result ||= j.col.result()) : {}) };
 };
+// ---- 上游响应缓存：进程内存 (L1) + 磁盘 (L2，所有 worker 共用) ----
+// 服务按 CPU 核数起多个 worker，请求落在哪个是随机的。只有进程内存缓存时，同一个分类在每个 worker 上各要现拉一次上游（1~4 秒），
+// 表现就是同一个请求忽快忽慢。落盘后，一个 worker 拉过，其它 worker 直接读文件。过了 TTL 就作废，不给旧数据（新片更新要及时）。
+const CMS_DIR = path.join(DATA, 'cms-cache');
+fs.mkdirSync(CMS_DIR, { recursive: true });
+const cmsFile = key => path.join(CMS_DIR, crypto.createHash('sha1').update(key).digest('hex') + '.json');
+async function cmsDiskRead(key) {
+  try { const j = JSON.parse(await fsp.readFile(cmsFile(key), 'utf8')); return j && j.body && j.at ? { at: j.at, body: j.body } : null; } catch { return null; }
+}
+async function cmsDiskWrite(key, e) {
+  const f = cmsFile(key), tmp = f + '.' + process.pid + '.tmp';
+  try { await fsp.writeFile(tmp, JSON.stringify(e)); await fsp.rename(tmp, f); } catch { fsp.unlink(tmp).catch(() => {}); }
+}
+if (IS_LEADER) setInterval(async () => {
+  try {
+    for (const n of await fsp.readdir(CMS_DIR)) {
+      const f = path.join(CMS_DIR, n), st = await fsp.stat(f).catch(() => null);
+      if (st && Date.now() - st.mtimeMs > TTL + 600e3) await fsp.unlink(f).catch(() => {});
+    }
+  } catch {}
+}, 600e3).unref();
 async function cmsGet(site, params, fresh = false, ms = 15000) {
   if (site.local) return localCms(params, '');
   if (LOCAL_VOD.test(str(site.api))) return fileCms(site.api, params);
   const u = new URL(site.api);
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.searchParams.set(k, v);
   const key = u.toString();
-  const hit = cache.get(key);
-  if (!fresh && hit && Date.now() - hit.at < TTL) return hit.body;
+  if (!fresh) {
+    const hit = cache.get(key);
+    if (hit && Date.now() - hit.at < TTL) return hit.body;
+    const d = await cmsDiskRead(key);                  // 别的 worker 刚拉过
+    if (d && Date.now() - d.at < TTL) { cache.set(key, d); return d.body; }
+  }
   return once('j|' + key, async signal => {
     let body;
-    try { body = JSON.parse(await fetchText(key, ms, {}, signal)); } catch (e) { throw new Error(`${site.name}：${/JSON/.test(e.message) ? '返回的不是 JSON' : e.message}`); }
-    cache.set(key, { at: Date.now(), body });
+    try { body = JSON.parse(await fetchText(key, ms, {}, signal)); } catch (e) { throw new Error(site.name + '：' + (/JSON/.test(e.message) ? '返回的不是 JSON' : e.message)); }
+    const e = { at: Date.now(), body };
+    cache.set(key, e);
     if (cache.size > 800) cache.delete(cache.keys().next().value);
+    if (!fresh) cmsDiskWrite(key, e);                  // 扫库用的 fresh 请求体积大且只用一次，不落盘
     return body;
   });
 }
@@ -3182,9 +3216,7 @@ async function api(route, q, res, req) {
 
   // ---- 直播 ----
   if (route === 'sites') {
-    const inGroup = new Map();
-    for (const g of SITES) for (const m of g.memberSites || []) if (!inGroup.has(m.key)) inGroup.set(m.key, g.key);
-    return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, hidden, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(hidden ? { hidden: true } : {}), ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: pv ? pv.liveList : config.lives.map((l, i) => ({ key: String(i), name: l.name, kids: !!l.kids, adult: !!l.adult, ...(l.hidden ? { hidden: true } : {}) })).filter(l => safety.level === 'all' || !l.adult) });
+    return send(res, 200, sitesBody(SITES, pv));
   }
   if (route === 'live') {
     if (pv?.live) {
@@ -3594,7 +3626,13 @@ async function serveStatic(p, req, res) {
     // 入口页由服务端把「已登录 / 未登录」直接写进 <html data-auth>，首帧就是对的状态：不会先闪出内容再盖蒙层，也不会先闪蒙层再消失。
     let c = staticCache.get(file);
     if (!c || c.mtime !== st.mtimeMs) { c = { mtime: st.mtimeMs, text: await fsp.readFile(file, 'utf8') }; staticCache.set(file, c); }
-    const body = Buffer.from(c.text.replace(/<html\b/, `<html data-auth="${req.authed ? 1 : 0}"`));
+    let html = c.text.replace(/<html\b/, `<html data-auth="${req.authed ? 1 : 0}"`);
+    // 已登录且不是预览页（带 ?pv= 的）：把 /api/sites 的内容直接写进页面，前端 loadSites 不用再发请求。< 转义，防止 </script> 截断。
+    if (req.authed && !String(req.url || '').includes('?')) {
+      const boot = JSON.stringify(sitesBody(visibleSites(), null)).replace(/</g, '\\u003c');
+      html = html.replace('<head>', () => '<head>\n<script>window.__BOOT__=' + boot + '</script>');
+    }
+    const body = Buffer.from(html);
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', Vary: 'Cookie', 'Content-Length': body.length });
     return res.end(body);
   }

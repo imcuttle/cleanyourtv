@@ -285,15 +285,36 @@ class DataLoader {
 }
 // The server runs these as GETs inside POST /api/batch and streams back one NDJSON line per request, as it finishes.
 const BATCHABLE = /^(list|categories|detail|search|person|sites|info|live|probe|javdb|douban\/(rating|hot|chart|charts))$/;
+// ---- SWR 的 revalidate：Service Worker 发现批量接口里某条数据变了（{fresh:1}），先改记忆缓存，再通知当前页面里订阅的地方局部刷新 ----
+const swrSubs = [];
+const swrWatch = fn => { swrSubs.push({ sig: pageCtl.signal, fn }); };   // 订阅跟着当前页面：换页就自动失效
+function swrUpdate(key, body) {
+  const q = key.indexOf('?'), route = key.slice(0, q), qs = key.slice(q + 1);
+  const norm = s => { const p = new URLSearchParams(s); p.sort(); return String(p); };
+  for (const [k, hit] of apiMemo) if (k.startsWith(state.level + '|' + route + '?') && norm(k.slice(k.indexOf('?') + 1)) === qs) { hit.v = body; hit.at = Date.now(); }
+  const params = Object.fromEntries(new URLSearchParams(qs));
+  for (let i = swrSubs.length; i--;) {
+    const s = swrSubs[i];
+    if (s.sig.aborted) swrSubs.splice(i, 1); else try { s.fn(route, params, body); } catch {}
+  }
+}
+// 信号来了：用 cache-first 请求（SW 只读缓存，不碰网络）取回刚写入的数据，当场更新依赖它的视图
+async function swrFresh(key) {
+  try {
+    const r = await fetch('/__swr/' + encodeURIComponent(state.level) + '/' + key, { cache: 'force-cache' });
+    if (r.ok) swrUpdate(key, await r.json());
+  } catch {}
+}
 async function fetchBatch(keys, settle, signal) {
   const requests = keys.map(k => { const q = k.indexOf('?'); return { route: k.slice(0, q), q: Object.fromEntries(new URLSearchParams(k.slice(q + 1))) }; });
   const headers = { 'Content-Type': 'application/json' };
   if (sessionStorage.pin) headers['X-Pin'] = sessionStorage.pin;
-  const r = await fetch('/api/batch', { method: 'POST', headers, signal, body: JSON.stringify({ requests }) });
+  const r = await fetch('/api/batch', { method: 'POST', headers, signal, body: JSON.stringify({ requests, lvl: state.level }) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const line = t => {
     if (!t) return;
     let m; try { m = JSON.parse(t); } catch { return; }
+    if (m.fresh) return m.body ? swrUpdate(keys[m.i], m.body) : swrFresh(keys[m.i]);             // Service Worker 先给了旧内容，后台发现服务端有新内容并已写入缓存：cache-first 取出来，只更新对应的那一块
     settle(m.i, m.status >= 400 || m.body?.error ? new Error(m.body?.error || `HTTP ${m.status}`) : m.body);
   };
   if (!r.body || !r.body.getReader) { (await r.text()).split('\n').forEach(line); return; }
@@ -636,8 +657,20 @@ function autoPing() {
   autoPingT = setTimeout(() => testableSites().forEach(s => queueHealth(s)), 1500);
 }
 
-async function loadSites() {
-  const j = await api('sites', {}, null);
+// 点播源列表的三种来源：
+//   'swr' 冷启动：服务端写进页面的 window.__BOOT__（有就直接用，一次请求都不发）；没有就 GET /api/sites，由 Service Worker 做 stale-while-revalidate（先回缓存，后台更新，有变化会发消息）
+//   'net' 一定走网络（Service Worker 更新通知后用）
+//   不传  走原来的批量接口（改完设置之后用）
+let bootSites = window.__BOOT__ || null; delete window.__BOOT__;
+async function fetchSites(cache) {
+  const r = await fetch('/api/sites', { cache });
+  const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+  if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+async function loadSites(src) {
+  const boot = bootSites; bootSites = null;
+  const j = PV || !src ? await api('sites', {}, null) : src === 'swr' && boot ? boot : await fetchSites(src === 'net' ? 'no-store' : 'default');
   state.sites = j.sites; state.lives = j.live; state.level = j.level;
   const sig = j.level + '|' + j.sites.map(s => s.key + '|' + (s.api || '')).join(',');
   if (sig !== memoSig) { memoSig = sig; apiMemo.clear(); }
@@ -658,6 +691,16 @@ async function loadSites() {
   $('#levelTag').className = 'level ' + j.level;
   renderMenu();
   autoPing();
+}
+// Service Worker 在后台发现源列表和刚才用的缓存不一样（比如在别的设备改了安全级别）：重新读一遍，级别或当前源变了就重画当前页
+if (!PV && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', async e => {
+    if (e.data?.type !== 'sites-updated') return;
+    const lv = state.level, site = state.site;
+    try { await loadSites('net'); } catch { return; }
+    if (state.level !== lv || state.site !== site) { state.cats = []; apiMemo.clear(); route(); }
+  });
+  navigator.serviceWorker.startMessages?.();
 }
 $('#siteBtn').onclick = e => { e.stopPropagation(); closeScope(); if ($('#siteMenu').hidden) { menuTab = state.sites.find(s => s.key === state.site)?.hidden ? 'hid' : 'vis'; renderMenu(); } $('#siteMenu').hidden = !$('#siteMenu').hidden; if (!$('#siteMenu').hidden) healthEpoch = Date.now(); $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) { requestAnimationFrame(() => pingMenu()); if (matchMedia('(hover:hover)').matches) $('#menuQ')?.focus(); $('#siteMenu button.on')?.scrollIntoView({ block: 'nearest' }); } };
 $('#siteMenu').oninput = e => { if (e.target.id === 'menuQ') { menuQ = e.target.value.trim(); filterMenu(); } };
@@ -1266,7 +1309,7 @@ async function openByName(name) {
 }
 const normName = s => String(s || '').replace(/[\s·:：\-—!！,，.。]/g, '').toLowerCase();
 function row(title, items, href, sub, opts = {}) {
-  return `<section class="row"><h2>${href ? `<a href="${href}">${esc(title)}</a>` : esc(title)}${opts.extra || ''}</h2>
+  return `<section class="row"${opts.rk ? ` data-rk="${esc(opts.rk)}"` : ''}><h2>${href ? `<a href="${href}">${esc(title)}</a>` : esc(title)}${opts.extra || ''}</h2>
     <div class="track"><button class="arrow l">‹</button>
     <div class="scroller">${items.map(it => card(it, { sub: sub?.(it), removable: opts.removable })).join('')}</div>
     <button class="arrow r">›</button></div></section>`;
@@ -1278,6 +1321,17 @@ document.addEventListener('click', e => {
 });
 
 // ---------- home ----------
+const catsRow = cats => cats.length ? `<section class="row" data-rk="cats"><h2>全部分类</h2><div class="chips">${cats.map(c => `<a class="chip" href="#/cat/${encodeURIComponent(c.id)}/${encodeURIComponent(c.name)}">${esc(c.name)}</a>`).join('')}</div></section>` : '';
+// 把 el 换成新内容，横向滚动的位置保留，新卡片接上评分 / 封面的懒加载
+function swapRow(el, html) {
+  const sc = el.querySelector('.scroller'), left = sc ? sc.scrollLeft : 0;
+  const tmp = document.createElement('div'); tmp.innerHTML = html;
+  const nu = tmp.firstElementChild;
+  if (!nu) return el.remove();
+  el.replaceWith(nu);
+  const ns = nu.querySelector('.scroller'); if (ns) ns.scrollLeft = left;
+  observeRatings(nu); observeJav(nu);
+}
 async function renderHome() {
   if (!keepView) view.innerHTML = `<div class="page pageload">${spinner}</div>`;
   const site = state.site;
@@ -1296,19 +1350,33 @@ async function renderHome() {
       ${cont.length ? row('继续观看', cont, '#/history', it => `${it.siteName} · ${it.epName || ''}`,
         { removable: 'hist', extra: '<button class="hclear" data-clear="hist">清空</button>' }) : ''}
       ${!kids && favList.length ? row('我的收藏', favList, '#/favorites', it => it.siteName, { removable: 'fav' }) : ''}
-      ${row(kids ? '少儿精选' : '最新更新', latest.list, '#/cat//' + encodeURIComponent(kids ? '少儿精选' : '最新更新'))}
+      ${row(kids ? '少儿精选' : '最新更新', latest.list, '#/cat//' + encodeURIComponent(kids ? '少儿精选' : '最新更新'), undefined, { rk: 'latest' })}
       <div id="dbRows"></div>
       <div id="more"></div>
-      ${state.cats.length ? `<section class="row"><h2>全部分类</h2><div class="chips">${state.cats.map(c => `<a class="chip" href="#/cat/${encodeURIComponent(c.id)}/${encodeURIComponent(c.name)}">${esc(c.name)}</a>`).join('')}</div></section>` : ''}
+      ${catsRow(state.cats)}
     </div>`;
   hero(latest.list.slice(0, 6));
   observeRatings(view); observeJav(view);
+  // revalidate 发现新内容：只换对应的那一行（最新更新 + 轮播 / 分类行 / 豆瓣行 / 分类标签），其余不动
+  const builders = new Map([['latest', b => row(kids ? '少儿精选' : '最新更新', b.list, '#/cat//' + encodeURIComponent(kids ? '少儿精选' : '最新更新'), undefined, { rk: 'latest' })]]);
+  swrWatch((route, p, body) => {
+    if (site !== state.site) return;
+    let k = '';
+    if (route === 'list' && p.site === site && !p.pg) k = p.t ? 't:' + p.t : 'latest';
+    else if (route === 'douban/hot') k = 'db:' + p.type;
+    else if (route === 'categories' && p.site === site) { state.cats = body.categories; builders.set('cats', b => catsRow(b.categories)); k = 'cats'; }
+    const build = builders.get(k); if (!build) return;
+    const el = [...view.querySelectorAll('[data-rk]')].find(x => x.dataset.rk === k); if (!el) return;
+    swapRow(el, build(body));
+    if (k === 'latest') { clearInterval(heroTimer); hero(body.list.slice(0, 6)); }
+  });
   if (!kids && !own && !adultSite) {
     // Which 豆瓣 rows to show is a per-browser setting (设置 → 首页豆瓣分类); only the enabled ones are fetched.
     const on = dbRows(), kinds = DB_ROWS.filter(([k]) => on[k]);
     Promise.all(kinds.map(([k]) => api('douban/hot', { type: k }).catch(() => ({ list: [] })))).then(res => {
       if (sig.aborted || !$('#dbRows')) return;
-      $('#dbRows').innerHTML = kinds.map(([, title], i) => res[i].list.length ? row(title, res[i].list.map(x => ({ ...x, douban: 1 })), '#/charts') : '').join('');
+      kinds.forEach(([k, title]) => builders.set('db:' + k, b => b.list.length ? row(title, b.list.map(x => ({ ...x, douban: 1 })), '#/charts', undefined, { rk: 'db:' + k }) : ''));
+      $('#dbRows').innerHTML = kinds.map(([k], i) => res[i].list.length ? builders.get('db:' + k)(res[i]) : '').join('');
     });
   }
   const isWhitelisted = kids || own || state.cats.length <= 8;
@@ -1407,7 +1475,7 @@ async function renderPerson(role, name, scopeKey = '') {
   const first = cards();
   view.innerHTML = `<div class="page">${head}
     <div class="stool">
-      <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>仅 ${esc(curName)}</span></button></div>
+      <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>当前源</span></button></div>
       <label class="swt" title="同名同年的影片只显示一张，点开后在「其他源」里切换"><input type="checkbox" id="sMerge" ${searchMerge.on() ? 'checked' : ''}><i></i><span>合并同名资源</span></label>
       <span class="lan" id="sStatus">${status(first.shown)}</span>
     </div>
@@ -1574,7 +1642,7 @@ async function renderSearch(q, scopeKey = '') {
   const first = cards();
   view.innerHTML = `<div class="page"><div class="pagehead"><h1>“${esc(q)}”</h1>${res.length ? `<button class="small ibs feedgo" data-feed="search" data-q="${esc(q)}" data-scope="${esc(scoped ? scoped.key : '')}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button>` : ''}</div>
     <div class="stool">
-      <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>仅 ${esc(curName)}</span></button></div>
+      <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>当前源</span></button></div>
       <label class="swt" title="同名同年的影片只显示一张，点开后在「其他源」里切换"><input type="checkbox" id="sMerge" ${searchMerge.on() ? 'checked' : ''}><i></i><span>合并同名资源</span></label>
       ${res.length ? sortSelect('sSort', searchSort.get(), '相关性', ['time', 'year', 'quality', 'name'], '换个顺序看搜索结果') : ''}
       <span class="lan" id="sStatus">${status(first.shown)}</span>
@@ -4295,7 +4363,7 @@ if (PV) {
     } catch (e) { add.disabled = false; toast(e.message); }
   };
 }
-loadSites().then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
+loadSites('swr').then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
 
 applyCardMode(); applyCardScale();
 
