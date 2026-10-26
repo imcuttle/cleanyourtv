@@ -2534,7 +2534,7 @@ async function serveMedia(rest, req, res) {
 const updater = require('./updater');
 const BOOT = Date.now();
 const ADMIN_LAST = path.join(DATA, '.admin-last.json');
-const adminJob = { cur: null };
+const adminJob = { cur: null, ctl: null };   // ctl: 当前任务的 AbortController (取消按钮)
 const canRestart = () => !!process.env.TVBOX_SUPERVISED;
 function requestRestart(why) { if (!canRestart()) throw new Error('当前不是由看守进程启动的 (TVBOX_NO_SUPERVISOR=1)，没法自动重启，请手动重启'); process.send({ t: 'restart', why }); }
 const rmContents = async dir => { for (const e of await fsp.readdir(dir).catch(() => [])) await fsp.rm(path.join(dir, e), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}); };
@@ -2563,8 +2563,13 @@ function startJob(kind, fn) {
   const c = adminJob.cur;
   if (c && (c.status === 'running' || c.status === 'restarting')) throw new Error('已有任务在进行：' + ({ update: '更新', restart: '重启', clear: '清理', rotate: '换令牌' }[c.kind] || c.kind));
   const j = adminJob.cur = { id: Date.now(), kind, status: 'running', log: [], at: Date.now(), error: '', needRestart: false };
+  const ctl = adminJob.ctl = new AbortController();
   const log = t => { j.log.push(String(t).slice(0, 300)); if (j.log.length > 60) j.log.shift(); };
-  Promise.resolve().then(() => fn(log, j)).catch(e => { j.status = 'error'; j.error = e.message || String(e); log('✘ ' + j.error); saveLast({ kind, ok: false, error: j.error }); });
+  Promise.resolve().then(() => fn(log, j, ctl.signal)).catch(e => {
+    j.progress = null;
+    if (ctl.signal.aborted || e.message === updater.CANCELLED) { j.status = 'cancelled'; j.error = ''; log('已取消，没有改动任何文件'); saveLast({ kind, ok: false, cancelled: true }); return; }
+    j.status = 'error'; j.error = e.message || String(e); log('✘ ' + j.error); saveLast({ kind, ok: false, error: j.error });
+  });
   return j;
 }
 // 到点重启：先让页面拿到响应
@@ -2594,14 +2599,21 @@ rpcHandlers.admin = async ({ op, body = {} }) => {
     return ok({ job: j });
   }
   if (op === 'update') {
-    const j = startJob('update', async (log, j) => {
+    const j = startJob('update', async (log, j, signal) => {
       log('开始更新…');
-      const r = await updater.apply(log);
+      const r = await updater.apply(log, pr => { j.progress = pr; }, signal);
+      j.progress = null;
       j.result = r;
       if (!r.changed) { j.status = 'done'; log('已是最新，无需重启'); saveLast({ kind: 'update', ok: true, unchanged: true }); return; }
       restartSoon(j, log, '管理员：更新后重启', { from: r.from, to: r.to });
     });
     return ok({ job: j });
+  }
+  if (op === 'cancel') {
+    const c = adminJob.cur;
+    if (!c || c.status !== 'running') return no(409, '没有可以取消的任务');
+    adminJob.ctl?.abort();
+    return ok({ ok: true });
   }
   if (op === 'clear') {
     const what = body.what;
@@ -2738,7 +2750,7 @@ async function api(route, q, res, req) {
     if (sub === 'logout' && write) { res.setHeader('Set-Cookie', `${ADMIN_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`); return send(res, 200, { ok: true }); }
     if (sub === 'status' && !write && !isAdmin) return send(res, 200, { authed: false });
     if (!isAdmin) return send(res, 403, { error: '需要管理员令牌', admin: true });
-    const ops = { status: 'GET', check: 'POST', restart: 'POST', update: 'POST', clear: 'POST', rotate: 'POST' };
+    const ops = { status: 'GET', cancel: 'POST', check: 'POST', restart: 'POST', update: 'POST', clear: 'POST', rotate: 'POST' };
     if (ops[sub] !== req.method) return send(res, 404, { error: 'unknown api' });
     return leader('admin', { op: sub, body: write ? await readBody(req) : {} });
   }

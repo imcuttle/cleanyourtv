@@ -162,6 +162,40 @@ async function stopRunning() {
   ok('已停止旧实例');
 }
 
+// ---------------- 可取消的耗时操作 ----------------
+// 更新 / 检查更新 进行中，按 q / Esc / Ctrl+C 取消并回到菜单 (不计入「Ctrl+C 两次退出」)。
+let busyCtl = null;
+async function cancellable(fn) {
+  const ctl = busyCtl = new AbortController();
+  const raw = !!process.stdin.isTTY;
+  if (raw) process.stdin.setRawMode(true);
+  process.stdin.resume(); process.stdin.setEncoding('utf8');
+  const onKey = k => { if (/[qQ\x03\x1b]/.test(String(k))) ctl.abort(); };
+  process.stdin.on('data', onKey);
+  say(`${C.d}（q / Esc / Ctrl+C 取消，回到菜单）${C.x}`);
+  const gone = new Promise((_, no) => ctl.signal.addEventListener('abort', () => no(new Error(updater.CANCELLED)), { once: true }));
+  try { return await Promise.race([fn(ctl.signal), gone]); }
+  finally {
+    busyCtl = null;
+    process.stdin.removeListener('data', onKey);
+    if (raw) process.stdin.setRawMode(false);
+    process.stdin.pause();
+  }
+}
+const isCancel = e => e && e.message === updater.CANCELLED;
+
+// ---------------- 下载进度 ----------------
+const mb = n => (n / 1048576).toFixed(1);
+let progShown = false;
+function showProgress(p) {
+  const w = 24, f = p.total ? Math.min(1, p.done / p.total) : 0;
+  const bar = p.total ? `${p.approx ? '约 ' : ''}[${'█'.repeat(Math.round(f * w))}${'░'.repeat(w - Math.round(f * w))}] ${(f * 100).toFixed(0)}%  ${mb(p.done)} / ${mb(p.total)} MB` : `${mb(p.done)} MB`;
+  const eta = p.total && p.speed > 0 ? `  剩余 ${Math.max(0, Math.ceil((p.total - p.done) / p.speed))} 秒` : '';
+  process.stdout.write(`\r\x1b[2K  ${bar}  ${(p.speed / 1048576).toFixed(2)} MB/s${eta}  ${C.d}${p.via}${C.x}`);
+  progShown = true;
+}
+function clearLine() { if (progShown) { process.stdout.write('\r\x1b[2K'); progShown = false; } }
+
 // ---------------- 其它操作 ----------------
 async function doCheck() {
   step('检查更新 …');
@@ -258,21 +292,24 @@ const waitEnter = msg => readLine(msg + '\n').then(() => {});
 
 // 返回 true = 做完了
 async function perform(action, interactive) {
-  if (action === 'check') return doCheck();
+  if (action === 'check') return cancellable(() => doCheck());
   if (action === 'info') return doInfo();
   if (action === 'status') return doStatus();
   if (action === 'logs') return doLogs();
-  await stopRunning();                       // 先停: 更新要替换正在使用的文件
-  if (action === 'stop') return ok('已停止');
   if (action === 'update') {
-    try { await updater.apply(t => step(t)); ok('更新完成'); }
+    // 先更新再停服务: 下载 / 校验期间服务照常运行，中途取消或失败不会让服务白白停掉。
+    try { await cancellable(signal => updater.apply(t => { if (!signal.aborted) { clearLine(); step(t); } }, p => { if (!signal.aborted) showProgress(p); }, signal)); clearLine(); ok('更新完成'); }
     catch (e) {
+      clearLine();
+      if (isCancel(e)) { warn('已取消，没有改动任何文件'); return; }
       bad(e.message);
       if (!interactive) throw e;
-      const a = await readLine('当前版本没有被破坏。回车 = 用当前版本启动，n + 回车 = 回到菜单: ');
+      const a = await readLine('当前版本没有被破坏。回车 = 用当前版本重启，n + 回车 = 回到菜单: ');
       if (/^n/i.test(a)) return;
     }
   }
+  await stopRunning();
+  if (action === 'stop') return ok('已停止');
   await start();
 }
 
@@ -285,13 +322,13 @@ async function perform(action, interactive) {
     saveState({ last: action });
     try { await perform(action, false); process.exit(0); } catch (e) { bad(e.message); process.exit(1); }
   }
-  process.on('SIGINT', () => { if (viewing) return; if (ctrlC()) return; process.stdout.write(`\n${C.y}再按一次 Ctrl+C 退出${C.x}\n`); });   // 菜单以外 (等回车 / 执行中) 的 Ctrl+C
+  process.on('SIGINT', () => { if (viewing) return; if (busyCtl) { busyCtl.abort(); return; } if (ctrlC()) return; process.stdout.write(`\n${C.y}再按一次 Ctrl+C 退出${C.x}\n`); });   // 菜单以外 (等回车 / 执行中) 的 Ctrl+C
   for (;;) {
     const action = await choose(loadState().last);
     saveState({ last: action });
     say('');
     viewing = action === 'logs';
-    try { await perform(action, true); } catch (e) { bad(e.message); }
+    try { await perform(action, true); } catch (e) { if (isCancel(e)) warn('已取消'); else bad(e.message); }
     viewing = false;
     if (action !== 'logs') await waitEnter(`\n${C.d}按回车回到菜单${C.x}`);
     say('');

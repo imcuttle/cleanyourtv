@@ -2938,7 +2938,7 @@ async function initAdmin() {
       return;
     }
     const u = st.update, j = st.job, run = j && (j.status === 'running' || j.status === 'restarting') || !!busy;
-    const last = st.last && !j ? `<p class="lan">上一次操作：${{ update: '更新', restart: '重启', clear: '清理缓存', rotate: '换令牌' }[st.last.kind] || st.last.kind}${st.last.ok ? '成功' + (st.last.to ? `（${esc(st.last.from || '?')} → ${esc(st.last.to)}）` : st.last.unchanged ? '（已是最新）' : '') : '失败：' + esc(st.last.error || '')} · ${ago(st.last.at)}</p>` : '';
+    const last = st.last && !j ? `<p class="lan">上一次操作：${st.last.cancelled ? '' : ''}${{ update: '更新', restart: '重启', clear: '清理缓存', rotate: '换令牌' }[st.last.kind] || st.last.kind}${st.last.cancelled ? '已取消' : st.last.ok ? '成功' + (st.last.to ? `（${esc(st.last.from || '?')} → ${esc(st.last.to)}）` : st.last.unchanged ? '（已是最新）' : '') : '失败：' + esc(st.last.error || '')} · ${ago(st.last.at)}</p>` : '';
     box.innerHTML = `<h2>管理员 <span class="tagl">已登录</span></h2>
       <div class="admgrid">
         <span>版本</span><div>${verTxt(st.ver)}</div>
@@ -2947,6 +2947,7 @@ async function initAdmin() {
         <span>缓存</span><div>转码 ${fmtSize(st.caches.transcode)} · 封面图片 ${fmtSize(st.caches.covers)}${st.caches.tmp ? ' · 更新临时文件 ' + fmtSize(st.caches.tmp) : ''}</div>
       </div>
       <div class="actions">
+        ${j && j.status === 'running' && j.kind === 'update' ? '<button class="small" id="admCancel">取消更新</button>' : ''}
         <button class="small" id="admCheck" ${run ? 'disabled' : ''}>检查更新</button>
         <button class="btn ${u && u.available ? 'red' : 'more'}" id="admUpdate" ${run ? 'disabled' : ''}>更新并重启</button>
         <button class="small" id="admRestart" ${run || !st.canRestart ? 'disabled' : ''}>重启服务</button>
@@ -2957,7 +2958,9 @@ async function initAdmin() {
         <div class="actions"><button class="small" data-adc="transcode" ${run ? 'disabled' : ''}>清理转码缓存</button><button class="small" data-adc="covers" ${run || !st.canRestart ? 'disabled' : ''} title="清理后会自动重启">清理封面图片缓存（会重启）</button>
           <button class="small" data-adr="access" ${run || !st.canRestart ? 'disabled' : ''}>换访问令牌</button><button class="small" data-adr="admin" ${run || !st.canRestart ? 'disabled' : ''}>换管理员令牌</button></div>
         <p class="hint">换访问令牌后所有浏览器要重新输入；换管理员令牌后需要用新的重新登录。</p></details>
+      ${j && j.progress ? (pg => `<div class="admprog"><div class="bar"><i style="width:${pg.total ? Math.min(100, pg.done / pg.total * 100).toFixed(1) : 100}%" class="${pg.total ? '' : 'ind'}"></i></div><span>${pg.total ? Math.round(pg.done / pg.total * 100) + '% · ' : ''}${(pg.done / 1048576).toFixed(1)}${pg.total ? ' / ' + (pg.total / 1048576).toFixed(1) : ''} MB · ${(pg.speed / 1048576).toFixed(2)} MB/s${pg.total && pg.speed > 0 ? ' · 剩余 ' + Math.max(0, Math.ceil((pg.total - pg.done) / pg.speed)) + ' 秒' : ''} · ${esc(pg.via)}</span></div>`)(j.progress) : ''}
       ${j ? `<pre class="admlog ${j.status}">${jobTxt(j)}${busy ? '\n' + esc(busy) : ''}</pre>` : busy ? `<pre class="admlog">${esc(busy)}</pre>` : ''}${last}`;
+    const cn = $('#admCancel', box); if (cn) cn.onclick = async () => { cn.disabled = true; try { await admApi('POST', 'cancel', {}); } catch (e) { toast(e.message); } };
     $('#admOut', box).onclick = async () => { delete localStorage.adminToken; await admApi('POST', 'logout', {}).catch(() => {}); st = { authed: false }; paint(); };
     $('#admCheck', box).onclick = async () => {
       busy = '正在检查更新…'; paint(); checkErr = '';
@@ -2996,7 +2999,7 @@ async function initAdmin() {
         if (x.boot !== boot0) { clearInterval(admPoll); toast(label + '完成，服务已重启'); setTimeout(() => location.reload(), 400); return; }
         st = x; paint();
         const j = x.job;
-        if (j && (j.status === 'done' || j.status === 'error')) { clearInterval(admPoll); if (j.status === 'done') toast(label + '完成'); else toast(j.error || label + '失败'); }
+        if (j && ['done', 'error', 'cancelled'].includes(j.status)) { clearInterval(admPoll); toast(j.status === 'done' ? label + '完成' : j.status === 'cancelled' ? '已取消' : (j.error || label + '失败')); }
       } catch { if (!down) { down = true; busy = '服务重启中，等待重新连接…'; paint(); } }
       if (n > 150) { clearInterval(admPoll); busy = '等了很久服务还没回来，看看启动窗口 / 日志，或手动刷新页面。'; paint(); }
     }, 1000);

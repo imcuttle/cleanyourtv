@@ -1,15 +1,18 @@
 // 更新：检查是否有新版本 / 应用更新。网页管理员页面 (server.js) 和 manage.js 共用。
 //   git 仓库       检查 = git fetch 后比较 HEAD 和上游；更新 = git pull --ff-only
 //   非 git (zip)   检查 = GitHub API 取默认分支最新提交；更新 = 下载该提交的 zip → 解压 → 校验 → 带回滚地替换程序文件
+// 下载加速 (国内 codeload.github.com 很慢): 直连和几个 GitHub 加速镜像同时发起，谁先出数据用谁，其它的立刻中断；带进度 (已下载 / 总大小 / 速度 / 来源)。
+//   镜像是第三方，所以走镜像下载的内容必须通过校验才会用：向 GitHub API 取这个提交的完整文件树 (每个文件的 git blob SHA-1)，
+//   逐个文件比对，多一个 / 少一个 / 改一个字节都不行；校验不过或镜像失败就改用直连 (直连走 GitHub 自己的 HTTPS，不校验)。
+//   镜像列表: 环境变量 TVBOX_MIRRORS=前缀1,前缀2 (例 https://ghfast.top/)，设成空字符串 = 不用镜像。
 // 保留不动：data/ (数据)、.env (令牌)、.tools/ (便携 Node / ffmpeg)、node_modules/。
 // 临时文件只放在 data/.update-tmp/ ，每次更新结束 (成功或失败) 都清掉，服务启动时也会清一次。
 // 检查成功的结果缓存在 data/.update-check.json (6 小时)；失败不缓存。
 'use strict';
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const { spawn } = require('child_process');
-const { Readable } = require('stream');
-const { pipeline } = require('stream/promises');
 
 const ROOT = __dirname;
 const WIN = process.platform === 'win32';
@@ -23,12 +26,18 @@ const KEEP = new Set(['data', '.env', '.tools', 'node_modules']);
 const CACHE_MS = 6 * 3600e3;      // 检查结果缓存多久
 const MIN_GAP = 20e3;             // 手动检查的最小间隔 (防连点)
 const UA = 'tvbox-updater';
+const DEFAULT_MIRRORS = ['https://ghfast.top/', 'https://gh-proxy.com/'];
+const mirrors = () => process.env.TVBOX_MIRRORS === undefined ? DEFAULT_MIRRORS : process.env.TVBOX_MIRRORS.split(',').map(x => x.trim()).filter(x => /^https:\/\/.+\/$/.test(x));
+const STALL_MS = 20e3;        // 这么久没收到任何数据就当这条线路挂了
+const FIRST_BYTE_MS = 15e3;   // 这么久还没出第一个数据就放弃这条线路
 
 const readJson = f => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 const writeJson = (f, v) => { try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(v)); } catch {} };
+const CANCELLED = '已取消';
+const checkAbort = signal => { if (signal?.aborted) throw new Error(CANCELLED); };
 const short = s => String(s || '').slice(0, 7);
 
-function sh(cmd, args, { cwd = ROOT, timeout = 60e3 } = {}) {
+function sh(cmd, args, { cwd = ROOT, timeout = 60e3, signal } = {}) {
   return new Promise(ok => {
     let out = '', err = '', done = false;
     const fin = r => { if (!done) { done = true; clearTimeout(t); ok(r); } };
@@ -36,6 +45,7 @@ function sh(cmd, args, { cwd = ROOT, timeout = 60e3 } = {}) {
     try { p = spawn(cmd, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' } }); }
     catch (e) { return ok({ status: -1, stdout: '', stderr: e.message }); }
     const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} fin({ status: -2, stdout: out, stderr: err + '\n超时' }); }, timeout);
+    if (signal) { const ab = () => { try { p.kill('SIGKILL'); } catch {} fin({ status: -3, stdout: out, stderr: err + '\n已取消' }); }; if (signal.aborted) ab(); else signal.addEventListener('abort', ab, { once: true }); }
     p.stdout.on('data', d => { if (out.length < 1e6) out += d; });
     p.stderr.on('data', d => { if (err.length < 1e6) err += d; });
     p.on('error', e => fin({ status: -1, stdout: out, stderr: e.message }));
@@ -128,11 +138,12 @@ function move(a, b) {
   catch (e) { if (e.code !== 'EXDEV') throw e; fs.cpSync(a, b, { recursive: true }); rmrf(a); }
 }
 
-async function gitApply(g, log) {
+async function gitApply(g, log, signal) {
   log('git pull …');
-  const pull = args => sh('git', args, { cwd: g.top, timeout: 180e3 });
+  const pull = args => sh('git', args, { cwd: g.top, timeout: 180e3, signal });
   let r = await pull(['pull', '--ff-only']);
   if (r.status !== 0 && /no tracking information|has no upstream/i.test(r.stderr)) r = await pull(['pull', '--ff-only', 'origin', g.branch]);
+  if (r.status === -3) throw new Error(CANCELLED);
   if (r.stdout.trim()) log(r.stdout.trim());
   if (r.status !== 0) throw new Error('git pull 失败: ' + (lastLines(r.stderr) || lastLines(r.stdout) || '未知错误') + '（本地改动冲突时先处理: git status）');
   const after = (await sh('git', ['rev-parse', 'HEAD'], { cwd: g.top })).stdout.trim();
@@ -153,29 +164,145 @@ function findWebDir(dir, depth) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) if (e.isDirectory()) { const f = findWebDir(path.join(dir, e.name), depth - 1); if (f) return f; }
   return null;
 }
-async function zipApply(log) {
+// ---------- 下载: 多线路竞速 + 进度 ----------
+// 候选线路同时发起请求，第一个收到数据的赢，其余中断。onProgress({ done, total, speed, via })，total 可能为 0 (服务器没给大小)。
+async function raceDownload(cands, dest, onProgress, signal) {
+  checkAbort(signal);
+  const ctrls = cands.map(() => new AbortController());
+  const abortAll = () => ctrls.forEach(c => c.abort());
+  signal?.addEventListener('abort', abortAll, { once: true });
+  try { return await raceInner(cands, dest, onProgress, signal, ctrls); }
+  catch (e) { if (signal?.aborted) throw new Error(CANCELLED); throw e; }
+  finally { signal?.removeEventListener('abort', abortAll); }
+}
+async function raceInner(cands, dest, onProgress, signal, ctrls) {
+  const tries = cands.map(async (c, i) => {
+    const t = setTimeout(() => ctrls[i].abort(), FIRST_BYTE_MS);
+    try {
+      const r = await fetch(c.url, { redirect: 'follow', headers: { 'User-Agent': UA }, signal: ctrls[i].signal });
+      if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
+      const reader = r.body.getReader();
+      const first = await reader.read();
+      if (first.done || !first.value?.length) throw new Error('空响应');
+      return { i, c, r, reader, first: first.value };
+    } finally { clearTimeout(t); }
+  });
+  let win;
+  try { win = await Promise.any(tries); }
+  catch (e) { throw new Error('所有下载线路都失败了: ' + (e.errors || []).map(x => x.message).join(' / ')); }
+  cands.forEach((_, i) => { if (i !== win.i) ctrls[i].abort(); });
+  const exact = Number(win.r.headers.get('content-length')) || 0;
+  const total = exact || Number((readJson(VER_FILE) || {}).size) || 0;   // codeload 不给大小：用上次下载的大小估个进度 (approx)
+  const t0 = Date.now(); let done = 0, lastP = 0;
+  const fh = await fs.promises.open(dest, 'w');
+  const emit = force => {
+    const now = Date.now();
+    if (!force && now - lastP < 300) return;
+    lastP = now;
+    onProgress?.({ approx: !exact, done, total: total && !exact ? Math.max(total, done + 1) : total, speed: done / Math.max(0.3, (now - t0) / 1000), via: win.c.name });
+  };
+  try {
+    let chunk = win.first;
+    for (;;) {
+      await fh.write(chunk); done += chunk.length; emit(false);
+      const stall = setTimeout(() => ctrls[win.i].abort(), STALL_MS);
+      let rd;
+      try { rd = await win.reader.read(); } catch { throw new Error(`下载中断（${STALL_MS / 1000} 秒没有数据，已下载 ${(done / 1048576).toFixed(1)} MB）`); } finally { clearTimeout(stall); }
+      if (rd.done) break;
+      chunk = rd.value;
+    }
+  } finally { await fh.close(); }
+  if (exact && done !== exact) throw new Error(`下载不完整（${done} / ${total} 字节）`);
+  emit(true);
+  return { via: win.c.name, mirror: !!win.c.mirror, size: done };
+}
+
+// ---------- 校验: 对着 GitHub 给的文件树逐个比对 git blob SHA-1 ----------
+async function ghTree(slug, sha) {
+  const h = { 'User-Agent': UA, Accept: 'application/vnd.github+json' };
+  const tk = process.env.GITHUB_TOKEN || process.env.GH_TOKEN; if (tk) h.Authorization = 'Bearer ' + tk;
+  const r = await fetch(`https://api.github.com/repos/${slug}/git/trees/${sha}?recursive=1`, { headers: h, signal: AbortSignal.timeout(30e3) });
+  if (!r.ok) throw new Error('文件树 HTTP ' + r.status);
+  const j = await r.json();
+  if (j.truncated) throw new Error('文件树太大被截断');
+  return new Map((j.tree || []).filter(x => x.type === 'blob').map(x => [x.path, x.sha]));
+}
+const sha1blob = buf => crypto.createHash('sha1').update(`blob ${buf.length}\0`).update(buf).digest('hex');
+// git archive 会按 .gitattributes 把 text 文件转成 eol=crlf (如 .bat)，blob 里存的是 LF：原样和 CRLF→LF 两种都认。
+function blobMatches(file, want) {
+  const buf = fs.readFileSync(file);
+  if (sha1blob(buf) === want) return true;
+  if (buf.includes(13)) { const lf = Buffer.from(buf.toString('latin1').replace(/\r\n/g, '\n'), 'latin1'); return sha1blob(lf) === want; }
+  return false;
+}
+function verifyAgainstTree(tree, topDir, src) {
+  const prefix = path.relative(topDir, src).split(path.sep).filter(Boolean).join('/');
+  const pre = prefix ? prefix + '/' : '';
+  const seen = new Set();
+  const walk = (dir, rel) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? rel + '/' + e.name : e.name;
+      if (e.isDirectory()) { walk(path.join(dir, e.name), r); continue; }
+      const want = tree.get(pre + r);
+      if (!want) throw new Error('压缩包里有仓库没有的文件: ' + r);
+      if (!blobMatches(path.join(dir, e.name), want)) throw new Error('文件内容和仓库不一致: ' + r);
+      seen.add(pre + r);
+    }
+  };
+  walk(src, '');
+  for (const k of tree.keys()) if (k.startsWith(pre) && !seen.has(k)) throw new Error('压缩包缺少文件: ' + k.slice(pre.length));
+}
+
+async function zipApply(log, onProgress, signal) {
   const slug = repoSlug();
   let sha = '';
-  try { sha = (await ghLatest(slug)).sha; } catch (e) { log('取不到最新提交号，改下载默认分支 (' + e.message + ')'); }
-  const url = `https://codeload.github.com/${slug}/zip/${sha || 'HEAD'}`;
+  checkAbort(signal);
+  try { sha = (await ghLatest(slug)).sha; } catch (e) { log('取不到最新提交号，只能直连下载默认分支 (' + e.message + ')'); }
   const from = short((readJson(VER_FILE) || {}).sha);
+  const direct = { name: '直连 GitHub', url: `https://codeload.github.com/${slug}/zip/${sha || 'HEAD'}`, mirror: false };
+  const mir = sha ? mirrors().map(m => ({ name: m.replace(/^https:\/\//, '').replace(/\/$/, ''), url: m + direct.url, mirror: true })) : [];
+  const treeP = mir.length ? ghTree(slug, sha).catch(e => { log('取不到文件树，不使用镜像 (' + e.message + ')'); return null; }) : Promise.resolve(null);
   cleanup();
   const work = path.join(TMP, String(Date.now()));
   fs.mkdirSync(work, { recursive: true });
   try {
-    log(`下载 ${slug} ${sha ? short(sha) : '默认分支最新代码'} …`);
-    const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(300e3) });
-    if (!res.ok || !res.body) throw new Error(`下载失败 HTTP ${res.status}`);
     const zip = path.join(work, 'src.zip');
-    await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(zip));
-    log(`已下载 ${(fs.statSync(zip).size / 1048576).toFixed(1)} MB，解压 …`);
     const out = path.join(work, 'x');
-    fs.mkdirSync(out);
-    await extractZip(zip, out);
-    const src = findWebDir(out, 4);
-    if (!src) throw new Error('压缩包里没找到 web 程序目录 (server.js + public)');
+    const unpack = async () => {
+      fs.rmSync(out, { recursive: true, force: true }); fs.mkdirSync(out);
+      await extractZip(zip, out);
+      const src = findWebDir(out, 4);
+      if (!src) throw new Error('压缩包里没找到 web 程序目录 (server.js + public)');
+      const tops = fs.readdirSync(out);
+      const top = tops.length === 1 && fs.statSync(path.join(out, tops[0])).isDirectory() ? path.join(out, tops[0]) : out;
+      return { src, top };
+    };
+    const tree = await treeP;
+    const cands = tree ? [direct, ...mir] : [direct];
+    log(`下载 ${slug} ${sha ? short(sha) : '默认分支最新代码'}（${cands.length > 1 ? `${cands.length} 条线路竞速，谁快用谁` : '直连'}）…`);
+    let got = await raceDownload(cands, zip, onProgress, signal);
+    log(`已下载 ${(got.size / 1048576).toFixed(1)} MB，来源 ${got.via}，解压 …`);
+    let found;
+    if (got.mirror) {
+      try {
+        found = await unpack();
+        checkAbort(signal);
+        log('校验文件 (对照 GitHub 文件树) …');
+        verifyAgainstTree(tree, found.top, found.src);
+        log('校验通过');
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        log(`镜像内容没通过校验 (${e.message})，改用直连重新下载 …`);
+        got = await raceDownload([direct], zip, onProgress, signal);
+        log(`已下载 ${(got.size / 1048576).toFixed(1)} MB，解压 …`);
+        found = await unpack();
+      }
+    } else found = await unpack();
+    const { src } = found;
+    checkAbort(signal);
     const chk = await sh(process.execPath, ['--check', path.join(src, 'server.js')]);
     if (chk.status !== 0) throw new Error('新版 server.js 没通过语法检查，已放弃更新: ' + lastLines(chk.stderr));
+    checkAbort(signal);                              // 这是最后一个可以取消的点：开始替换文件后不再响应取消，免得停在半新半旧
     log('替换程序文件 (data / .env / .tools 保留) …');
     const backup = path.join(work, 'old');
     fs.mkdirSync(backup);
@@ -191,18 +318,18 @@ async function zipApply(log) {
       throw new Error('替换文件失败，已恢复旧版本: ' + e.message);
     }
     if (!WIN) for (const f of fs.readdirSync(ROOT)) if (f.endsWith('.command')) { try { fs.chmodSync(path.join(ROOT, f), 0o755); } catch {} }
-    writeJson(VER_FILE, { sha, repo: slug, at: Date.now() });
+    writeJson(VER_FILE, { sha, repo: slug, at: Date.now(), size: got.size });
     log('代码已替换为最新版本');
     return { from, to: short(sha), changed: true };
   } finally { cleanup(); }
 }
 
 // -> { from, to, changed }
-async function apply(log = () => {}) {
+async function apply(log = () => {}, onProgress, signal) {
   const g = await gitInfo();
-  const r = g ? await gitApply(g, log) : await zipApply(log);
+  const r = g ? await gitApply(g, log, signal) : await zipApply(log, onProgress, signal);
   try { fs.rmSync(CHECK_FILE, { force: true }); } catch {}
   return r;
 }
 
-module.exports = { current, check, cachedCheck, apply, cleanup, repoSlug, TMP };
+module.exports = { _t: { raceDownload, ghTree, verifyAgainstTree, extractZip, findWebDir }, CANCELLED, current, check, cachedCheck, apply, cleanup, repoSlug, TMP };
