@@ -22,6 +22,9 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { Readable } = require('stream');
+const { AsyncLocalStorage } = require('async_hooks');
+// 每个请求带一个 AbortSignal: 浏览器断开 (切换页面 / 关页面) 就触发，请求里发起的上游 fetch 跟着中断，不再白占资源。
+const reqCtx = new AsyncLocalStorage();
 const { spawn, execFileSync } = require('child_process');
 const cluster = require('cluster');
 const zlib = require('zlib');
@@ -400,9 +403,11 @@ function drainMedia() {
     fn().then(ok, bad).finally(() => { mediaRunning--; drainMedia(); });
   }
 }
-function ffmpeg(args, ms, nice) {
+function ffmpeg(args, ms, nice, signal) {
   return new Promise((ok, bad) => {
+    if (signal?.aborted) return bad(new Error('aborted'));
     const p = spawn(FFMPEG, args, { stdio: 'ignore', windowsHide: true });
+    signal?.addEventListener('abort', () => p.kill('SIGKILL'), { once: true });
     if (nice) try { os.setPriority(p.pid, nice); } catch {} // background work yields to request handling
     const t = setTimeout(() => p.kill('SIGKILL'), ms);
     p.on('exit', code => { clearTimeout(t); code === 0 ? ok() : bad(new Error('ffmpeg exit ' + code)); });
@@ -410,23 +415,31 @@ function ffmpeg(args, ms, nice) {
   });
 }
 const mediaFile = (kind, url) => path.join(THUMBS, crypto.createHash('md5').update(url).digest('hex') + (kind === 'thumb' ? '.jpg' : '.gif'));
-rpcHandlers.media = ({ kind, url }) => liveMedia(kind, url);
-async function liveMedia(kind, url) {
+// 引用计数 (按文件): 请求的页面切走了就发 hold:'leave'，没人要的截图 / 预览: 还在排队的跳过，已经在跑的 ffmpeg 直接杀掉。
+const mediaCtl = new Map();   // file -> { refs, ctl }
+rpcHandlers.media = ({ kind, url, hold }) => { if (hold === 'leave') { mediaLeave(mediaFile(kind, url)); return null; } return liveMedia(kind, url, hold === 'ref'); };
+function mediaLeave(file) { const e = mediaCtl.get(file); if (e && --e.refs <= 0) { e.ctl.abort(); mediaCtl.delete(file); } }
+async function liveMedia(kind, url, counted) {
   const file = mediaFile(kind, url);
   const st = await fsp.stat(file).catch(() => null);
   if (st && Date.now() - st.mtimeMs < MEDIA_TTL) return file;
   if (!FFMPEG) return st ? file : null;
   const key = file;
+  if (counted) {
+    let e = mediaCtl.get(file); if (!e) mediaCtl.set(file, e = { refs: 0, ctl: new AbortController() });
+    e.refs++;
+  }
   if (!mediaJobs.has(key)) {
+    const sig = mediaCtl.get(file)?.ctl.signal;
     const tmp = file.replace(/(\.\w+)$/, '.tmp$1');
     const input = ['-hide_banner', '-loglevel', 'error', '-y', '-user_agent', UA, '-rw_timeout', '8000000', '-live_start_index', '-1'];
     const args = kind === 'thumb'
       // Preview-sized on purpose: ~8 KB covers, ~130 KB gifs (240px, 6 fps, 2.5 s, 48 colours).
       ? [...input, '-skip_frame', 'nokey', '-i', url, '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '9', tmp]
       : [...input, '-t', '2.5', '-i', url, '-an', '-vf', `fps=6,${GIF_FIT},split[a][b];[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`, '-loop', '0', tmp];
-    mediaJobs.set(key, limited(() => ffmpeg(args, kind === 'thumb' ? 25000 : 40000))
+    mediaJobs.set(key, limited(() => sig?.aborted ? Promise.reject(new Error('aborted')) : ffmpeg(args, kind === 'thumb' ? 25000 : 40000, undefined, sig))
       .then(() => fsp.rename(tmp, file)).then(() => file, () => { fsp.rm(tmp, { force: true }).catch(() => {}); return st ? file : null; })
-      .finally(() => mediaJobs.delete(key)));
+      .finally(() => { mediaJobs.delete(key); mediaCtl.delete(file); }));
   }
   return mediaJobs.get(key);
 }
@@ -435,24 +448,38 @@ async function liveMedia(kind, url) {
 const cache = new Map();
 const TTL = 5 * 60 * 1000;
 
-async function fetchText(url, ms = 15000, headers = {}) {
-  const r = await fetch(url, { headers: { 'User-Agent': UA, ...headers }, redirect: 'follow', signal: AbortSignal.timeout(ms) });
+async function fetchText(url, ms = 15000, headers = {}, signal) {
+  const r = await fetch(url, { headers: { 'User-Agent': UA, ...headers }, redirect: 'follow', signal: signal ? AbortSignal.any([AbortSignal.timeout(ms), signal]) : AbortSignal.timeout(ms) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.text();
 }
 // Identical upstream requests that overlap share one fetch.
 const inflight = new Map();
+// 引用计数: 共享这一个请求的所有请求都断开了 (没人要结果了) 才真正中断上游; 还有人在等就继续。fn 收到这个共享的 signal。
 function once(key, fn) {
-  if (inflight.has(key)) return inflight.get(key);
-  const p = fn().finally(() => inflight.delete(key));
-  inflight.set(key, p);
-  return p;
+  const sig = reqCtx.getStore()?.signal;
+  let e = inflight.get(key);
+  if (!e) {
+    const ctl = new AbortController();
+    e = { refs: 0, ctl };
+    e.p = reqCtx.exit(() => fn(ctl.signal)).finally(() => { if (inflight.get(key) === e) inflight.delete(key); });
+    inflight.set(key, e);
+  }
+  if (!sig) { e.refs++; return e.p; }   // 没有请求上下文 (后台任务): 一直占着一个引用，不会被别人的断开中断
+  e.refs++;
+  return new Promise((ok, bad) => {
+    const leave = () => { if (--e.refs <= 0) e.ctl.abort(); };
+    if (sig.aborted) { leave(); return bad(new Error('aborted')); }
+    const onAbort = () => { leave(); bad(new Error('aborted')); };
+    sig.addEventListener('abort', onAbort, { once: true });
+    e.p.then(ok, bad).finally(() => sig.removeEventListener('abort', onAbort));
+  });
 }
 async function cachedText(url) {
   const hit = cache.get(url);
   if (hit && Date.now() - hit.at < TTL) return hit.body;
-  return once('t|' + url, async () => {
-    const body = await fetchText(url);
+  return once('t|' + url, async signal => {
+    const body = await fetchText(url, 15000, {}, signal);
     cache.set(url, { at: Date.now(), body });
     return body;
   });
@@ -677,7 +704,7 @@ rpcHandlers.vodSnap = async ({ op, id, api, keys, withText }) => {
     const job = { id, prog, col, state: 'running', error: '', polled: Date.now(), at: Date.now() };
     snapJobs.set(id, job);
     job.timer = setInterval(() => { if (job.state === 'running' && Date.now() - job.polled > 60e3) prog.cancel = true; }, 5000);
-    col.run().then(() => { job.state = 'done'; }, e => { job.state = 'error'; job.error = e.message; }).finally(() => {
+    reqCtx.exit(() => col.run()).then(() => { job.state = 'done'; }, e => { job.state = 'error'; job.error = e.message; }).finally(() => {
       clearInterval(job.timer);
       setTimeout(() => { snapJobs.delete(id); if (!job.committed) fs.rm(spoolPath(id), { force: true }, () => {}); }, job.state === 'done' ? 30 * 60e3 : 10e3).unref?.();
     });
@@ -712,9 +739,9 @@ async function cmsGet(site, params, fresh = false, ms = 15000) {
   const key = u.toString();
   const hit = cache.get(key);
   if (!fresh && hit && Date.now() - hit.at < TTL) return hit.body;
-  return once('j|' + key, async () => {
+  return once('j|' + key, async signal => {
     let body;
-    try { body = JSON.parse(await fetchText(key, ms)); } catch (e) { throw new Error(`${site.name}：${/JSON/.test(e.message) ? '返回的不是 JSON' : e.message}`); }
+    try { body = JSON.parse(await fetchText(key, ms, {}, signal)); } catch (e) { throw new Error(`${site.name}：${/JSON/.test(e.message) ? '返回的不是 JSON' : e.message}`); }
     cache.set(key, { at: Date.now(), body });
     if (cache.size > 800) cache.delete(cache.keys().next().value);
     return body;
@@ -1488,8 +1515,8 @@ async function imageProxy(target, res) {
   const st = await fsp.stat(file).catch(() => null);
   const head = { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=604800, immutable' };
   if (st && Date.now() - st.mtimeMs < 7 * 86400e3) { res.writeHead(200, { ...head, 'Content-Length': st.size }); return fs.createReadStream(file).pipe(res); }
-  const buf = await once('img|' + file, async () => {
-    const r = await fetch(u, { headers: { 'User-Agent': DB_UA_IMG, Referer: isDouban ? 'https://movie.douban.com/' : JAVDB_URL + '/' }, signal: AbortSignal.timeout(15000) });
+  const buf = await once('img|' + file, async signal => {
+    const r = await fetch(u, { headers: { 'User-Agent': DB_UA_IMG, Referer: isDouban ? 'https://movie.douban.com/' : JAVDB_URL + '/' }, signal: AbortSignal.any([AbortSignal.timeout(15000), signal]) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const b = Buffer.from(await r.arrayBuffer());
     await fsp.writeFile(file + '.' + process.pid, b);
@@ -3067,7 +3094,13 @@ async function api(route, q, res, req) {
       if (m) await fsp.writeFile(mediaFile('thumb', u), Buffer.from(m[1], 'base64'));
       return send(res, 200, { ok: !!m });
     }
-    const file = await rpc('media', { kind: route === 'live/thumb' ? 'thumb' : 'preview', url: u }, 90000);
+    const kind = route === 'live/thumb' ? 'thumb' : 'preview', sig = reqCtx.getStore()?.signal;
+    let left = false;
+    const leave = () => { if (!left) { left = true; rpc('media', { kind, url: u, hold: 'leave' }).catch(() => {}); } };
+    sig?.addEventListener('abort', leave, { once: true });
+    let file;
+    try { file = await rpc('media', { kind, url: u, hold: 'ref' }, 90000); } finally { sig?.removeEventListener('abort', leave); }
+    if (sig?.aborted) return;
     if (!file) return send(res, 404, { error: FFMPEG ? '截不到画面' : '服务端没有 ffmpeg' });
     res.writeHead(200, { 'Content-Type': route === 'live/thumb' ? 'image/jpeg' : 'image/gif', 'Cache-Control': 'max-age=300' });
     return fs.createReadStream(file).pipe(res);
@@ -3607,10 +3640,12 @@ const server = http.createServer(async (req, res) => {
     if (a.tooMany) res.setHeader('Retry-After', '60');
     return send(res, a.tooMany ? 429 : 401, { error: a.tooMany ? '令牌错误次数太多，请 1 分钟后再试' : '需要访问令牌', auth: true });
   }
+  const gone = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) gone.abort(); });
   try {
-    if (u.pathname.startsWith('/api/')) return await api(u.pathname.slice(5), u.searchParams, res, req);
+    if (u.pathname.startsWith('/api/')) return await reqCtx.run({ signal: gone.signal }, () => api(u.pathname.slice(5), u.searchParams, res, req));
     if (u.pathname === '/hls') return await relay(u.searchParams.get('u') || '', res, req);
-    if (u.pathname === '/img') return await imageProxy(u.searchParams.get('u') || '', res);
+    if (u.pathname === '/img') return await reqCtx.run({ signal: gone.signal }, () => imageProxy(u.searchParams.get('u') || '', res));
     if (u.pathname.startsWith('/dl/')) return await serveDownload(u.pathname.slice(4), req, res);
     if (u.pathname.startsWith('/media/')) return await serveMedia(u.pathname.slice(7), req, res);
     return await serveStatic(decodeURIComponent(u.pathname), req, res);

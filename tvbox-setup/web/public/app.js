@@ -180,10 +180,34 @@ class DataLoader {
   constructor(batchFn, { maxBatch = 24, wait = 6, lazyWait = 80, lazyMax = 400, keep = 0 } = {}) {
     Object.assign(this, { fn: batchFn, maxBatch, wait, lazyWait, lazyMax, keep });
     this.cache = new Map(); this.queue = []; this.timer = 0; this.due = 0; this.first = 0; this.urgent = false;
+    this.refs = new Map();      // key -> 还有几个调用方在等它 (带 signal 的调用方离开时会 release)
+    this.lazyKeys = new Set();  // 只有「后台补充」调用方要的 key
+    this.running = new Set();   // 正在飞的批: { ctl, keys }
+  }
+  // 调用方不要这个 key 了 (切页面 / 关弹层): 还在排队就撤掉; 已经发出去的批, 里面所有 key 都没人要了就整批中断。
+  release(key) {
+    const n = (this.refs.get(key) || 0) - 1;
+    if (n > 0) { this.refs.set(key, n); return; }
+    if (!this.refs.has(key)) return;
+    this.refs.delete(key);
+    this.dropKey(key);
+  }
+  dropKey(key) {
+    const qi = this.queue.findIndex(q => q.key === key);
+    if (qi >= 0) { const [q] = this.queue.splice(qi, 1); q.rej(new DOMException('aborted', 'AbortError')); return; }
+    for (const b of this.running) if (b.keys.includes(key) && b.keys.every(k => !(this.refs.get(k) > 0))) b.ctl.abort();
+  }
+  // 切页面: 后台补充类的请求 (javdb 评分 / 豆瓣评分 / 探测) 没人在等了 — 排队的撤掉, 只含这类的批中断。
+  abortLazy() {
+    for (const q of [...this.queue]) if (this.lazyKeys.has(q.key)) { this.refs.delete(q.key); this.dropKey(q.key); }
+    for (const b of this.running) if (b.keys.every(k => this.lazyKeys.has(k) || !this.cache.has(k))) b.ctl.abort();
   }
   load(key, { lazy = false } = {}) {
+    this.refs.set(key, (this.refs.get(key) || 0) + 1);
+    if (!lazy) this.lazyKeys.delete(key);
     const hit = this.cache.get(key);
-    if (hit) { if (!lazy) this.hurry(); return hit; } // an urgent caller joining a lazy in-flight key speeds it up
+    if (hit) { if (!lazy) this.hurry(); return hit; }
+    if (lazy) this.lazyKeys.add(key); // an urgent caller joining a lazy in-flight key speeds it up
     const p = new Promise((res, rej) => this.queue.push({ key, res, rej }));
     this.cache.set(key, p);
     p.then(() => this.drop(key, p), () => this.drop(key, p));
@@ -201,7 +225,7 @@ class DataLoader {
     this.timer = setTimeout(() => this.flush(), Math.max(0, at - Date.now()));
   }
   loadMany(keys, opt) { return Promise.all(keys.map(k => this.load(k, opt).catch(e => e))); }
-  drop(key, p) { const del = () => this.cache.get(key) === p && this.cache.delete(key); this.keep ? setTimeout(del, this.keep) : del(); }
+  drop(key, p) { if (this.cache.get(key) === p) { this.refs.delete(key); this.lazyKeys.delete(key); } const del = () => this.cache.get(key) === p && this.cache.delete(key); this.keep ? setTimeout(del, this.keep) : del(); }
   clear(key) { this.cache.delete(key); return this; }
   clearAll() { this.cache.clear(); return this; }
   prime(key, value) { if (!this.cache.has(key)) this.cache.set(key, Promise.resolve(value)); return this; }
@@ -211,25 +235,28 @@ class DataLoader {
   }
   async run(batch) {
     const done = new Set();
+    const live = { ctl: new AbortController(), keys: batch.map(b => b.key) };
+    this.running.add(live);
     const settle = (i, v) => {
       if (done.has(i) || !batch[i]) return;
       done.add(i);
       v instanceof Error ? batch[i].rej(v) : batch[i].res(v);
     };
     try {
-      const out = await this.fn(batch.map(b => b.key), settle);
+      const out = await this.fn(batch.map(b => b.key), settle, live.ctl.signal);
       if (Array.isArray(out)) out.forEach((v, i) => settle(i, v));
     } catch (e) { batch.forEach((_, i) => settle(i, e instanceof Error ? e : new Error(String(e)))); }
+    finally { this.running.delete(live); }
     batch.forEach((_, i) => settle(i, new Error('没有返回结果')));
   }
 }
 // The server runs these as GETs inside POST /api/batch and streams back one NDJSON line per request, as it finishes.
 const BATCHABLE = /^(list|categories|detail|search|person|sites|info|live|probe|javdb|douban\/(rating|hot|chart|charts))$/;
-async function fetchBatch(keys, settle) {
+async function fetchBatch(keys, settle, signal) {
   const requests = keys.map(k => { const q = k.indexOf('?'); return { route: k.slice(0, q), q: Object.fromEntries(new URLSearchParams(k.slice(q + 1))) }; });
   const headers = { 'Content-Type': 'application/json' };
   if (sessionStorage.pin) headers['X-Pin'] = sessionStorage.pin;
-  const r = await fetch('/api/batch', { method: 'POST', headers, body: JSON.stringify({ requests }) });
+  const r = await fetch('/api/batch', { method: 'POST', headers, signal, body: JSON.stringify({ requests }) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const line = t => {
     if (!t) return;
@@ -260,7 +287,15 @@ const withSignal = (p, signal) => !signal ? p : new Promise((ok, bad) => {
 const fetchApi = (route, params, signal) => {
   if (!BATCHABLE.test(route)) return get(`/api/${route}?` + new URLSearchParams(params), signal);
   const qs = new URLSearchParams(params); qs.sort();
-  return withSignal(apiLoader.load(`${route}?${qs}`, { lazy: LAZY.test(route) }), signal === undefined ? pageCtl.signal : signal || undefined);
+  const key = `${route}?${qs}`, p = apiLoader.load(key, { lazy: LAZY.test(route) }), sig = signal === undefined ? pageCtl.signal : signal || undefined;
+  if (!sig) return p;
+  // 调用方离开 (切页面等) 就 release: 没人要的请求不再发 / 已发的整批没人要了就中断，服务端也跟着断开上游
+  return new Promise((ok, bad) => {
+    const gone = () => { apiLoader.release(key); bad(new DOMException('aborted', 'AbortError')); };
+    if (sig.aborted) return gone();
+    sig.addEventListener('abort', gone, { once: true });
+    p.then(ok, bad).finally(() => sig.removeEventListener('abort', gone));
+  });
 };
 const api = (route, params = {}, signal) => {
   const ttl = MEMO_TTL[route];
@@ -803,6 +838,9 @@ function newPage() {
   closeAdminEs();
   pageCtl.abort();
   pageCtl = new AbortController();
+  apiLoader.abortLazy();
+  // 上一页还没加载完的封面图: 不要再占浏览器的连接 (每个站点同时只有 6 条), 新页面的请求才不会排在它们后面
+  $$('#view img').forEach(im => { if (!im.complete) im.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=='; });
   thumbQueue.length = 0;
   stopPreview(); stopLocalPreview(true);
 }
