@@ -670,7 +670,8 @@ const sheetScrim = $('#sheetScrim');
     if (!m.hidden && mobile && m.parentElement !== document.body) document.body.append(m);
     else if ((m.hidden || !mobile) && m.parentElement === document.body) { const home = $('#view .lpick'); if (home) home.append(m); else m.remove(); }
   };
-  const sync = () => { dockLive(); const on = matchMedia('(max-width: 760px)').matches && sheets().some(m => !m.hidden); sheetScrim.hidden = !on; document.body.classList.toggle('sheet-open', on); document.body.classList.toggle('live-sheet', on && !!$('#liveMenu') && !$('#liveMenu').hidden); };
+  // (长按卡片的浮窗开着时 ctxSheet 为真: 源菜单那边任何 hidden 变动触发 sync, 都不能把遮罩和 sheet-open 收掉)
+  const sync = () => { dockLive(); const on = ctxSheet || (matchMedia('(max-width: 760px)').matches && sheets().some(m => !m.hidden)); sheetScrim.hidden = !on; document.body.classList.toggle('sheet-open', on); document.body.classList.toggle('live-sheet', on && !!$('#liveMenu') && !$('#liveMenu').hidden); };
   addEventListener('hashchange', () => { const m = $('#liveMenu'); if (m && m.parentElement === document.body) { m.hidden = true; $('#liveBtn')?.classList.remove('open'); } });
   const mo = new MutationObserver(sync);
   const watch = () => sheets().forEach(m => { if (!m._w) { m._w = 1; mo.observe(m, { attributes: true, attributeFilter: ['hidden'] }); } });
