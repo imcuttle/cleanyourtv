@@ -299,6 +299,10 @@ a.ch { color: inherit; }
 .pill { border: 0; background: #ffffff26; color: #fff; border-radius: 20px; padding: 8px 16px; }
 .pill:hover, .icon:hover { background: #ffffff40; }
 .pmsg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: #ddd; text-align: center; pointer-events: none; }
+/* 播放失败的提示后面挂一个文字按钮「切换源」(#player 的浮层默认不吃鼠标, 只给这个按钮开) */
+.pmsg .sw { pointer-events: auto; margin-left: 8px; padding: 0 2px; border: 0; background: none; color: #fff; font: inherit; font-weight: 600;
+  text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.pmsg .sw:active { opacity: .65; }
 .pill.on { background: #fff; color: #000; }
 .plist { position: absolute; top: 72px; right: 14px; bottom: 90px; width: min(340px, calc(100vw - 28px)); display: flex; flex-direction: column;
   background: #141414f2; border: 1px solid #ffffff1a; border-radius: 10px; box-shadow: 0 16px 40px #000c; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); overflow: hidden; }
@@ -1119,15 +1123,13 @@ html.touchui #player.plopen { touch-action: auto; }
 .btn.fav.ib.on svg { fill: var(--red); stroke: var(--red); }
 .btn.ico#shareBtn { min-width: 46px; height: 42px; justify-content: center; padding: 0; }
 
-/* 播放页 (触屏): 所有图标常显, 分享 / 倍速收进「更多」浮窗, 锁定在屏幕左侧中间 */
+/* 播放页 (触屏): 收藏 / 下载 / 分享 / 自动跳过 / 小窗收进顶栏右上角的「更多」浮窗, 锁定在屏幕左侧中间 */
 .pacts { position: relative; }
 .pacts .morebtn { display: none; }
 html:not(.touchui) .pacts [data-act=fs] { display: none; }
-html.touchui .pacts .morebtn { display: inline-flex; }
 .pmore { position: absolute; z-index: 6; right: 0; bottom: calc(100% + 6px); display: flex; gap: 2px; padding: 6px; background: #1c1c1cf2; border: 1px solid #ffffff1a; border-radius: 12px; box-shadow: 0 12px 32px #000c; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
 .pmore[hidden] { display: none; }
-html.touchui .pmore .pill { flex: none; width: 64px; }
-.pacts .morebtn[aria-expanded=true] { background: #ffffff26; }
+html.touchui .pmore .pill { flex: 0 1 64px; width: 64px; min-width: 0; }
 .plockbtn { display: none; }
 html.touchui .plockbtn { display: grid; position: absolute; z-index: 3; left: max(14px, env(safe-area-inset-left)); top: 50%; margin-top: -24px; width: 48px; height: 48px; border-radius: 50%; border: 0; padding: 0; place-items: center; background: #0007; color: #fff; transition: opacity .3s; }
 html.touchui .plockbtn svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -1139,6 +1141,12 @@ html.touchui .plist[hidden] { display: none; }
 html.touchui .phead { position: relative; padding-top: 18px; }
 html.touchui .phead .grab { position: absolute; left: 50%; top: 7px; width: 38px; height: 4px; margin-left: -19px; border-radius: 2px; background: #ffffff40; }
 html.touchui .pfind { height: 40px; font-size: 16px; margin-top: 10px; }
+.plist.srcs .pitems { grid-template-columns: 1fr; gap: 2px; }
+.plist.srcs .pitems button { justify-content: flex-start; gap: 10px; background: none; min-height: 42px; padding: 0 10px; }
+.plist.srcs .pitems button small { margin-left: auto; color: var(--muted); font-size: 12px; }
+.plist.srcs .pitems button:hover { background: #ffffff14; }
+.plist.srcs .pitems button.on { background: var(--red); }
+.plist.srcs .pitems button.on small { color: #fffc; }
 html.touchui .plist.live .pitems button { min-height: 46px; font-size: 15px; }
 html.touchui .pitems { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 
@@ -1186,20 +1194,25 @@ input::placeholder, textarea::placeholder { color: #ffffff80; opacity: 1; }
 .plock svg, html.touchui .plockbtn svg { width: 24px; height: 24px; }
 .plock, html.touchui .plockbtn { background: #000a; }
 
-/* 播放页触屏按钮: 固定大小, 图标多一个少一个都不改变其它按钮的大小 / 位置 (空出来的位置留在右边), 「更多」固定贴在最右 */
+/* 播放页触屏按钮: 固定大小, 图标多一个少一个都不改变其它按钮的大小 / 位置 (空出来的位置留在右边) */
 html.touchui .pacts { justify-content: flex-start; gap: 2px; flex-wrap: nowrap; }
 html.touchui .pacts > .pill { flex: none; width: 56px; }
-html.touchui .pacts > .morebtn { margin-left: auto; width: 44px; }
-html.touchui .pacts > .morebtn .l { display: none; }
-html.touchui .pacts > .morebtn { height: 52px; }
-html.touchui .pmore .pill { flex: none; width: 64px; }
+/* 触屏: 全屏贴最右 (有没有小窗 / 选集都不影响它的位置) */
+html.touchui .pacts > [data-act=fs] { margin-left: auto; }
+/* 触屏: 顶栏右上角的「更多」(只有图标), 浮窗从它下面展开, 始终一行, 窄屏时图标彼此收窄 */
+html.touchui .pmorewrap { position: relative; flex: none; margin-left: 4px; }
+html.touchui .pmorewrap .morebtn { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border-radius: 50%; background: none; }
+html.touchui .pmorewrap .morebtn .l { display: none; }
+html.touchui .pmorewrap .morebtn:hover, html.touchui .pmorewrap .morebtn:active, html.touchui .pmorewrap .morebtn[aria-expanded=true] { background: #ffffff33; }
+html.touchui .pmorewrap .pmore { top: calc(100% + 8px); bottom: auto; right: 0; width: max-content; max-width: calc(100vw - 36px); flex-wrap: nowrap; }
 
 /* 选集 / 频道浮窗 (触屏): 标题、搜索框、列表之间的空隙收紧 */
 html.touchui .phead { padding: 14px 10px 4px 16px; border-bottom: 0; gap: 8px; }
 html.touchui .phead .grab { top: 5px; }
 html.touchui .pfind { height: 36px; margin: 4px 12px 0; }
 html.touchui .pitems { padding: 6px 12px 4px; }
-html.touchui .plist.live .pitems { gap: 0; }
+html.touchui .plist.live .pitems, html.touchui .plist.srcs .pitems { gap: 0; }
+html.touchui .plist.srcs .pitems button { min-height: 46px; font-size: 15px; }
 html.touchui .plist.live .pitems button { min-height: 42px; }
 html.touchui .plist { padding-bottom: 0; }
 html.touchui .pitems::after { content: ""; display: block; height: var(--sb); }

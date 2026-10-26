@@ -194,6 +194,7 @@ const get = (path, signal) => req('GET', path, undefined, false, signal === unde
 // Reads that a page is built from are remembered for a few minutes (and per safety level), so going Back to a page that
 // was just left rebuilds it from memory in the same frame — no spinner, no network round trip, no flash.
 // Only successful results are kept; the sources list changing / a rescan / settings saves clear it.
+const altCache = new Map();   // 同名源 (详情页的「其他源」/ 播放页的「切换源」) 按片名缓存
 const apiMemo = new Map(), MEMO_TTL = { list: 300e3, categories: 600e3, 'douban/hot': 1800e3 }, MEMO_MAX = 160;
 let memoSig = '';
 
@@ -673,7 +674,7 @@ async function loadSites(src) {
   const j = PV || !src ? await api('sites', {}, null) : src === 'swr' && boot ? boot : await fetchSites(src === 'net' ? 'no-store' : 'default');
   state.sites = j.sites; state.lives = j.live; state.level = j.level;
   const sig = j.level + '|' + j.sites.map(s => s.key + '|' + (s.api || '')).join(',');
-  if (sig !== memoSig) { memoSig = sig; apiMemo.clear(); }
+  if (sig !== memoSig) { memoSig = sig; apiMemo.clear(); altCache.clear(); }
   // A source that moved into a 聚合源 is no longer a choice of its own: switch to its group.
   const mine = state.sites.find(s => s.key === state.site);
   if (mine?.inGroup) state.site = localStorage.site = mine.inGroup;
@@ -2101,11 +2102,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
   m.pollDl = pollDl;
   pollDl();
   render();
-  api('search', { wd: d.name }, m.ctl.signal).catch(() => ({ results: [] })).then(j => {
-    if (m.ctl.signal.aborted) return;
-    alts = j.results.filter(r => r.name === d.name && !(r.site === site && r.id === id));
-    paintAlts();
-  });
+  findAlts(d).then(list => { if (m.ctl.signal.aborted) return; alts = list; paintAlts(); });
   if (autoplay && typeof autoplay === 'object' && d.lines[autoplay.line]?.episodes[autoplay.ep]) {
     line = autoplay.line; render(); play(d, line, autoplay.ep);
   } else if (autoplay && d.lines.length) play(d, line, h0 && h0.line === line ? h0.ep : 0);
@@ -2165,8 +2162,8 @@ video.addEventListener('webkitpresentationmodechanged', () => (video.webkitPrese
 // 浏览器 / 系统自带的小窗 (标准 API, 或 iOS 的 webkit 接口) 只要有就显示
 let pipFailed = false;
 const pipSupported = () => !pipFailed && !(/iPad|iPhone|iPod/.test(navigator.userAgent) && (navigator.standalone || matchMedia('(display-mode: standalone)').matches)) && !video.disablePictureInPicture && !!(document.pictureInPictureEnabled || typeof video.webkitSetPresentationMode === 'function');
-// 装到主屏幕 (触屏) 的应用本来就是全屏, 全屏按钮没有意义; 浏览器里、桌面的独立窗口里保留
-const hideFs = () => !fineCursor && (navigator.standalone || matchMedia('(display-mode: standalone)').matches);
+// 装到主屏幕 (触屏) 的应用本来就是全屏: 竖屏视频不需要全屏按钮, 横屏视频 (宽 > 高) 要有, 好横过来看; 浏览器里、桌面的独立窗口里一直保留
+const hideFs = () => !fineCursor && (navigator.standalone || matchMedia('(display-mode: standalone)').matches) && !(video.videoWidth > video.videoHeight);
 function togglePip() {
   if (pipOn || document.pictureInPictureElement || video.webkitPresentationMode === 'picture-in-picture') {
     return document.exitPictureInPicture ? document.exitPictureInPicture().catch(() => {}) : video.webkitSetPresentationMode('inline');
@@ -2228,12 +2225,17 @@ function openPlayer(startAt) {
   $('[data-act=prev]').hidden = cur.ep <= 0;
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
-  $('[data-act=fs]').hidden = hideFs();
+  syncFs();
   $('[data-act=pip]').hidden = !pipSupported() || fineCursor;   // desktop has it in the control bar
   syncMedia();
   $('[data-act=star]').hidden = !live;
   $('[data-act=share]').hidden = cur.kind === 'local';   // 下载列表里的本地文件没有可分享的页面
   paintVodActs();
+  srcAlts = []; syncSrcAct();                       // 先不显示「切换源」, 查到别的源再出现
+  if (cur.kind === 'vod' && !cur.d.local) {
+    const nm = cur.d.name;
+    findAlts(cur.d).then(a => { if (cur && cur.kind === 'vod' && cur.d.name === nm) { srcAlts = a; syncSrcAct(); } });
+  }
   $('[data-act=ext]').hidden = !(cur.kind === 'vod' && cur.d.local && serverInfo?.loopback);
   if (live) paintStar(liveFavs.has(e.url));
   renderPlist();
@@ -2242,6 +2244,7 @@ function openPlayer(startAt) {
   $('.local').hidden = !useLocal;
   load(local?.status === 'done' ? local.play : e.url, startAt, false, useLocal || e.url.startsWith('/media/'));
   skipInit();
+  syncMore();
   poke();
 }
 // 收藏 / 下载 inside the player (点播 only, not 本地媒体): same actions as the detail sheet, so a title opened by double-click
@@ -2260,7 +2263,59 @@ function paintVodActs() {
 // The player's buttons are an icon plus a small label (shown on touch screens, a tooltip on desktop).
 function setL(act, text) { const b = $(`[data-act=${act}]`); if (!b) return; const l = $('.l', b); if (l) l.textContent = text; b.title = text; }
 function paintStar(on) { const b = $('[data-act=star]'); b.classList.toggle('on', on); setL('star', on ? '已收藏' : '收藏'); }
-function msg(t) { $('.pmsg').textContent = t || ''; }
+// 同名同年的其他源: 详情页的「其他源」和播放页的「切换源」共用，按片名只查一次。
+function findAlts(d) {
+  const k = d?.name;
+  const mine = list => list.filter(r => !(r.site === d.site && r.id === d.id));
+  if (!k) return Promise.resolve([]);
+  if (altCache.has(k)) return Promise.resolve(mine(altCache.get(k)));
+  return api('search', { wd: k }).then(j => { const list = j.results.filter(r => r.name === k); altCache.set(k, list); return mine(list); }).catch(() => []);
+}
+// 播放页: 当前片名的其他源 (拿到之前「切换源」不出现)
+let srcAlts = [];
+const syncSrcAct = () => { const b = $('[data-act=src]'); if (b) b.hidden = !srcAlts.length; paintMsg(); syncMore(); };
+// 播放失败的提示后面挂一个文字按钮「切换源」(有别的源时才有)
+let msgTxt = '', msgAct = false;
+function msg(t, act = false) { msgTxt = t || ''; msgAct = act; paintMsg(); }
+let stuckT = 0;
+function paintMsg() {
+  const el = $('.pmsg'); if (!el) return;
+  if (!msgAct || !srcAlts.length || !cur || cur.kind !== 'vod') { el.textContent = msgTxt; return; }
+  el.innerHTML = `<span>${esc(msgTxt)}</span><button type="button" class="sw">切换源</button>`;
+  // 只有两个源时直接换过去, 三个以上才弹列表
+  $('.sw', el).onclick = e => { e.stopPropagation(); srcAlts.length === 1 ? switchSrc(srcAlts[0].site, srcAlts[0].id) : openSrcSheet(); };
+}
+// 切换源的上拉面板 (和选集同一个 .plist): 当前源 + 其他同名源
+async function openSrcSheet() {
+  if (!cur || cur.kind !== 'vod') return;
+  const d = cur.d;
+  if (!srcAlts.length) srcAlts = await findAlts(d);
+  if (!srcAlts.length) return toast('没有找到同名的其他源');
+  const box = $('.plist');
+  const rows = [{ site: d.site, siteName: d.siteName, remarks: d.remarks, cur: 1 }, ...srcAlts];
+  box.classList.remove('live'); box.classList.add('srcs'); box.dataset.mode = 'src';
+  box.innerHTML = `<div class="phead"><i class="grab"></i><b>切换源</b><span>${rows.length} 个源</span><button class="icon sm" data-pclose title="关闭">✕</button></div>
+    <div class="pitems">${rows.map((a, i) => `<button data-i="${i}" class="${a.cur ? 'on' : ''}"><span>${esc(a.siteName)}</span><small>${esc(a.remarks || '')}</small></button>`).join('')}</div>`;
+  $('[data-pclose]', box).onclick = () => togglePlist(false);
+  $$('.pitems button', box).forEach(b => b.onclick = () => {
+    const a = rows[+b.dataset.i];
+    if (a.cur) return togglePlist(false);
+    switchSrc(a.site, a.id);
+  });
+  togglePlist(true);
+}
+// 换到另一个源播放: 选集 / 线路跟着新片源走, 顶栏的「当前源」不动
+async function switchSrc(site, id) {
+  togglePlist(false);
+  const ep = cur?.ep || 0;
+  const t = toast('正在切换到另一个源…', true);
+  try {
+    const d = await api('detail', { site, id });
+    t.remove();
+    if (!d || !d.lines?.length) return toast('这个源也放不了，再换一个试试');
+    play(d, 0, Math.min(ep, Math.max(0, d.lines[0].episodes.length - 1)));
+  } catch (e) { t.remove(); toast(e.message); }
+}
 // 成人源 only: until the first frame is on screen the card's cover is shown (blurred backdrop + the sharp picture), not a black screen.
 // Hidden again by the first 'playing' / 'loadeddata' frame, and for live channels / local files without a cover.
 const pcover = $('.pcover');
@@ -2288,10 +2343,13 @@ function load(url, startAt, viaProxy, isLocal) {
   playingSrc = { src, hls: !direct };
   pvReset();
   msg('加载中…');
+  // 一直没有画面: 12 秒后提示, 并挂上「切换源」(别的源还在搜就等搜到再挂)
+  clearTimeout(stuckT);
+  stuckT = setTimeout(() => { if (cur && !video.paused && video.readyState < 2) msg('一直没加载出来…', true); }, 12000);
   showCover(cur?.kind === 'vod' && cur.d?.adult ? cardPic(cur.d) : '');   // adult sources only
   fixDuration(video, url.startsWith('/media/h/') ? url : '');
   const seek = () => { if (startAt) video.currentTime = startAt; video.play().catch(() => msg('点一下播放')); };
-  const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集/换个源试试'); };
+  const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集或换个源试试', true); };
   if (window.Hls && Hls.isSupported() && !direct) {
     hls = new Hls({ maxBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 4, ...(url.startsWith('/media/h/') ? { startPosition: startAt || 0 } : {}) });
     hls.on(Hls.Events.MANIFEST_PARSED, seek);
@@ -2303,11 +2361,11 @@ function load(url, startAt, viaProxy, isLocal) {
     video.onerror = () => retry('无法解码');
   }
 }
-video.addEventListener('playing', () => msg(''));
+video.addEventListener('playing', () => { clearTimeout(stuckT); msg(''); });
 video.addEventListener('timeupdate', () => { if (video.currentTime > 0 && video.readyState >= 2) hideCover(); });
 video.addEventListener('playing', hideCover);
 video.addEventListener('error', hideCover);
-video.addEventListener('waiting', () => msg('缓冲中…'));
+video.addEventListener('waiting', () => { if (!msgAct) msg('缓冲中…'); });
 video.addEventListener('ended', () => { if (cur && cur.ep < cur.eps.length - 1) step(1); });
 let lastSave = 0;
 video.addEventListener('timeupdate', () => {
@@ -2355,6 +2413,7 @@ function step(n) { cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)
 // Picking closes the panel; click outside or Esc also closes it.
 function renderPlist() {
   const box = $('.plist'), live = cur.kind === 'live';
+  box.dataset.mode = 'ep'; box.classList.remove('srcs');
   box.classList.toggle('live', live);
   box.innerHTML = `<div class="phead"><i class="grab"></i><b>${live ? '频道' : '选集'}</b><span>${cur.ep + 1} / ${cur.eps.length}</span>
       <button class="icon sm" data-pclose title="关闭">✕</button></div>
@@ -2371,7 +2430,7 @@ function renderPlist() {
 function togglePlist(open = $('.plist').hidden) {
   const box = $('.plist');
   box.hidden = !open;
-  $('[data-act=list]').classList.toggle('on', open);
+  $('[data-act=list]').classList.toggle('on', open && box.dataset.mode !== 'src');
   player.classList.toggle('plopen', open);
   if (open) {
     const list = $('.pitems', box), on = $('.pitems .on', box);   // 不用 scrollIntoView (会连播放器容器一起滚走)
@@ -2395,9 +2454,10 @@ player.addEventListener('click', e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'close') history.back();
   if (act === 'pip') togglePip();
+  if (act === 'src') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSrcSheet(); }
   if (act === 'next') step(1);
   if (act === 'prev') step(-1);
-  if (act === 'list') return togglePlist();
+  if (act === 'list') { if ($('.plist').dataset.mode === 'src') { renderPlist(); return togglePlist(true); } return togglePlist(); }
   if (act === 'ext') { video.pause(); return openLocal(cur.eps[cur.ep].url, 'play'); }
   if (act === 'share') {
     const c = cur.eps[cur.ep], live = cur.kind === 'live';
@@ -2440,14 +2500,27 @@ video.controls = false;
 let gesturing = false;
 document.documentElement.classList.toggle('touchui', !fineCursor);
 const pacts = $('.pacts');
-if (!fineCursor) { ctrl.append(pacts); $('.pmore').prepend($('[data-act=vfav]'), $('[data-act=star]'), $('[data-act=dl]')); }   // 触屏: 收藏 / 下载 / 分享 / 倍速都在「更多」里
+if (!fineCursor) {
+  // 触屏: 顶栏右上角「更多」(浮窗向下展开: 收藏 / 下载 / 分享 / 自动跳过 / 小窗); 底栏 上一集 下一集 选集 倍速, 全屏贴在最右
+  ctrl.append(pacts);
+  const wrap = document.createElement('div'); wrap.className = 'pmorewrap';
+  wrap.append($('[data-act=more]'), $('.pmore'));
+  $('.pbar').append(wrap);
+  $('.pmore').prepend($('[data-act=vfav]'), $('[data-act=star]'), $('[data-act=dl]'));
+  $('.pmore').append($('[data-act=pip]'));
+  pacts.insertBefore($('[data-act=rate]'), $('[data-act=fs]'));
+}
 else {
   pacts.insertBefore($('[data-act=share]'), $('[data-act=more]')); pacts.insertBefore($('[data-act=skipt]'), $('[data-act=more]'));
   $('[data-c=rate]').before($('[data-act=prev]'), $('[data-act=next]'), $('[data-act=list]'));   // 大屏: 上一集 / 下一集 / 选集在播放器下面, 倍速左边
 }   // desktop: no 更多, share stays in the top bar
+// 「更多」里一个能点的都没有 (本地文件、浏览器没有小窗…) 就不显示这个按钮
+const syncMore = () => { if (!fineCursor) $('[data-act=more]').hidden = ![...$('.pmore').children].some(b => !b.hidden); };
+const syncFs = () => { const h = hideFs(); $('[data-act=fs]').hidden = h; $('[data-c=fs]').hidden = h; };
 $('[data-c=pip]').hidden = !pipSupported();
-$('[data-c=fs]').hidden = hideFs();
-video.addEventListener('loadedmetadata', () => { if (cur) $('[data-act=pip]').hidden = !pipSupported() || fineCursor; });
+syncFs();
+video.addEventListener('loadedmetadata', () => { if (cur) $('[data-act=pip]').hidden = !pipSupported() || fineCursor; syncFs(); syncMore(); });
+video.addEventListener('resize', syncFs);
 // ---- 拖动 / 快进快退时的杂音处理 ----
 // 远程 HLS 切换进度后偶尔有「电流音」: 一是连续的 seek 把解码器冲得太快 (滚轮 / 连按快进 / 拖动进度条), 二是跳转瞬间新旧音频接缝处的爆音。
 // duckOnSeek: 一发生 seek 就静音, seek 完成 220ms 后恢复 (拖动中一直静音, 像大多数播放器那样); 只动 muted, 不动音量, 也不记进 playerMuted。
@@ -3990,7 +4063,7 @@ async function renderSettings() {
   $('#exportAll').onclick = () => exportSources($$('#sites .srow'), $$('#lives .srow'));
   $('#clipGo').onclick = () => { const t = $('#clipText').value.trim(); if (t) recognizeFlow(t); };
   $('#clipRead').onclick = async () => {
-    try { const t = await navigator.clipboard.readText(); $('#clipText').value = t; if (t.trim()) recognizeFlow(t); }
+    try { const t = await navigator.clipboard.readText(); $('#clipText').value = t; if (t.trim() && !isOwnShare(t)) recognizeFlow(t); }
     catch { toast('浏览器不让直接读剪贴板（局域网 http 页面的限制），请在框里粘贴'); $('#clipText').focus(); }
   };
   $('#imp').onclick = async () => {
@@ -4082,10 +4155,28 @@ async function localSettings(pre) {
 // clipboard-read is already granted (localhost), new clipboard text is also checked on window focus.
 const clipKey = t => { let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return String(h); };
 const looksLikeSource = t => /(https?|rtmp|rtsp):\/\/|#EXTINF|#genre#|"sites"\s*:/.test(t);
-
+// 自己这个站点的分享链接 (#/v/… #/play/… #/tv/… #/find/…) 不用当源去识别: 同一个地址，或者本机的局域网地址
+const SHARE_ROUTE = /^#\/(v|play|tv|find|search|cat|charts|person)\b/;
+function isOwnShare(t) {
+  const s = String(t || '').trim();
+  const urls = s ? s.match(/https?:\/\/[^\s"'<>]+/gi) : null;
+  if (!urls) return false;
+  const port = u => u.port || (u.protocol === 'https:' ? '443' : '80');
+  const local = h => h === location.hostname || /^(localhost|127\.|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
+  const own = raw => {
+    let u; try { u = new URL(raw); } catch { return false; }
+    if (!SHARE_ROUTE.test(u.hash)) return false;
+    if (u.origin === location.origin) return true;
+    // 同一个端口 + 本机 / 局域网地址: 手机上分享的链接拷到电脑上粘贴也算
+    if (port(u) === port(location) && local(u.hostname)) return true;
+    return (serverInfo?.urls || []).some(x => { try { const y = new URL(x); return y.hostname === u.hostname && port(y) === port(u); } catch { return false; } });
+  };
+  return urls.every(own);          // 里面的链接全是自己站点的分享链接 (前后带片名之类的文字也算)
+}
 document.addEventListener('paste', e => {
   if (e.target instanceof Element && e.target.closest('input, textarea, [contenteditable]')) return;
   const t = e.clipboardData?.getData('text') || '';
+  if (isOwnShare(t)) { localStorage.clipSeen = clipKey(t); return; }   // 本站的分享链接: 不识别, 也不提示
   if (looksLikeSource(t)) { e.preventDefault(); recognizeFlow(t); }   // an explicit paste is always taken
 });
 addEventListener('focus', async () => {
@@ -4093,6 +4184,7 @@ addEventListener('focus', async () => {
     const p = await navigator.permissions.query({ name: 'clipboard-read' });
     if (p.state !== 'granted') return;
     const t = await navigator.clipboard.readText();
+    if (isOwnShare(t)) { localStorage.clipSeen = clipKey(t); return; }
     if (!looksLikeSource(t) || localStorage.clipSeen === clipKey(t)) return;
     localStorage.clipSeen = clipKey(t);
     recognizeFlow(t, true);
@@ -4260,7 +4352,7 @@ function openClipSession() {
     try {
       if ((await navigator.permissions.query({ name: 'clipboard-read' })).state !== 'granted') return;
       const t = await navigator.clipboard.readText(), k = clipKey(t);
-      if (looksLikeSource(t) && !seen.has(k)) add(t, k);
+      if (!isOwnShare(t) && looksLikeSource(t) && !seen.has(k)) add(t, k);
     } catch {}
   }, 1500);
   const lock = on => {   // while saving nothing in the sheet can be changed, cancelled or submitted twice
@@ -4292,6 +4384,7 @@ function openClipSession() {
     if (op === 'paste') {
       try {
         const t = await navigator.clipboard.readText();
+        if (isOwnShare(t)) return;                 // 自己站点的分享链接: 不识别也不提示
         if (!looksLikeSource(t)) return toast('剪贴板里没有源地址');
         const k = clipKey(t); localStorage.clipSeen = k; return add(t, k);
       } catch { return toast('浏览器不让直接读剪贴板（局域网 http 页面的限制），请直接按 Ctrl/⌘+V 粘贴'); }
