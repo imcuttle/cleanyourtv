@@ -11,6 +11,7 @@ const I = {
   heart: ic('<path d="M12 21l-1.5-1.3C5.4 15.1 2 12 2 8.5A4.5 4.5 0 0 1 6.5 4c1.7 0 3.4.8 4.5 2.1C12.1 4.8 13.8 4 15.5 4A4.5 4.5 0 0 1 20 8.5c0 3.5-3.4 6.6-8.5 11.2z"/>'),
   star: ic('<path d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3l-5.9 3.3 1.3-6.6L2.5 9.4l6.6-.8z"/>'),
   list: ic('<path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h10v2H4z"/>'),
+  share: ic('<circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>'),
   info: ic('<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-6h2zm0-8h-2V7h2z"/>'),
   ban: ic('<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 0 1 6.3 12.9L7.1 5.7A7.9 7.9 0 0 1 12 4zM5.7 7.1l11.2 11.2A8 8 0 0 1 5.7 7.1z"/>'),
   vol: ic('<path d="M4 9v6h4l5 5V4L8 9z"/><path class="w" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2"/><path class="x" d="M16 9l6 6M22 9l-6 6" stroke="currentColor" stroke-width="2"/>'),
@@ -37,6 +38,7 @@ root.innerHTML = `
     <button data-a="like" title="喜欢 (l)">${I.heart}<span>喜欢</span></button>
     <button data-a="fav" title="收藏 (s)">${I.star}<span>收藏</span></button>
     <button data-a="eps" title="选集 (e)">${I.list}<span>选集</span></button>
+    <button data-a="share" title="分享">${I.share}<span>分享</span></button>
     <button data-a="detail" title="详情 (i)">${I.info}<span>详情</span></button>
     <button data-a="dislike" title="不感兴趣 (d)">${I.ban}<span>不想看</span></button>
   </div>
@@ -712,6 +714,7 @@ function act(a) {
   if (a === 'like') return doLike(!likes.has(keyOf(s.it)));
   if (a === 'fav') { if (!s.d || kidsMode()) return; const on = favs.toggle(s.d); if (on) bump(s.it, s.d, 2); toast(on ? '已收藏' : '已取消收藏'); return syncRail(); }
   if (a === 'eps') { if (!s.d) return; if (sheetEl.hidden) { renderSheet(); sheetEl.hidden = false; menuEl.hidden = true; } else sheetEl.hidden = true; return; }
+  if (a === 'share') { if (s.it.site === 'local') return; return shareNow(vodHref(s.it.site, s.it.id), s.it.name || s.d?.name || ''); }
   if (a === 'detail') { s.video.pause(); return openDetail(s.it.site, s.it.id); }
   if (a === 'dislike') { bump(s.it, s.d, -3); markSeen(s.it); toast('已减少这类推荐'); s.judged = true; return go(1); }
 }

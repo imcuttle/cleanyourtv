@@ -386,9 +386,20 @@ async function copyText(t) {
   let ok = false; try { ok = document.execCommand('copy'); } catch {}
   ta.remove(); return ok;
 }
-// 分享 = 直接复制链接（链接里不含令牌，对方打开后输入一次访问令牌）
-async function shareNow(hash) {
+// 分享 = 手机上唤起系统分享面板 (微信 / 信息 / 邮件 / AirDrop …)，没有系统分享的环境 (桌面浏览器、http 局域网地址不是安全上下文)
+// 退回复制链接。链接里不含令牌，对方打开后输入一次访问令牌。
+// navigator.share 必须在用户手势里同步调用：shareUrl 是同步的，调用前不能 await 任何东西，否则 iOS Safari 会拒绝。
+async function shareNow(hash, title = '') {
   const url = shareUrl(hash);
+  if (navigator.share) {
+    try {
+      await navigator.share({ ...(title ? { title, text: title } : {}), url });
+      return;
+    } catch (err) {
+      if (err?.name === 'AbortError') return;   // 用户自己关掉了面板
+      // 其它错误 (NotAllowedError 等): 退回复制
+    }
+  }
   if (await copyText(url)) toast('链接已复制');
   else prompt('复制这个链接：', url);
 }
@@ -1134,7 +1145,7 @@ function openCardMenu(c, x, y, sheet) {
   ctxCard = c; c.classList.add('lp'); ctxAt = Date.now();
   const m = ctxEl = document.createElement('div');
   m.className = 'ctxm' + (sheet ? ' csheet' : '');
-  m.innerHTML = `${sheet ? `<div class="chead">${esc(c.querySelector('.name')?.textContent || '')}</div>` : ''}<button data-ctx="play">${IC.play}影片播放</button><button data-ctx="feed">${IC.feed}沉浸播放</button>`;
+  m.innerHTML = `${sheet ? `<div class="chead">${esc(c.querySelector('.name')?.textContent || '')}</div>` : ''}<button data-ctx="play">${IC.play}影片播放</button><button data-ctx="feed">${IC.feed}沉浸播放</button>${c.dataset.site === 'local' ? '' : `<button data-ctx="share">${IC.share}分享</button>`}`;
   document.body.append(m);
   if (sheet) { ctxSheet = true; sheetScrim.hidden = false; document.body.classList.add('sheet-open', 'card-sheet'); }
   else {
@@ -1146,7 +1157,9 @@ function openCardMenu(c, x, y, sheet) {
     const b = e.target.closest('[data-ctx]'); if (!b) return;
     e.stopPropagation();
     closeCardMenu();
-    if (b.dataset.ctx === 'play') playDirect(c); else feedFromCard(c);
+    if (b.dataset.ctx === 'play') playDirect(c);
+    else if (b.dataset.ctx === 'share') shareNow(c.getAttribute('href'), c.querySelector('.name')?.textContent || '');
+    else feedFromCard(c);
   });
 }
 async function feedFromCard(c) {
@@ -1811,6 +1824,7 @@ const IC = {
   play: svgI('M7 4.5v15l12-7.5z'),
   retry: svgI('M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5'),
   feed: svgI('M5 3h14v18H5zM10 9.2v5.6l4.5-2.8z'),
+  share: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2"/></svg>',
   trash: svgI('M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3'),
   clear: svgI('M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3'),
   top: svgI('M12 19V7M6 12.5l6-6 6 6M5 3.5h14'),
@@ -1989,7 +2003,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
       $('#extPlay', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'play');
       $('#extReveal', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'reveal');
     }
-    $('#shareBtn', m).onclick = () => shareNow(vodHref(site, id));
+    $('#shareBtn', m).onclick = () => shareNow(vodHref(site, id), d.name);
     if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
@@ -2487,7 +2501,8 @@ player.addEventListener('click', e => {
     const hash = live ? `#/tv/${encodeURIComponent(localStorage.live || '')}/${encodeURIComponent(c.url)}/${encodeURIComponent(c.name || '')}`
       : playHref(cur.d.site, cur.d.id, cur.line, cur.ep);
     $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false);
-    return shareNow(hash);
+    const nm = live ? c.name || '' : [cur.d.name, cur.eps.length > 1 ? c.name : ''].filter(Boolean).join(' ');
+    return shareNow(hash, nm);
   }
   if (act === 'vfav') { toast(favs.toggle(cur.d) ? '已收藏' : '已取消收藏'); return paintVodActs(); }
   if (act === 'dl') {
