@@ -461,13 +461,13 @@ const saveJav = () => { try { localStorage.javdb = JSON.stringify(javCache); } c
 function javMeta(code) {
   const c = javCache[code], age = c ? Date.now() - c.at : Infinity;
   if (c && c.found && c.v === 2 && age < 30 * 86400e3) return Promise.resolve(c);
-  if (c && c.found === false && age < 3 * 86400e3) return Promise.resolve(c);
+  if (c && c.found === false && c.v === 3 && age < 3 * 86400e3) return Promise.resolve(c);
   if (javBusy.has(code)) return javBusy.get(code);
-  const p = api('javdb', { code }, null).catch(e => ({ found: false, error: e.message })).then(r => {
+  const p = api('javdb', { code }, null).catch(e => ({ found: false, error: e.message, aborted: isAbort(e) })).then(r => {
     javBusy.delete(code);
     const v = { ...r, at: Date.now() };
     if (r.found) { javCache[code] = v; saveJav(); }
-    else if (!r.error) { javCache[code] = { found: false, at: v.at }; saveJav(); }
+    else if (!r.error) { javCache[code] = { found: false, v: 3, at: v.at }; saveJav(); }
     return v;
   });
   javBusy.set(code, p);
@@ -483,6 +483,7 @@ const javIO = new IntersectionObserver(es => es.forEach(e => {
   if (!code) { douban(); return; }
   javMeta(code).then(r => {
     if (!el.isConnected) return;
+    if (r.aborted) { delete el.dataset.jobs; setTimeout(() => { if (el.isConnected) observeJav(el.parentElement || document); }, 800); return; }   // 切页面时被取消: 这张卡还在屏幕上就重新排队
     if (!r.found) { douban(); return; }
     if (r.cover && (el.dataset.site === 'local' || !el.querySelector('.img img'))) {
       const im = el.querySelector('.img img'); const ph = el.querySelector('.img');

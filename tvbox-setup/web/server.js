@@ -1615,7 +1615,7 @@ function javText(url) {
     let body = '', lastErr = null;
     for (const host of order) {
       try {
-        const r = await fetch(host + path_, { headers: { 'User-Agent': DB_UA, Referer: host + '/', Accept: 'text/html' }, signal: AbortSignal.timeout(order.length > 1 ? 9000 : 15000) });
+        const r = await fetch(host + path_, { headers: { 'User-Agent': DB_UA, Referer: host + '/', Accept: 'text/html', 'Accept-Language': 'zh-CN,zh;q=0.9', Cookie: 'over18=1; locale=zh' }, signal: AbortSignal.timeout(order.length > 1 ? 9000 : 15000) });   // over18: 不带的话 javdb 会先给年龄确认页, 搜不到任何东西
         if (!r.ok) throw new Error(`javdb HTTP ${r.status}`);
         const t = await r.text();
         if (/<title>\s*(Redirecting|Just a moment)/i.test(t)) throw new Error('javdb 需要人机验证，换一个镜像（环境变量 JAVDB_URL）');
@@ -1667,7 +1667,8 @@ async function javMeta(code) {
   code = javCode(code);
   if (!code) return { found: false };
   const c = javdbCache[code];
-  if (c && c.at && (c.v === 2 || c.found === false) && Date.now() - c.at < (c.found === false ? 7 : 30) * 86400e3)
+  // 「没有这个番号」只有 v:3 的才算数 (旧版没带年龄确认的 cookie，拿到确认页就记成了「没有」)
+  if (c && c.at && (c.found === false ? c.v === 3 : c.v === 2) && Date.now() - c.at < (c.found === false ? 7 : 30) * 86400e3)
     return c.found === false ? { found: false } : { found: true, code, ...c };
   try {
     const html = await javText(`${JAVDB_URL}/search?q=${encodeURIComponent(code)}&f=all`);
@@ -1675,17 +1676,23 @@ async function javMeta(code) {
     for (const m of html.matchAll(/<a\b[^>]*href="\/v\/([A-Za-z0-9]+)"[^>]*>(.*?)<\/a>/gs)) {
       const inner = m[2];
       const uid = (/class="uid"[^>]*>([^<]+)</i.exec(inner) || [])[1] || '';
-      if (uid && javCode(uid) !== code) continue;
       const title = (/<strong>([\s\S]*?)<\/strong>/i.exec(inner) || [])[1]
         || (/title="([^"]{2,})"/.exec(inner) || [])[1] || '';
       if (!title) continue;
+      // 搜索结果是模糊匹配的: 必须是同一个番号才算 (番号写在 class="uid" 里, 新版页面写在标题开头的 <strong> 里)
+      const cc = javCode(uid || stripHtml(title));
+      if (cc ? cc !== code : !stripHtml(inner).toUpperCase().includes(code)) continue;
       best = { id: m[1], title: stripHtml(title), uid: stripHtml(uid) || code,
         cover: (/(?:src|data-src)="([^"]*(?:jdbstatic|covers)[^"]*)"/i.exec(inner) || [])[1] || '',
         date: (/\b(19|20)\d{2}[-/]\d{1,2}[-/]\d{1,2}\b/.exec(inner) || [''])[0] || '',
         ...javScore(inner) };
       break; // first exact-code hit
     }
-    if (!best) { javdbCache[code] = { found: false, at: Date.now() }; javDirty = true; return { found: false }; }
+    if (!best) {
+      // 只有确实是「搜索结果页」才记成没有; 年龄确认 / 人机验证 / 改版的页面不记, 下次再试
+      if (!/movie-list|empty-message|class="[^"]*\bsearch/i.test(html)) { javWarn(`${code}: 返回的不是搜索结果页 (${html.length} 字节)`); return { found: false, error: 'javdb 返回的不是搜索结果页' }; }
+      javdbCache[code] = { found: false, v: 3, at: Date.now() }; javDirty = true; return { found: false };
+    }
     let actors = [];
     try {
       const vh = await javText(`${JAVDB_URL}/v/${best.id}`);
@@ -1696,8 +1703,10 @@ async function javMeta(code) {
     const out = { found: true, title: best.title, cover: best.cover, date: best.date, score: best.score, votes: best.votes, v: 2, actors, id: best.id, url: JAVDB_URL + '/v/' + best.id, at: Date.now() };
     javdbCache[code] = out; javDirty = true;
     return { found: true, code, ...out };
-  } catch (e) { return { found: false, error: e.message }; }
+  } catch (e) { javWarn(`${code}: ${e.message}`); return { found: false, error: e.message }; }
 }
+let javWarnAt = 0;
+const javWarn = m => { if (Date.now() - javWarnAt > 30e3) { javWarnAt = Date.now(); console.error('[javdb] ' + m + ' （连不上可以设环境变量 JAVDB_URL 为镜像地址）'); } };
 rpcHandlers.javdb = ({ code }) => javMeta(code);
 
 // ======================= 豆瓣榜单 =======================
