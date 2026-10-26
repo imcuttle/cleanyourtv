@@ -49,6 +49,14 @@ const ACTIONS = [
 let MODE = 'git';
 const updateHint = () => MODE === 'git' ? '检测到 git 仓库: git pull 更新后启动' : `不是 git 仓库: 下载 GitHub 仓库默认分支的最新 zip (${(() => { try { return updater.repoSlug(); } catch { return '?'; } })()}), 解压替换后启动`;
 
+// 退出只有一种方式: 3 秒内连按两次 Ctrl+C。第一次只提示。(查看日志时 q / Esc / Ctrl+C 是回到菜单)
+let ccAt = 0;
+const ccPending = () => Date.now() - ccAt < 3000;
+function ctrlC() {
+  if (ccPending()) { process.stdout.write('\x1b[?25h\n'); process.exit(0); }
+  ccAt = Date.now();
+  return false;
+}
 function choose(defKey) {
   return new Promise(resolve => {
     let i = Math.max(0, ACTIONS.findIndex(a => a.key === defKey));
@@ -63,7 +71,7 @@ function choose(defKey) {
       out.push('');
       ACTIONS.forEach((a, k) => out.push(`${k === i ? `${C.inv} ▶ ${a.title} ${C.x}` : `   ${a.title}`}  ${C.d}${k === i ? hints[a.key] : ''}${C.x}`));
       out.push('');
-      out.push(`${C.d}↑↓ 选择 · 回车确认 · q 退出${defKey ? ` · 默认: ${ACTIONS.find(a => a.key === defKey)?.title || ''} (上次)` : ''}${C.x}`);
+      out.push(ccPending() ? `${C.y}再按一次 Ctrl+C 退出${C.x}` : `${C.d}↑↓ 选择 · 回车确认 · Ctrl+C 两次退出${defKey ? ` · 默认: ${ACTIONS.find(a => a.key === defKey)?.title || ''} (上次)` : ''}${C.x}`);
       process.stdout.write(out.map(l => '\x1b[2K' + l).join('\n') + '\n');
     };
     process.stdin.setRawMode(true);
@@ -71,18 +79,22 @@ function choose(defKey) {
     process.stdin.setEncoding('utf8');
     process.stdout.write('\x1b[?25l');
     draw();
+    let ccT = 0;
     const done = v => {
+      clearTimeout(ccT);
       process.stdin.removeListener('data', onKey);
       process.stdin.setRawMode(false); process.stdin.pause();
       process.stdout.write('\x1b[?25h');
       resolve(v);
     };
-    const onKey = k => {
-      if (k === '\x03' || k === 'q' || k === 'Q' || k === '\x1b') return done(null);
+    const onKey = chunk => { for (const k of String(chunk).match(/\x1b\[[0-9;]*[A-Za-z~]|[\s\S]/g) || []) { if (key(k) === 'done') return; } };   // 一次读到几个按键 (连按 / 粘贴) 要拆开
+    const key = k => {
+      if (k === '\x03') { ctrlC(); clearTimeout(ccT); ccT = setTimeout(draw, 3100); draw(); return; }
+      if (k === '\x1b') return;
       if (k === '\x1b[A' || k === 'k') i = (i + ACTIONS.length - 1) % ACTIONS.length;
       else if (k === '\x1b[B' || k === 'j') i = (i + 1) % ACTIONS.length;
       else if (/^[1-9]$/.test(k) && +k <= ACTIONS.length) i = +k - 1;
-      else if (k === '\r' || k === '\n' || k === ' ') return done(ACTIONS[i].key);
+      else if (k === '\r' || k === '\n' || k === ' ') { done(ACTIONS[i].key); return 'done'; }
       draw();
     };
     process.stdin.on('data', onKey);
@@ -212,7 +224,7 @@ function doStatus() {
 }
 function doLogs() {
   if (!fs.existsSync(LOG)) { warn('还没有日志 (服务没有用本脚本启动过)'); return Promise.resolve(); }
-  say(`${C.d}--- ${LOG}  (Ctrl+C 退出) ---${C.x}`);
+  say(`${C.d}--- ${LOG}  (q / Esc / Ctrl+C 回到菜单) ---${C.x}`);
   say(tail(LOG, 40).join('\n'));
   return new Promise(resolve => {
     let pos = fs.statSync(LOG).size;
@@ -224,46 +236,64 @@ function doLogs() {
       fs.readSync(fd, buf, 0, buf.length, pos); fs.closeSync(fd);
       pos = st.size; process.stdout.write(buf.toString('utf8'));
     }, 500);
-    process.on('SIGINT', () => { clearInterval(timer); resolve(); });
+    const raw = !!process.stdin.isTTY;
+    if (raw) process.stdin.setRawMode(true);
+    process.stdin.resume(); process.stdin.setEncoding('utf8');
+    const end = () => {
+      clearInterval(timer); process.stdin.removeListener('data', onKey); process.removeListener('SIGINT', end);
+      if (raw) process.stdin.setRawMode(false);
+      process.stdin.pause(); resolve();
+    };
+    const onKey = k => { if (/^(q|Q|\x1b|\x03)$/.test(String(k)) || /[qQ\x03]/.test(String(k))) end(); };
+    process.stdin.on('data', onKey);
+    process.on('SIGINT', end);
   });
 }
 
 // ---------------- main ----------------
-const waitEnter = msg => new Promise(r => { say(msg); process.stdin.resume(); process.stdin.once('data', () => { process.stdin.pause(); r(); }); });
-(async () => {
-  const st = loadState();
-  let action = process.argv[2];
-  if (action && !ACTIONS.some(a => a.key === action)) { bad('用法: node manage.js [restart|update|check|stop|status|logs|info]'); process.exit(2); }
-  MODE = (await updater.current().catch(() => ({ mode: 'zip' }))).mode;
-  if (!action) {
-    if (!process.stdin.isTTY) action = st.last || 'restart';
-    else {
-      action = await choose(st.last);
-      if (!action) process.exit(0);
+// 交互 (TUI) 下做完一个操作回到菜单，只有选 q / Esc / Ctrl+C 才退出；带参数 (node manage.js restart) 是一次性命令，做完退出。
+const readLine = msg => new Promise(r => { process.stdout.write(msg); process.stdin.resume(); process.stdin.setEncoding('utf8'); process.stdin.once('data', d => { process.stdin.pause(); r(String(d).trim()); }); });
+let viewing = false;   // 查看日志时 Ctrl+C 只是回到菜单，不计入「按两次退出」
+const waitEnter = msg => readLine(msg + '\n').then(() => {});
+
+// 返回 true = 做完了
+async function perform(action, interactive) {
+  if (action === 'check') return doCheck();
+  if (action === 'info') return doInfo();
+  if (action === 'status') return doStatus();
+  if (action === 'logs') return doLogs();
+  await stopRunning();                       // 先停: 更新要替换正在使用的文件
+  if (action === 'stop') return ok('已停止');
+  if (action === 'update') {
+    try { await updater.apply(t => step(t)); ok('更新完成'); }
+    catch (e) {
+      bad(e.message);
+      if (!interactive) throw e;
+      const a = await readLine('当前版本没有被破坏。回车 = 用当前版本启动，n + 回车 = 回到菜单: ');
+      if (/^n/i.test(a)) return;
     }
   }
-  saveState({ last: action });
-  say('');
-  const pause = async code => { if (process.stdin.isTTY && !process.argv[2] && WIN) await waitEnter('\n按回车关闭'); process.exit(code); };   // Windows 双击打开的窗口会立刻消失，留一下让人看结果
-  try {
-    if (action === 'check') { await doCheck(); return pause(0); }
-    if (action === 'info') { doInfo(); return pause(0); }
-    if (action === 'status') { doStatus(); return pause(0); }
-    if (action === 'logs') { await doLogs(); process.exit(0); }
-    await stopRunning();                       // 先停: 更新要替换正在使用的文件
-    if (action === 'stop') { ok('已停止'); return pause(0); }
-    if (action === 'update') {
-      try { await updater.apply(t => step(t)); ok('更新完成'); }
-      catch (e) {
-        bad(e.message);
-        if (process.stdin.isTTY) await waitEnter('当前版本没有被破坏，按回车继续用当前版本启动，Ctrl+C 取消。');
-        else process.exit(1);
-      }
-    }
-    await start();
-    await pause(0);
-  } catch (e) {
-    bad(e.message);
-    await pause(1);
+  await start();
+}
+
+(async () => {
+  MODE = (await updater.current().catch(() => ({ mode: 'zip' }))).mode;
+  const arg = process.argv[2];
+  if (arg && !ACTIONS.some(a => a.key === arg)) { bad('用法: node manage.js [restart|update|check|stop|status|logs|info]'); process.exit(2); }
+  if (arg || !process.stdin.isTTY) {          // 一次性命令 / 没有终端: 做一次就退出
+    const action = arg || loadState().last || 'restart';
+    saveState({ last: action });
+    try { await perform(action, false); process.exit(0); } catch (e) { bad(e.message); process.exit(1); }
+  }
+  process.on('SIGINT', () => { if (viewing) return; if (ctrlC()) return; process.stdout.write(`\n${C.y}再按一次 Ctrl+C 退出${C.x}\n`); });   // 菜单以外 (等回车 / 执行中) 的 Ctrl+C
+  for (;;) {
+    const action = await choose(loadState().last);
+    saveState({ last: action });
+    say('');
+    viewing = action === 'logs';
+    try { await perform(action, true); } catch (e) { bad(e.message); }
+    viewing = false;
+    if (action !== 'logs') await waitEnter(`\n${C.d}按回车回到菜单${C.x}`);
+    say('');
   }
 })();
