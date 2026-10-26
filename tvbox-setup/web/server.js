@@ -53,6 +53,7 @@ const MEDIA_ONLY = cluster.isWorker && process.env.TVBOX_MEDIA === '1';
 // ---- primary: fork, restart, relay RPC between workers and the leader / media process ----
 function primary() {
   cluster.schedulingPolicy = cluster.SCHED_RR; // even spread, also on Windows
+  cluster.setupPrimary({ windowsHide: true });   // Windows: 后台运行 (没有控制台) 时，不隐藏的话每个工作进程都会弹出一个 node.exe 黑窗口
   let leader = null, media = null, announced = false, stopping = false;
   const pending = new Map(); // rpc id -> requesting worker
   const dog = new GUARD.Watchdog(w => { try { w.process.kill('SIGKILL'); } catch {} });
@@ -370,7 +371,7 @@ async function checkLive(url, name) {
 // Covers (one frame) and hover previews (3s gif), made with ffmpeg when it is installed. Cached 15 min.
 const FFMPEG = (() => {
   for (const c of [process.env.FFMPEG, path.join(ROOT, '.tools', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'), 'ffmpeg'].filter(Boolean)) {
-    try { execFileSync(c, ['-version'], { stdio: 'ignore' }); return c; } catch {}
+    try { execFileSync(c, ['-version'], { stdio: 'ignore', windowsHide: true }); return c; } catch {}
   }
   return '';
 })();

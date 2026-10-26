@@ -18,7 +18,7 @@ function supervise(entry) {
   const HANG = num('TVBOX_PRIMARY_HANG_MS', 90e3);
   const start = () => {
     startedAt = lastBeat = Date.now();
-    child = fork(entry, process.argv.slice(2), { env: { ...process.env, TVBOX_SUPERVISED: '1' }, stdio: 'inherit' });
+    child = fork(entry, process.argv.slice(2), { env: { ...process.env, TVBOX_SUPERVISED: '1' }, stdio: 'inherit', windowsHide: true });
     child.on('message', m => { if (m && m.t === 'hb') lastBeat = Date.now(); else if (m && m.t === 'restart') { log('收到重启请求：' + (m.why || '')); planned = true; try { child.kill('SIGTERM'); } catch {} } });
     child.on('exit', (code, sig) => {
       clearInterval(killTimer);
