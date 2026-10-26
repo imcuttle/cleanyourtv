@@ -43,7 +43,7 @@ const ACTIONS = [
   { key: 'check', title: '检查更新', hint: '只看有没有新版本，不改任何文件' },
   { key: 'stop', title: '停止服务', hint: '停掉正在运行的实例' },
   { key: 'status', title: '运行状态', hint: '是否在运行、进程号、访问地址' },
-  { key: 'logs', title: '查看日志', hint: '服务在后台运行，输出写在 data/server.log (Ctrl+C 退出查看)' },
+  { key: 'logs', title: '查看日志', hint: '服务在后台运行，输出写在 data/server.log (q 退出查看)' },
   { key: 'info', title: '访问信息', hint: '访问地址、访问令牌、管理员令牌' },
 ];
 let MODE = 'git';
