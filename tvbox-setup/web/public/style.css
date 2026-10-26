@@ -1199,7 +1199,7 @@ nav .mine { display: none; }
 
 /* 沉浸看片: 横屏视频上提 + 「全屏观看」按钮 (同抖音) */
 .fd-full { display: none; }
-.fd-slide.land video { transform: translateY(calc(-1 * var(--lshift, 0px))); }
+.fd-slide.land video, .fd-slide.land .fd-cover { transform: translateY(calc(-1 * var(--lshift, 0px))); }
 .fd-slide.land:not(.empty) .fd-full { display: flex; position: absolute; z-index: 3; left: 50%; top: var(--lbtn); transform: translateX(-50%); align-items: center; gap: 3px; padding: 2px 8px 2px 6px;
   border-radius: 11px; border: 1px solid #ffffff14; background: #ffffff0f; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-size: 10px; line-height: 1.2; color: #fff; white-space: nowrap; }
 .fd-full svg { width: 10px; height: 10px; }

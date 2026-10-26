@@ -111,16 +111,34 @@ function fitBlurb(s) {
   }
   p.style.webkitLineClamp = String(lines);
 }
+// 上提和封面 / 画面的位置要一致, 中途不能有位移: 封面是横图就在一开始套上上提 (pred), 封面和后来的画面都在上提后的位置;
+// 竖图封面 + 横屏视频, 则等第一帧出来才上提 (封面 / 海报在原位不动, 画面一出现就在上提位置, 不会看到封面先跳一下)。
+function setLandVars(s, ratio) {
+  const W = root.clientWidth, H = root.clientHeight, vh = W * ratio, shift = H * .09;
+  s.el.style.setProperty('--lshift', shift + 'px');
+  s.el.style.setProperty('--lbtn', Math.round(H / 2 - shift + vh / 2 + 18) + 'px');
+}
 function layoutLand(s) {
   const v = s.video, W = root.clientWidth, H = root.clientHeight;
   if (!v.videoWidth || !W) return;   // 还不知道尺寸 (或沉浸层没显示): 保持原状, 不要把已有的上提取消掉
   const land = v.videoWidth > v.videoHeight * 1.15 && H > W * 1.2;
+  if (!s.el.classList.contains('framed') && !(s.pred && land)) return;   // 第一帧之前先不动
   s.el.classList.toggle('land', land);
-  if (!land) { fitBlurb(s); return; }
-  const vh = W * v.videoHeight / v.videoWidth, shift = H * .09;
-  s.el.style.setProperty('--lshift', shift + 'px');
-  s.el.style.setProperty('--lbtn', Math.round(H / 2 - shift + vh / 2 + 18) + 'px');
+  if (!land) { s.pred = false; fitBlurb(s); return; }
+  setLandVars(s, v.videoHeight / v.videoWidth);
   fitBlurb(s);
+}
+function predictLand(s, it) {
+  s.pred = false;
+  const pic = cardPic(it); if (!pic) return;
+  const im = new Image();
+  im.onload = () => {
+    if (s.it !== it || s.el.classList.contains('framed')) return;
+    const W = root.clientWidth, H = root.clientHeight;
+    if (!W || !(im.naturalWidth > im.naturalHeight * 1.15 && H > W * 1.2)) return;
+    s.pred = true; setLandVars(s, 9 / 16); s.el.classList.add('land'); fitBlurb(s);
+  };
+  im.src = img(dbSize(pic, 's') || pic);
 }
 function mkSlide() {
   const el = document.createElement('section');
@@ -137,7 +155,7 @@ function mkSlide() {
   for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize']) v.addEventListener(ev, () => layoutLand(s));   // HLS 的画面尺寸有时晚一点才知道
   v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); });
   duckOnSeek(v, () => F.muted || F.autoMuted);
-  const framed = () => { if (v.readyState >= 2 && v.videoWidth) el.classList.add('framed'); };
+  const framed = () => { if (v.readyState >= 2 && v.videoWidth && !el.classList.contains('framed')) { el.classList.add('framed'); layoutLand(s); } };
   for (const ev of ['loadeddata', 'canplay', 'playing', 'seeked', 'timeupdate']) v.addEventListener(ev, framed);
   v.addEventListener('waiting', () => { if (s === cur()) el.classList.add('wait'); });
   v.addEventListener('canplay', () => el.classList.remove('wait'));
@@ -182,7 +200,7 @@ function teardown(s) {
   const v = s.video;
   v.onerror = null; v.onloadedmetadata = null;
   v.pause(); v.removeAttribute('src'); v.removeAttribute('poster'); v.load();
-  s.lastT = 0; s.el.classList.remove('wait', 'paused', 'land', 'framed');   // 换片: 上一部的横屏上提不带到下一部
+  s.lastT = 0; s.pred = false; s.released = false; s.el.classList.remove('wait', 'paused', 'land', 'framed');   // 换片: 上一部的横屏上提不带到下一部
 }
 
 // What to play for a title: its saved place if it has one, else the first episode of the first line.
@@ -211,17 +229,18 @@ function paintCover(s, it) {
 function bind(s, i) {
   teardown(s);
   const it = F.items[i] || null;
-  Object.assign(s, { i, it, d: null, err: false, watched: 0, judged: !it, loading: false, via: false, pre: false });
+  Object.assign(s, { i, it, d: null, err: false, watched: 0, judged: !it, loading: false, via: false, pre: false, stage: 0, compat: false, retried: false, released: false });
   s.msg.textContent = '';
   s.el.classList.toggle('empty', !it);
   if (!it) { s.bg.style.cssText = ''; s.cover.style.cssText = ''; s.el.classList.remove('hascover'); return; }
-  paintCover(s, it);
+  paintCover(s, it); predictLand(s, it);
   // 成人: javdb knows the right cover for a 番号 (what the card swaps in) — repaint once it is known, cached after the first time
   if (it.adult && state.level === 'all') { const code = javCode(it.name); if (code) javMeta(code).then(r => { if (s.it === it && r.found && r.cover && javCoverWanted(it)) paintCover(s, it); }); }
   s.el.classList.remove('framed');
   s.h2.textContent = it.name; s.meta.textContent = ''; s.blurb.textContent = '';
   if (it._d) return ready(s, it._d);
-  validate(it).then(d => { if (s.it !== it) return; if (!d) { s.err = true; s.msg.textContent = '这部暂时播不了，点一下重试'; if (s === cur() && canAutoSkip(s)) setTimeout(() => { if (s === cur() && s.err && canAutoSkip(s)) go(F.dir); }, 1200); return; } it._d = d; ready(s, d); });
+  // 详情慢 (>10s) 不等于播不了: 失败后再给一次更长的等待, 才算这部不可用
+  validate(it).then(d => d || (s.it === it ? validate(it, 25e3) : null)).then(d => { if (s.it !== it) return; if (!d) { s.err = true; s.msg.textContent = '这部暂时播不了，点一下重试'; if (s === cur() && canAutoSkip(s)) setTimeout(() => { if (s === cur() && s.err && canAutoSkip(s)) go(F.dir); }, 1200); return; } it._d = d; ready(s, d); });
 }
 function ready(s, d) {
   s.d = d; pickStart(s); paintInfo(s);
@@ -233,8 +252,20 @@ function ready(s, d) {
 
 // ---------- playback ----------
 const bufCfg = role => role === 0 ? { maxBufferLength: 30, maxMaxBufferLength: 60 } : { maxBufferLength: 4, maxMaxBufferLength: 6 };
+// 已经划过去的 (上一部) 不占任何资源: 停掉下载、解码和定时器, 只留封面和进度; 划回来时从原位置接着放。
+function release(s) {
+  clearTimeout(s.dog);
+  if (s.released) return;
+  s.released = true; s.resumeAt = s.video.currentTime || s.startAt || 0;
+  if (s.hls) { s.hls.destroy(); s.hls = null; }
+  const v = s.video;
+  v.onerror = null; v.onloadedmetadata = null; v.pause(); v.removeAttribute('src'); v.load();
+  s.loading = false; s.pre = false; s.lastT = 0;
+  s.el.classList.remove('wait', 'framed');                 // 封面 / 海报露出来; 横屏的上提 (land) 保留, 划回来位置不变
+}
 function attach(s, viaProxy = false) {
   const url = s.eps[s.ep].url, role = ring.indexOf(s) - 1, v = s.video;
+  if (role < 0) { s.released = true; s.resumeAt = s.startAt || 0; return; }     // 上一部: 详情晚到也不去加载
   const direct = /\.mp4(\?|$)/i.test(url) || url.startsWith('/media/f/');
   const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : url;
   s.via = viaProxy; s.err = false; s.msg.textContent = '';
@@ -244,13 +275,15 @@ function attach(s, viaProxy = false) {
   const startAt = s.startAt, growing = url.startsWith('/media/h/');   // 边转码边播的列表: 必须从头 (0) 起播, -1 会跳到当前已有部分的末尾
   let seeked = false;
   const onMeta = () => {
-    if (!s.hls && startAt && !seeked) { seeked = true; v.currentTime = startAt; }
+    if ((!s.hls || s.compat) && startAt && !seeked) { seeked = true; v.currentTime = startAt; }
     if (s === cur()) tryPlay(s);
   };
   v.onerror = () => fail(s, '无法解码');
   if (window.Hls && Hls.isSupported() && !direct) {
     s.loading = role === 0 || s.pre;
-    const h = s.hls = new Hls({ enableWorker: true, maxAudioFramesDrift: 4, capLevelToPlayerSize: true, backBufferLength: 20, autoStartLoad: s.loading, startPosition: startAt || (growing ? 0 : -1), ...bufCfg(role) });
+    // compat: 和普通播放器完全一样的配置 (有些源认不了沉浸模式里更省流的那套设置)
+    const h = s.hls = new Hls(s.compat ? { maxBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 4, autoStartLoad: s.loading }
+      : { enableWorker: true, maxAudioFramesDrift: 4, capLevelToPlayerSize: true, backBufferLength: 20, autoStartLoad: s.loading, startPosition: startAt || (growing ? 0 : -1), ...bufCfg(role) });
     h.on(Hls.Events.MANIFEST_PARSED, onMeta);
     h.on(Hls.Events.ERROR, (_, data) => { if (data.fatal && !hlsRecover(h, data)) fail(s, data.details); });
     h.loadSource(src); h.attachMedia(v);
@@ -260,22 +293,27 @@ function attach(s, viaProxy = false) {
   }
   if (s === cur()) { s.el.classList.add('wait'); tryPlay(s); watch(s); }
 }
-// 起播看门狗: 当前这部 15 秒还没出画面 (既没报错也没动), 当作失败处理 -> 换中转 / 换线路 / 停住提示。
-function watch(s) {
+// 起播看门狗: 当前这部 20 秒还没出画面 (既没报错也没动、缓冲也没增长), 当作失败处理; 慢但在加载的不算, 最多等 60 秒。
+const bufEnd = v => { let e = 0; for (let i = 0; i < v.buffered.length; i++) e = Math.max(e, v.buffered.end(i)); return e; };
+function watch(s, waited = 0) {
   clearTimeout(s.dog);
   if (s.err || !s.d) return;
-  const v = s.video, t0 = v.currentTime;
+  const v = s.video, t0 = v.currentTime, b0 = bufEnd(v);
   s.dog = setTimeout(() => {
     if (s !== cur() || s.err || F.userPaused || document.hidden || covered()) return;
     if (v.paused && s.el.classList.contains('paused')) return;       // 浏览器没让自动播放: 不是资源的问题
-    if (v.readyState < 3 && v.currentTime === t0) fail(s, 'stalled');
-  }, 15000);
+    if (v.readyState >= 3 || v.currentTime !== t0) return;
+    if (bufEnd(v) > b0 && waited < 40000) return watch(s, waited + 20000);   // 还在下载, 只是慢
+    fail(s, 'stalled');
+  }, 20000);
 }
 // 失败处理: 先走中转, 再试这部的其他线路 (同一集), 都不行才算播放失败。失败后停在当前页, 不自动跳走 (见 canAutoSkip)。
 function fail(s, why) {
   clearTimeout(s.dog);
+  if (s.released || ring.indexOf(s) < 1) return;            // 已经划过去的不再折腾
   const url = s.eps[s.ep]?.url || '';
-  if (!s.via && !url.startsWith('/media/')) { attach(s, true); return; }
+  // 同一条线路依次试: 直连 -> 中转 -> 普通播放器的配置直连 -> 普通播放器的配置 + 中转
+  if (!url.startsWith('/media/') && s.stage < 3) { s.stage++; s.compat = s.stage >= 2; attach(s, s.stage % 2 === 1); return; }
   s.tried = s.tried || new Set(); s.tried.add(s.line);
   const d = s.d;
   if (d && !url.startsWith('/media/')) {
@@ -283,7 +321,7 @@ function fail(s, why) {
       const eps = d.lines[i].episodes;
       if (s.tried.has(i) || !eps?.length) continue;
       const ep = Math.min(s.ep, eps.length - 1);
-      s.tried.add(i); s.line = i; s.eps = eps; s.ep = ep; s.startAt = 0;
+      s.tried.add(i); s.line = i; s.eps = eps; s.ep = ep; s.startAt = 0; s.stage = 0; s.compat = false;
       paintInfo(s); attach(s);
       return;
     }
@@ -296,20 +334,22 @@ function fail(s, why) {
 const canAutoSkip = s => F.dir < 0 && !F.visited.has(s.i);
 function retry(s) {
   if (!s.d) { bind(s, s.i); return; }
-  s.tried = null; s.via = false; s.startAt = 0;
+  s.tried = null; s.via = false; s.startAt = 0; s.stage = 0; s.compat = false;
   pickStart(s); paintInfo(s); attach(s);
 }
 // Only the current title loads at full speed. The neighbours stay idle until the current one has ~6 s buffered (kick), so
 // they never fight it for bandwidth; after that they pre-buffer a few seconds each so a swipe lands on a ready picture.
 const aheadOf = v => { let e = 0; for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= v.currentTime + 1) e = Math.max(e, v.buffered.end(i)); return e - v.currentTime; };
 function startPre(s) {
-  if (s.pre || !s.d) return;
+  if (s.pre || !s.d || s.released || ring.indexOf(s) < 1) return;
   s.pre = true;
   if (s.hls) { if (!s.loading) { s.hls.startLoad(-1); s.loading = true; } } else s.video.preload = 'auto';
 }
 let kickT = 0;
 function kick() { clearTimeout(kickT); ring.forEach(s => { if (s !== cur()) startPre(s); }); }
 function setRole(s, role) {
+  if (role < 0) { if (s.d) release(s); return; }
+  if (s.released && s.d) { s.released = false; s.err = false; s.startAt = s.resumeAt > 3 ? s.resumeAt - 1 : 0; s.stage = 0; s.compat = false; attach(s); return; }
   if (s.hls) {
     Object.assign(s.hls.config, bufCfg(role));
     if (role === 0) { if (!s.loading) { s.hls.startLoad(-1); s.loading = true; } }
@@ -364,7 +404,7 @@ function onEnded(s) {
 function switchEp(s, line, ep, startAt = 0) {
   saveHist(s);
   s.line = line; s.eps = s.d.lines[line].episodes; s.ep = Math.max(0, Math.min(ep, s.eps.length - 1)); s.startAt = startAt;
-  s.watched = 0; s.judged = false;
+  s.watched = 0; s.judged = false; s.stage = 0; s.compat = false; s.tried = null;
   paintInfo(s); attach(s);
   if (!sheetEl.hidden) renderSheet();
 }
@@ -377,6 +417,7 @@ function activate() {
   markSeen(s.it);
   syncRail();
   clearTimeout(kickT); kickT = setTimeout(kick, 7000);
+  if (s.err && !s.retried) { s.retried = true; s.err = false; s.msg.textContent = ''; s.el.classList.add('wait'); retry(s); return; }   // 邻居预载时失败的 (网络抖动等), 轮到它时再正经试一次
   if (s.err) { s.msg.textContent = s.msg.textContent || '这部暂时播不了，点一下重试'; if (canAutoSkip(s)) setTimeout(() => { if (s === cur() && s.err && canAutoSkip(s)) go(F.dir); }, 800); return; }
   tryPlay(s);
   watch(s);
@@ -394,9 +435,9 @@ function leave(s) {
 
 // ---------- candidates ----------
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, bad) => setTimeout(() => bad(new Error('timeout')), ms))]);
-async function validate(it) {
+async function validate(it, ms = 10e3) {
   try {
-    const d = await withTimeout(api('detail', { site: it.site, id: it.id }, null), 10e3);
+    const d = await withTimeout(api('detail', { site: it.site, id: it.id }, null), ms);
     return d && d.lines?.length && d.lines[0].episodes?.length ? d : null;
   } catch { return null; }
 }
@@ -523,7 +564,7 @@ async function pump() {
         more.forEach(it => { F.keys.add(keyOf(it)); F.names.add(nameOf(it)); });
         F.cand.push(...more);
       }
-      const batch = F.cand.splice(0, 3), ps = batch.map(validate);
+      const batch = F.cand.splice(0, 3), ps = batch.map(it => validate(it));
       for (let i = 0; i < batch.length; i++) {
         const d = await ps[i];
         if (gen !== F.gen) return;
