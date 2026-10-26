@@ -2880,8 +2880,33 @@ async function captureApi(route, params, req) {
   } catch (e) { return { status: 502, body: { error: e.message || String(e) } }; }
 }
 const PREVIEWS = path.join(DATA, 'previews');
+// 预览模式: the normal UI opened with ?pv=vod&pvapi=…&pvname=…[&pvcats=…] (a 点播源) or ?pv=live&pvu=… / pvstash=… (a 直播源).
+// The page adds those params to every request, so the preview lives entirely in the URL: that one source is the only one visible,
+// nothing is read from or written to the config.
+function previewOf(q) {
+  const kind = q.get('pv');
+  if (kind !== 'vod' && kind !== 'live') return null;
+  const name = str(q.get('pvname')).slice(0, 60) || '预览';
+  if (kind === 'vod') {
+    const api = str(q.get('pvapi')).trim();
+    if (!/^https?:\/\//.test(api) && !LOCAL_VOD.test(api)) return { bad: '不是可预览的接口地址' };
+    let cats = []; try { cats = JSON.parse(q.get('pvcats') || '[]').map(String).filter(Boolean); } catch {}
+    return { site: { key: 'preview', name, api, ...(cats.length ? { categories: cats } : {}) }, liveList: [] };
+  }
+  const url = str(q.get('pvu')).trim(), stash = str(q.get('pvstash'));
+  if (!stash && !/^https?:\/\//.test(url) && !/^local:[\w.-]+$/.test(url)) return { bad: '不是可预览的直播源地址' };
+  return { site: null, live: { url, stash, name }, liveList: [{ key: 'preview', name, kids: false, adult: false }] };
+}
+async function previewLive(pv) {
+  const { url, stash, name } = pv.live;
+  const text = stash ? (/^[a-f0-9]{12}$/.test(stash) ? await fsp.readFile(path.join(PREVIEWS, stash), 'utf8').catch(() => null) : null) : await liveText(url, true);
+  if (text === null) return null;
+  return parseLive(text, { url, name });
+}
 async function api(route, q, res, req) {
-  const SITES = visibleSites();
+  const pv = previewOf(q);
+  if (pv && (pv.bad || safety.level !== 'all')) return send(res, pv.bad ? 400 : 403, { error: pv.bad || '预览只能在安全级别「全部」下使用' });
+  const SITES = pv ? (pv.site ? [pv.site] : []) : visibleSites();
   const write = req.method !== 'GET';
   // Source settings (点播源 / 直播源 / 导入 / 本地媒体 folders) can only be changed at 安全级别「全部」: they carry the 成人 flags
   // that the other levels rely on. Safety level itself is changed through /api/safety (with the PIN, if one is set).
@@ -2998,39 +3023,15 @@ async function api(route, q, res, req) {
     const apis = (Array.isArray(b.apis) ? b.apis : []).map(str).filter(u => /^https?:\/\//.test(u)).slice(0, 200);
     return send(res, 200, { results: await classifyApis(apis), ratio: CLS_RATIO });
   }
-  // Preview a source that is not (or not yet) in the config: its own front page / its channel list, nothing from 豆瓣.
-  // Unfiltered, so only at 安全级别「全部」. Pasted live lists (no URL) are parked in memory for a moment: POST → id.
-  if (route.startsWith('preview/')) {
+  // Preview (a source that is not in the config yet, opened in the normal UI): pasted live lists have no URL, so the text is parked in a file first.
+  if (route === 'preview/stash' && write) {
     if (safety.level !== 'all') return send(res, 403, { error: '预览只能在安全级别「全部」下使用' });
-    if (route === 'preview/stash' && write) {
-      const id = crypto.randomBytes(6).toString('hex');
-      await fsp.mkdir(PREVIEWS, { recursive: true });
-      // a file, not memory: requests may land on any worker process; old ones are swept away
-      for (const n of await fsp.readdir(PREVIEWS).catch(() => [])) { const p = path.join(PREVIEWS, n); if (Date.now() - (await fsp.stat(p).catch(() => ({ mtimeMs: 0 }))).mtimeMs > 3600e3) fsp.unlink(p).catch(() => {}); }
-      await fsp.writeFile(path.join(PREVIEWS, id), str((await readBody(req)).text));
-      return send(res, 200, { id });
-    }
-    if (route === 'preview/vod') {
-      const api = str(q.get('api')).trim();
-      if (!/^https?:\/\//.test(api) && !LOCAL_VOD.test(api)) return send(res, 400, { error: '不是可预览的接口地址' });
-      let cats = []; try { cats = JSON.parse(q.get('cats') || '[]').map(String).filter(Boolean); } catch {}
-      const site = { key: 'preview', name: str(q.get('name')) || '预览', api, ...(cats.length ? { categories: cats } : {}) };
-      const categoriesList = await categories(site);
-      let t = q.get('t') || '';
-      if (!t && site.categories) t = categoriesList[0]?.id || '';
-      const b = await cmsGet(site, { ac: 'detail', t, pg: q.get('pg') || '1' }, true);
-      return send(res, 200, { categories: categoriesList, t, list: (b.list || []).map(x => item(site, x)),
-        page: Number(b.page) || 1, pagecount: Number(b.pagecount) || 1, total: Number(b.total) || 0 });
-    }
-    if (route === 'preview/live') {
-      const u = str(q.get('u')).trim(), sid = q.get('stash');
-      let text;
-      if (sid) { text = /^[a-f0-9]{12}$/.test(sid) ? await fsp.readFile(path.join(PREVIEWS, sid), 'utf8').catch(() => null) : null; if (text === null) return send(res, 404, { error: '预览内容已过期，回到设置页重新点预览' }); }
-      else if (/^https?:\/\//.test(u) || /^local:[\w.-]+$/.test(u)) text = await liveText(u, true);
-      else return send(res, 400, { error: '不是可预览的直播源地址' });
-      return send(res, 200, parseLive(text, { url: u, name: str(q.get('name')) }));
-    }
-    return send(res, 404, { error: 'unknown api' });
+    const id = crypto.randomBytes(6).toString('hex');
+    await fsp.mkdir(PREVIEWS, { recursive: true });
+    // a file, not memory: requests may land on any worker process; old ones are swept away
+    for (const n of await fsp.readdir(PREVIEWS).catch(() => [])) { const p = path.join(PREVIEWS, n); if (Date.now() - (await fsp.stat(p).catch(() => ({ mtimeMs: 0 }))).mtimeMs > 24 * 3600e3) fsp.unlink(p).catch(() => {}); }
+    await fsp.writeFile(path.join(PREVIEWS, id), str((await readBody(req)).text));
+    return send(res, 200, { id });
   }
   if (route === 'recognize' && write) return send(res, 200, await recognize((await readBody(req)).text));
   if (route === 'recognize/stream' && write) {
@@ -3183,9 +3184,13 @@ async function api(route, q, res, req) {
   if (route === 'sites') {
     const inGroup = new Map();
     for (const g of SITES) for (const m of g.memberSites || []) if (!inGroup.has(m.key)) inGroup.set(m.key, g.key);
-    return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, hidden, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(hidden ? { hidden: true } : {}), ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: config.lives.map((l, i) => ({ key: String(i), name: l.name, kids: !!l.kids, adult: !!l.adult, ...(l.hidden ? { hidden: true } : {}) })).filter(l => safety.level === 'all' || !l.adult) });
+    return send(res, 200, { level: safety.level, sites: SITES.map(({ key, name, kids, adult, hidden, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(hidden ? { hidden: true } : {}), ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: pv ? pv.liveList : config.lives.map((l, i) => ({ key: String(i), name: l.name, kids: !!l.kids, adult: !!l.adult, ...(l.hidden ? { hidden: true } : {}) })).filter(l => safety.level === 'all' || !l.adult) });
   }
   if (route === 'live') {
+    if (pv?.live) {
+      const parsed = await previewLive(pv);
+      return parsed ? send(res, 200, parsed) : send(res, 404, { error: '预览内容已过期，回到设置页重新点预览' });
+    }
     const src = config.lives[Number(q.get('src')) || 0];
     if (!src || !liveSrcOk(src)) return send(res, 200, { groups: [] });
     const parsed = parseLive(await liveText(src.url), src);

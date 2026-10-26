@@ -1,4 +1,25 @@
 'use strict';
+// 预览模式: ?pv=vod&pvapi=… / ?pv=live&pvu=… opens this same page for ONE source that is not in the config (see previewOf in server.js).
+// The query string is the whole state (kept while the hash navigates), and the params ride along on every API call.
+// The tab keeps its own 当前源 / 历史 / 收藏 / 测速缓存 so previewing never touches the real ones.
+const PV = (() => {
+  const p = new URLSearchParams(location.search), kind = p.get('pv');
+  if (kind !== 'vod' && kind !== 'live') return null;
+  const q = {}; for (const k of ['pv', 'pvapi', 'pvname', 'pvcats', 'pvu', 'pvstash']) if (p.get(k)) q[k] = p.get(k);
+  return { kind, q, name: p.get('pvname') || '预览', api: p.get('pvapi') || '', url: p.get('pvu') || '', stash: p.get('pvstash') || '', cats: p.get('pvcats') || '' };
+})();
+if (PV) {
+  document.documentElement.classList.add('pv', 'pv-' + PV.kind);
+  document.title = '预览 · ' + PV.name;
+  try {
+    const real = window.localStorage, OWN = new Set(['site', 'live', 'history', 'favs', 'siteHealth']), mem = { site: 'preview', live: 'preview' };
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: new Proxy(real, {
+      get: (t, k) => OWN.has(k) ? mem[k] : typeof t[k] === 'function' ? t[k].bind(t) : t[k],
+      set: (t, k, v) => { if (OWN.has(k)) mem[k] = String(v); else t[k] = v; return true; },
+      deleteProperty: (t, k) => { if (OWN.has(k)) delete mem[k]; else delete t[k]; return true; },
+    }) });
+  } catch {}
+}
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $('#view');
@@ -141,17 +162,17 @@ let admEs = null;   // 设置页「管理员」的 SSE 连接: 离开设置页 /
 const closeAdminEs = () => { if (admEs) { admEs.close(); admEs = null; } };
 addEventListener('pagehide', closeAdminEs);
 const isAbort = e => e?.name === 'AbortError';
-// 预览: a source's own front page (点播) / channel list (直播) in a new tab, without adding it. Pasted lists (no URL) are parked on the server first.
+// 预览: open this same page in a new tab with ?pv=… (see PV). Pasted lists (no URL) are parked on the server first.
 function previewSource(kind, { url = '', name = '', cats = '', text = '' } = {}) {
   if (state.level !== 'all') return toast('预览只能在安全级别「全部」下使用');
-  const page = qs => 'preview.html?' + new URLSearchParams({ kind, name, ...qs });
+  const page = qs => '/?' + new URLSearchParams({ pv: kind, pvname: name, ...qs }) + (kind === 'live' ? '#/live' : '#/');
   if (text) {
     const w = window.open('', '_blank');
-    return req('POST', '/api/preview/stash', { text }).then(j => { if (w) w.location = page({ stash: j.id }); }, e => { if (w) w.close(); toast(e.message); });
+    return req('POST', '/api/preview/stash', { text }).then(j => { if (w) w.location = page({ pvstash: j.id }); }, e => { if (w) w.close(); toast(e.message); });
   }
   url = String(url).trim();
   if (!(kind === 'vod' ? /^https?:\/\/|^local:[\w.-]+\.txt$/ : /^https?:\/\/|^local:[\w.-]+$/).test(url)) return toast('这个地址没法预览');
-  window.open(page(kind === 'vod' ? { api: url, ...(cats ? { cats } : {}) } : { u: url }), '_blank');
+  window.open(page(kind === 'vod' ? { pvapi: url, ...(cats ? { pvcats: cats } : {}) } : { pvu: url }), '_blank');
 }
 async function req(method, path, body, retried, signal) {
   const headers = { 'Content-Type': 'application/json' };
@@ -297,6 +318,7 @@ const withSignal = (p, signal) => !signal ? p : new Promise((ok, bad) => {
   p.then(ok, bad).finally(() => signal.removeEventListener('abort', gone));
 });
 const fetchApi = (route, params, signal) => {
+  if (PV) params = { ...params, ...PV.q };
   if (!BATCHABLE.test(route)) return get(`/api/${route}?` + new URLSearchParams(params), signal);
   const qs = new URLSearchParams(params); qs.sort();
   const key = `${route}?${qs}`, p = apiLoader.load(key, { lazy: LAZY.test(route) }), sig = signal === undefined ? pageCtl.signal : signal || undefined;
@@ -332,7 +354,7 @@ function toast(msg, sticky) {
 // 在本机用 localhost 打开时，链接里换成局域网地址，不然发给别人是打不开的。
 // 链接里不带访问令牌：对方第一次打开输入一次令牌（深链接会保留，输完直接进到这部片）。
 const LOCAL_HOST = /^(localhost|127\.|\[?::1\]?$)/;
-const shareUrl = hash => location.origin + '/' + hash;   // 按当前打开的地址 (host) 生成，不替换成别的网卡地址
+const shareUrl = hash => location.origin + '/' + (PV ? location.search : '') + hash;   // 按当前打开的地址 (host) 生成，不替换成别的网卡地址
 async function copyText(t) {
   try { await navigator.clipboard.writeText(t); return true; } catch {}
   // http 的局域网地址不是安全上下文，没有 clipboard API：用选中文本 + execCommand 兜底
@@ -932,6 +954,8 @@ async function route(opts = {}) {
   const seq = ++routeSeq;
   view.classList.remove('restoring');
   let [, page, a, b, c] = location.hash.split('/');
+  if (PV?.kind === 'live' && page !== 'live' && page !== 'tv') { history.replaceState(null, '', '#/live'); page = 'live'; }
+  else if (PV?.kind === 'vod' && ['charts', 'live', 'tv', 'favorites', 'downloads', 'settings', 'me', 'history'].includes(page)) { history.replaceState(null, '', '#/'); page = ''; }
   // Deep links (what a card's href points at, e.g. after ⌘-click into a new tab): show the page
   // underneath, then the detail / player on top.
   if (page === 'play') {
@@ -1242,7 +1266,7 @@ async function renderHome() {
   const cont = hist.list().filter(h => state.sites.some(s => s.key === h.site)).slice(0, 20);
   const favList = favs.list().filter(f => state.sites.some(s => s.key === f.site)).slice(0, 30);
   const kids = state.level === 'kids';
-  const own = site === 'local'; // 本地媒体: its own folders only, no 豆瓣
+  const own = site === 'local' || !!PV; // 本地媒体 / 预览: the source's own content only, no 豆瓣
   const adultSite = !!state.sites.find(x => x.key === site)?.adult; // 成人源: no 豆瓣 rows either
   view.innerHTML = `
     <div class="hero" id="hero"></div>
@@ -4177,6 +4201,34 @@ function openClipSession() {
   return { add, close, settled: () => done };
 }
 
+// 预览模式的头部标记: 名称 + 「添加到我的源」+「关闭」。其余界面差异靠 html.pv 的样式 (隐藏源切换 / 榜单 / 收藏 / 下载 / 设置)。
+if (PV) {
+  if (PV.kind === 'live' && (!location.hash || location.hash === '#/')) history.replaceState(null, '', '#/live');
+  $('.logo').setAttribute('href', PV.kind === 'live' ? '#/live' : '#/');
+  const tag = document.createElement('div'); tag.className = 'pvtag';
+  tag.innerHTML = `<b>预览</b><span class="pvn" title="${esc(PV.api || PV.url || PV.name)}">${esc(PV.name)}</span>${PV.stash ? '' : '<button type="button" id="pvAdd">添加到我的源</button>'}<button type="button" id="pvClose">关闭</button>`;
+  $('#top .right').prepend(tag);
+  $('#pvClose').onclick = () => { window.close(); setTimeout(() => { location.href = '/#/settings'; }, 150); };
+  const add = $('#pvAdd');
+  // Already in 我的源: no button at all (nothing to add, nothing to explain after a click).
+  if (add) {
+    const norm = u => { try { const x = new URL(String(u).trim()); for (const k of ['ac', 'pg', 't', 'wd', 'ids', 'h']) x.searchParams.delete(k); x.hash = ''; return x.toString().replace(/\/+(?=\?|$)/, ''); } catch { return String(u).trim(); } };
+    get('/api/config', null).then(cfg => {
+      const mine = PV.kind === 'vod' ? (cfg.sites || []).some(s => !s.categories && s.api && norm(s.api) === norm(PV.api)) : (cfg.lives || []).some(l => l.url && norm(l.url) === norm(PV.url));
+      if (mine) add.remove();
+    }, () => {});
+  }
+  if (add) add.onclick = async () => {
+    add.disabled = true;
+    try {
+      let cats = []; try { cats = JSON.parse(PV.cats || '[]'); } catch {}
+      const body = PV.kind === 'vod' ? { sites: [{ name: PV.name, api: PV.api, ...(cats.length ? { categories: cats } : {}) }], lives: [] } : { sites: [], lives: [{ name: PV.name, url: PV.url }] };
+      const j = await req('POST', '/api/config/add', body);
+      toast('已添加到我的源');
+      add.remove();
+    } catch (e) { add.disabled = false; toast(e.message); }
+  };
+}
 loadSites().then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
 
 applyCardMode(); applyCardScale();
