@@ -6,6 +6,7 @@
 //                 (data/ 数据、.env 令牌、.tools/ 便携 Node 与 ffmpeg 保留不动)；更新逻辑和网页「管理员」页共用 updater.js
 //   检查更新      只看有没有新版本 (结果带缓存), 不动任何文件
 //   停止服务      停掉正在运行的实例
+//   运行状态 / 查看日志   服务在后台运行 (关掉这个窗口不影响)，日志写在 data/server.log
 //   访问信息      打印访问地址、访问令牌和管理员令牌
 'use strict';
 const fs = require('fs');
@@ -37,10 +38,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ---------------- 菜单 ----------------
 const ACTIONS = [
-  { key: 'restart', title: '重启', hint: '已有实例在运行就先停掉再启动 (覆盖); 没有就直接启动' },
+  { key: 'restart', title: '重启', hint: '已有实例在运行就先停掉再在后台启动 (覆盖); 没有就直接启动' },
   { key: 'update', title: '更新后重启', hint: '' },   // hint 在 render 时按 git / 非 git 现填
   { key: 'check', title: '检查更新', hint: '只看有没有新版本，不改任何文件' },
   { key: 'stop', title: '停止服务', hint: '停掉正在运行的实例' },
+  { key: 'status', title: '运行状态', hint: '是否在运行、进程号、访问地址' },
+  { key: 'logs', title: '查看日志', hint: '服务在后台运行，输出写在 data/server.log (Ctrl+C 退出查看)' },
   { key: 'info', title: '访问信息', hint: '访问地址、访问令牌、管理员令牌' },
 ];
 let MODE = 'git';
@@ -165,20 +168,64 @@ function doInfo() {
   say(`${C.d}令牌存在 ${a.file}${C.x}`);
 }
 
-// ---------------- 启动 ----------------
-function start() {
-  step('启动 TVBox …  (关闭这个窗口 / Ctrl+C 即停止)');
-  say('');
-  const child = spawn(process.execPath, ['server.js'], { cwd: ROOT, stdio: 'inherit', env: { ...process.env, PORT: String(PORT) } });
-  setTimeout(() => {
-    const url = `http://localhost:${PORT}`;
-    try {
-      if (WIN) spawn('cmd', ['/c', 'start', '', url], { stdio: 'ignore', windowsHide: true }).unref();
-      else spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], { stdio: 'ignore' }).unref();
-    } catch {}
-  }, 2000);
-  for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(s, () => { try { child.kill(s); } catch {} });
-  child.on('exit', code => process.exit(code || 0));
+// ---------------- 启动 (后台) ----------------
+// 服务以脱离终端的后台进程运行，输出写进 data/server.log；这个脚本启动完就退出，关窗口 / 退出脚本都不影响服务。
+const LOG = path.join(ROOT, 'data', 'server.log');
+const urlOf = () => `http://localhost:${PORT}`;
+function openBrowser() {
+  try {
+    if (WIN) spawn('cmd', ['/c', 'start', '', urlOf()], { stdio: 'ignore', windowsHide: true }).unref();
+    else spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [urlOf()], { stdio: 'ignore' }).unref();
+  } catch {}
+}
+async function start() {
+  fs.mkdirSync(path.dirname(LOG), { recursive: true });
+  try { if (fs.statSync(LOG).size > 5 * 1048576) fs.renameSync(LOG, LOG + '.old'); } catch {}   // 日志超过 5MB 就换一个新文件，只留一份旧的
+  const fd = fs.openSync(LOG, 'a');
+  fs.writeSync(fd, `\n===== ${new Date().toLocaleString()} 启动 (manage.js) =====\n`);
+  step('在后台启动 TVBox …');
+  const child = spawn(process.execPath, ['server.js'], { cwd: ROOT, detached: true, windowsHide: true, stdio: ['ignore', fd, fd], env: { ...process.env, PORT: String(PORT) } });
+  child.unref();
+  fs.closeSync(fd);
+  let early = null; child.on('exit', c => { early = c; });
+  for (let i = 0; i < 60 && !listenerPids().length && early === null; i++) await sleep(500);
+  if (early !== null || !listenerPids().length) {
+    bad(`启动失败${early !== null ? ` (退出码 ${early})` : '，等了 30 秒端口还没开'}。最后几行日志:`);
+    say(C.d + tail(LOG, 12).join('\n') + C.x);
+    throw new Error('服务没有起来，完整日志: ' + LOG);
+  }
+  ok(`已在后台运行 (进程 ${child.pid})  ${urlOf()}`);
+  say(`${C.d}日志: ${LOG}${C.x}`);
+  say(`${C.d}关掉这个窗口不影响服务；再次运行本脚本可重启 / 更新 / 停止 / 看日志。${C.x}`);
+  if (process.env.TVBOX_NO_OPEN !== '1') openBrowser();
+}
+function tail(file, n) {
+  try { return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).slice(-n); } catch { return []; }
+}
+function doStatus() {
+  const { pids, foreign } = findRunning();
+  if (!pids.length) { say(foreign ? `${C.y}!${C.x} 端口 ${PORT} 被别的程序占用 (不是 TVBox)` : `${C.r}●${C.x} 没有在运行`); return; }
+  say(`${C.g}●${C.x} 运行中  进程 ${pids.join(', ')}  ${urlOf()}`);
+  const lan = Object.values(os.networkInterfaces()).flat().filter(x => x && x.family === 'IPv4' && !x.internal).map(x => x.address);
+  for (const ip of lan) say(`   局域网 http://${ip}:${PORT}`);
+  say(`${C.d}日志: ${LOG}${C.x}`);
+}
+function doLogs() {
+  if (!fs.existsSync(LOG)) { warn('还没有日志 (服务没有用本脚本启动过)'); return Promise.resolve(); }
+  say(`${C.d}--- ${LOG}  (Ctrl+C 退出) ---${C.x}`);
+  say(tail(LOG, 40).join('\n'));
+  return new Promise(resolve => {
+    let pos = fs.statSync(LOG).size;
+    const timer = setInterval(() => {
+      let st; try { st = fs.statSync(LOG); } catch { return; }
+      if (st.size < pos) pos = 0;                      // 日志被换了新文件
+      if (st.size === pos) return;
+      const fd = fs.openSync(LOG, 'r'), buf = Buffer.alloc(st.size - pos);
+      fs.readSync(fd, buf, 0, buf.length, pos); fs.closeSync(fd);
+      pos = st.size; process.stdout.write(buf.toString('utf8'));
+    }, 500);
+    process.on('SIGINT', () => { clearInterval(timer); resolve(); });
+  });
 }
 
 // ---------------- main ----------------
@@ -186,7 +233,7 @@ const waitEnter = msg => new Promise(r => { say(msg); process.stdin.resume(); pr
 (async () => {
   const st = loadState();
   let action = process.argv[2];
-  if (action && !ACTIONS.some(a => a.key === action)) { bad('用法: node manage.js [restart|update|check|stop|info]'); process.exit(2); }
+  if (action && !ACTIONS.some(a => a.key === action)) { bad('用法: node manage.js [restart|update|check|stop|status|logs|info]'); process.exit(2); }
   MODE = (await updater.current().catch(() => ({ mode: 'zip' }))).mode;
   if (!action) {
     if (!process.stdin.isTTY) action = st.last || 'restart';
@@ -197,10 +244,12 @@ const waitEnter = msg => new Promise(r => { say(msg); process.stdin.resume(); pr
   }
   saveState({ last: action });
   say('');
-  const pause = async code => { if (process.stdin.isTTY && !process.argv[2]) await waitEnter('\n按回车退出'); process.exit(code); };
+  const pause = async code => { if (process.stdin.isTTY && !process.argv[2] && WIN) await waitEnter('\n按回车关闭'); process.exit(code); };   // Windows 双击打开的窗口会立刻消失，留一下让人看结果
   try {
     if (action === 'check') { await doCheck(); return pause(0); }
     if (action === 'info') { doInfo(); return pause(0); }
+    if (action === 'status') { doStatus(); return pause(0); }
+    if (action === 'logs') { await doLogs(); process.exit(0); }
     await stopRunning();                       // 先停: 更新要替换正在使用的文件
     if (action === 'stop') { ok('已停止'); return pause(0); }
     if (action === 'update') {
@@ -211,7 +260,8 @@ const waitEnter = msg => new Promise(r => { say(msg); process.stdin.resume(); pr
         else process.exit(1);
       }
     }
-    start();
+    await start();
+    await pause(0);
   } catch (e) {
     bad(e.message);
     await pause(1);
