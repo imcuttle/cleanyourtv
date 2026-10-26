@@ -1354,7 +1354,12 @@ html.cs-big .card .img img { image-rendering: auto; }
   .srow { grid-template-columns: 74px 140px minmax(260px, 1fr) auto; }
   @container (max-width: 1180px) {
     .srow { grid-template-columns: 74px 140px minmax(0, 1fr); }
-    .srow .ops { grid-column: 1 / -1; justify-content: flex-end; overflow-x: auto; scrollbar-width: none; }
+    .srow .ops { grid-column: 2 / -1; justify-content: flex-start; overflow-x: auto; scrollbar-width: none; }
     .srow .ops::-webkit-scrollbar { display: none; }
+    .srow .ops > .status { margin-left: auto; }
   }
+  /* 本地媒体: 目录行放不下一长串勾选 + 状态 + 删除，操作区另起一行，勾选靠左、状态和删除靠右 */
+  .srow.lrow { grid-template-columns: 30px 180px minmax(0, 1fr); }
+  .srow.lrow .ops { grid-column: 2 / -1; justify-content: flex-start; flex-wrap: wrap; }
+  .srow.lrow .ops > .status { margin-left: auto; }
 }

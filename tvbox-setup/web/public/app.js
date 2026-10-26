@@ -1340,12 +1340,12 @@ async function renderPerson(role, name, scopeKey = '') {
     const groups = searchMerge.on() ? mergeDupes(j.list) : j.list.map(it => ({ main: it, srcs: [it] }));
     const html = groups.map(g => {
       const srcs = [...new Set(g.srcs.map(x => x.site))];
-      return card(g.main, { sub: [g.main.year, g.main.type, srcs.length > 1 ? `${names[srcs[0]] || g.main.siteName} 等 ${srcs.length} 个源` : g.main.siteName].filter(x => x && x !== '0').join(' · '),
-        dup: srcs.length, dupTitle: srcs.map(k => names[k] || k).join(' / ') });
+      return card(g.main, { sub: [g.main.year, g.main.type, srcs.length > 1 ? `${srcs.length} 个源` : g.main.siteName].filter(x => x && x !== '0').join(' · '),
+        dup: srcs.length });
     }).join('');
     return { html, shown: groups.length };
   };
-  const status = shown => j.list.length ? `${scoped ? `仅「${esc(scoped.name)}」` : '全部源'}，${shown} 部作品${shown < j.list.length ? `（合并了 ${j.list.length - shown} 条重复）` : ''}，按年份排序；只列出演职员表里确实有这个名字的` : '';
+  const status = shown => j.list.length ? `${shown} 部作品 · 按年份排序` : '';
   const first = cards();
   view.innerHTML = `<div class="page">${head}
     <div class="stool">
@@ -1460,17 +1460,17 @@ async function renderSearch(q, scopeKey = '') {
   const curName = names[scoped ? scoped.key : state.site] || '当前源';
   const sub = g => {
     const sites = [...new Set(g.srcs.map(x => names[x.site] || x.siteName))];
-    return sites.length > 1 ? `${sites[0]} 等 ${sites.length} 个源` : sites[0];
+    return sites.length > 1 ? `${sites.length} 个源` : sites[0];
   };
   const cards = () => {
     const groups = searchMerge.on() ? mergeDupes(res) : res.map(it => ({ main: it, srcs: [it] }));
     const html = groups.map(g => {
       const n = new Set(g.srcs.map(x => x.site)).size;
-      return card(g.main, { sub: sub(g), dup: n, dupTitle: [...new Set(g.srcs.map(x => names[x.site] || x.siteName))].join(' / ') });
+      return card(g.main, { sub: sub(g), dup: n });
     }).join('');
     return { html, shown: groups.length };
   };
-  const status = shown => `${scoped ? `仅「${esc(scoped.name)}」` : `${nSrc} 个源`}，${shown} 部影片${shown < res.length ? `（合并了 ${res.length - shown} 条重复）` : ''}${people.length ? `，${people.length} 位演职员` : ''}${j.failed.length ? `；${esc(j.failed.join(' / '))} 未响应` : ''}`;
+  const status = shown => [`${shown} 部影片`, people.length ? `${people.length} 位演职员` : '', j.failed.length ? `<span title="${esc(j.failed.join('、'))}">${j.failed.length} 个源未响应</span>` : ''].filter(Boolean).join(' · ');
   const first = cards();
   view.innerHTML = `<div class="page"><div class="pagehead"><h1>“${esc(q)}”</h1>${res.length ? `<button class="small ibs feedgo" data-feed="search" data-q="${esc(q)}" data-scope="${esc(scoped ? scoped.key : '')}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button>` : ''}</div>
     <div class="stool">
@@ -1668,7 +1668,7 @@ async function renderDownloads() {
         ${anyActive ? `<button class="small ibs" data-op="pause" data-all title="全部暂停" aria-label="全部暂停">${IC.pause}</button>` : ''}
         ${anyPaused ? `<button class="small ibs" data-op="resume" data-all title="全部开始" aria-label="全部开始">${IC.play}</button>` : ''}
         ${totalSpeed ? `<span class="spd">${fmtSpeed(totalSpeed)}</span>` : ''}</div>
-      <p class="lan">同时下载 ${j.maxJobs} 集，其余排队。保存在服务端 <code>${esc(j.dir)}</code>，局域网里任何设备都能播放。已用 ${fmtSize(total)}${j.free ? `，磁盘剩余 ${fmtSize(j.free)}` : ''}。</p>
+      <p class="lan">已用 ${fmtSize(total)}${j.free ? ` · 剩余 ${fmtSize(j.free)}` : ''} · 同时下载 ${j.maxJobs} 集</p>
       ${j.jobs.length ? `<div class="dls">${j.jobs.map(x => {
         const pct = x.pct || 0;
         return `<div class="dl ${x.status}" data-id="${esc(x.id)}">
@@ -2932,7 +2932,7 @@ function toggleBulkMenu(btn) {
   menu.style.left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8)) + 'px';
 }
 function closeBulkMenus() { $$('.bmenu').forEach(m => { m.hidden = true; }); }
-document.addEventListener('click', e => { if (!e.target.closest('.bmenu, [data-bulk=more], [data-bulk=cat], [data-cbulk=more], [data-cbulk=cat]')) closeBulkMenus(); });
+document.addEventListener('click', e => { if (!e.target.closest('.bmenu, [data-bulk=more], [data-bulk=cat], [data-bulk=vis], [data-cbulk=more], [data-cbulk=cat]')) closeBulkMenus(); });
 addEventListener('scroll', closeBulkMenus, { passive: true });
 
 // ---------- text editor: Monaco (the open-source editor core of VS Code), loaded on first use ----------
@@ -3181,7 +3181,8 @@ async function renderSettings() {
       <button class="small" data-bulk="invert">反选</button><button class="small" data-bulk="delsel">删除选中</button>
       <span class="bwrap"><button class="small" data-bulk="cat">设分类 ▾</button><div class="bmenu" hidden>
         <button data-bulk="setkids">设为 少儿</button><button data-bulk="setadult">设为 成人</button><button data-bulk="setstd">设为 标准（去掉标记）</button></div></span>
-      <button class="small" data-bulk="hide">隐藏选中</button><button class="small" data-bulk="show">取消隐藏</button>
+      <span class="bwrap"><button class="small" data-bulk="vis">隐藏 ▾</button><div class="bmenu" hidden>
+        <button data-bulk="hide">隐藏选中</button><button data-bulk="show">取消隐藏</button></div></span>
       <span class="bwrap"><button class="small" data-bulk="more">更多 ▾</button><div class="bmenu" hidden>
         <button data-bulk="merge" title="${kind === 'live' ? '把选中的直播源合成一个频道列表（同分组归并、相同地址去重）' : '把选中的点播源聚合成一个入口：搜索/浏览/播放线路同时覆盖所有成员，同名影片合并'}">${kind === 'live' ? '合并选中' : '聚合选中'}</button>
         <button data-bulk="export">导出选中</button>
@@ -3189,7 +3190,6 @@ async function renderSettings() {
         <button data-bulk="delbad">删除不通的</button>${kind === 'site' ? '<button data-bulk="delempty" title="删除能连上、但一部片都没有的点播源">删除 0 部的</button><button data-bulk="classify" title="按分类名自动判断：80% 以上分类是色情词 → 成人，80% 以上是少儿词 → 少儿，否则标准（不勾选）。只处理还没勾少儿 / 成人的源；勾选了源就只看选中的，否则看全部">自动分类</button>' : ''}</div></span>
       <span class="lan" data-bulk="count"></span></div>`;
   view.innerHTML = `<div class="page set"><h1>设置</h1>
-    <p class="lan">修改保存在服务端，局域网里所有浏览器共享。${info.urls.length ? '其他设备打开：' + info.urls.map(u => `<code>${esc(u)}</code>`).join(' ') : ''}</p>
     <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。</p>
       <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button></div></section>
     ${installSection()}
@@ -3608,7 +3608,7 @@ async function renderSettings() {
   const bulkOp = async (btn, op) => {
     const bar = btn.closest('.bulk'), kind = bar.dataset.kind, box = $(kind === 'site' ? '#sites' : '#lives'), rows = $$('.srow', box);
     const sel = rows.filter(r => $('.sel', r).checked);
-    if (op === 'more' || op === 'cat') return toggleBulkMenu(btn);
+    if (op === 'more' || op === 'cat' || op === 'vis') return toggleBulkMenu(btn);
     closeBulkMenus();
     if (op === 'setkids' || op === 'setadult' || op === 'setstd') {
       if (!sel.length) return toast('先勾选要设置的源');
@@ -3845,7 +3845,7 @@ async function localSettings(pre) {
       <div id="lcDirs" style="margin-top:10px">${cfg.dirs.map((d, i) => dirRow(d, i, stOf(d))).join('') || '<p class="lan">还没有目录。</p>'}</div>
       <div class="actions"><button class="small" id="lcAdd">+ 添加目录</button><button class="btn red" id="lcSave">保存并扫描</button>
         <button class="small" id="lcScan">重新扫描</button><span class="lan" id="lcStatus">${esc(statusText(status))}</span></div>
-      ${j.urls.length ? `<p class="hint" style="margin-top:12px">电视上的 TVBox / FongMi 也能直接用：添加点播源，类型 1（苹果CMS JSON），地址 ${j.urls.map(u => `<code>${esc(u)}</code>`).join(' 或 ')}。电视端直接播原文件。</p>` : ''}`;
+      ${j.urls.length ? `<details class="admmore" style="margin-top:12px"><summary>电视端使用</summary><p class="hint" style="margin-top:8px">在 TVBox / FongMi 里添加点播源，类型 1（苹果CMS JSON），地址 ${j.urls.map(u => `<code>${esc(u)}</code>`).join(' 或 ')}。电视端直接播原文件。</p></details>` : ''}`;
   };
   const collect = () => ({
     enabled: $('#lcOn').checked, name: $('#lcName').value.trim(), rescan: Number($('#lcRescan').value) || 0,
