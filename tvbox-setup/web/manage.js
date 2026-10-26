@@ -19,7 +19,7 @@ const ROOT = __dirname;
 const WIN = process.platform === 'win32';
 const PORT = Number(process.env.PORT) || 9988;
 const STATE = path.join(ROOT, 'data', '.manage.json');
-const HTTPS_PORT = process.env.TVBOX_HTTPS === '0' ? 0 : Number(process.env.HTTPS_PORT) || PORT + 1;   // 同 server.js；0 = 没开 https
+const HTTPS_PORT = process.env.TVBOX_HTTPS === '0' ? 0 : Number(process.env.HTTPS_PORT) || PORT;   // 同 server.js；0 = 没开 https
 const updater = require('./updater');
 
 const C = process.stdout.isTTY ? { b: '\x1b[1m', d: '\x1b[2m', g: '\x1b[32m', y: '\x1b[33m', r: '\x1b[31m', c: '\x1b[36m', x: '\x1b[0m', inv: '\x1b[7m' }

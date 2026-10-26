@@ -1,5 +1,6 @@
 // HTTPS 证书。手机上「系统分享面板」(navigator.share)、Service Worker、剪贴板等能力都只在安全上下文 (https / localhost) 里才有，
-// 局域网里的 http://192.168.x.x 不算，所以服务启动时在 HTTPS_PORT (默认 PORT+1) 上再开一个 https 入口，http 入口照旧。
+// 局域网里的 http://192.168.x.x 不算，所以服务启动时同时开 https：默认和 http 共用 PORT (按连接的第一个字节区分, 见 server.js 的 front)，
+// 设了 HTTPS_PORT 且不等于 PORT 时才单独监听那个端口。
 //   - 自己有证书：TVBOX_TLS_CERT=/path/fullchain.pem TVBOX_TLS_KEY=/path/privkey.pem  (域名证书，手机上不会有警告，推荐)
 //   - 没有：用系统自带的 openssl 生成自签名证书，存在 data/tls/，包含 localhost / 本机局域网 IP / 主机名 (本机 IP 变了会自动重新生成)。
 //     自签名证书浏览器第一次会提示「不安全」，手动继续即可；iOS 想完全无提示要把 data/tls/cert.pem 装成描述文件并在「证书信任设置」里打开。

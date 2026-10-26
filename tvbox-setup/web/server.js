@@ -32,7 +32,7 @@ const zlib = require('zlib');
 
 const PORT = Number(process.env.PORT) || 9988;
 const HOST = process.env.HOST || '0.0.0.0';
-const HTTPS_PORT = process.env.TVBOX_HTTPS === '0' ? 0 : Number(process.env.HTTPS_PORT) || PORT + 1;   // 0 = 不开 https (见 tls.js)
+const HTTPS_PORT = process.env.TVBOX_HTTPS === '0' ? 0 : Number(process.env.HTTPS_PORT) || PORT;   // 0 = 不开 https; 默认和 http 共用 PORT (按第一个字节区分, 见下面 front); 设成别的端口则单独监听 (见 tls.js)
 const ROOT = __dirname;
 const CONFIG = path.join(ROOT, '..', 'config');
 const PUBLIC = path.join(ROOT, 'public');
@@ -3710,7 +3710,7 @@ function checkAuth(req, u) {
   const drain = why => {
     if (draining) return; draining = true;
     console.log(`  [保护] ${role || 'main'} 进程 ${process.pid} 开始退出：${why}`);
-    try { server.close(); tlsServer?.close(); } catch {}      // no new connections; the ones in flight finish
+    try { front.close(); tlsOwn?.close(); } catch {}      // no new connections; the ones in flight finish
     const done = () => process.exit(0);
     const t = setInterval(() => { if (!openConns) done(); }, 500); t.unref?.();
     setTimeout(done, 15e3).unref();
@@ -3765,12 +3765,51 @@ for (const s of [server, tlsServer]) if (s) {
   s.keepAliveTimeout = 65000;
   s.headersTimeout = 66000;
 }
-if (tlsServer && !MEDIA_ONLY) {
-  tlsServer.on('tlsClientError', () => {});   // 浏览器对自签名证书的握手中断很常见，不当成错误
-  tlsServer.on('error', e => console.error('  [https] 监听失败，只用 http：', e.message));
-  tlsServer.listen(HTTPS_PORT, HOST);
+// http 和 https 共用 PORT: 先看每条连接的第一个字节, TLS 握手 (ClientHello) 以 0x16 开头 -> https, 其它 -> http。
+// HTTPS_PORT 设成别的端口时, https 单独监听那个端口 (tlsOwn), PORT 上只有 http。
+const sameFront = !!tlsServer && HTTPS_PORT === PORT;
+const tlsOwn = tlsServer && !sameFront ? tlsServer : null;
+// TLS 的底层是原生句柄, 直接读 socket 而不经过 JS 缓冲, 已经读走的 ClientHello 用 unshift 塞不回去:
+// 所以 https 连接包一层 Duplex (JS 流), 先把读到的第一块数据推进去, 后面的数据照常转发。
+function relayTo(sock, first) {
+  const d = new (require('stream').Duplex)({
+    read() { sock.resume(); },
+    write(chunk, enc, cb) { sock.write(chunk, enc, cb); },
+    final(cb) { sock.end(); cb(); },
+    destroy(err, cb) { sock.destroy(); cb(err); },
+  });
+  sock.on('data', c => { if (!d.push(c)) sock.pause(); });
+  sock.on('end', () => d.push(null));
+  sock.on('close', () => d.destroy());
+  sock.on('error', e => d.destroy(e));
+  d._peer = {}; for (const k of ['remoteAddress', 'remotePort', 'remoteFamily', 'localAddress', 'localPort']) d._peer[k] = sock[k];
+  d.setNoDelay = d.setKeepAlive = () => d;
+  d.push(first);
+  return d;
 }
-if (!MEDIA_ONLY) server.listen(PORT, HOST, () => {
+const front = require('net').createServer({ pauseOnConnect: true }, sock => {
+  const bail = () => sock.destroy();
+  sock.on('error', bail);
+  sock.setTimeout(15e3, bail);                         // 连上来却一直不说话的: 不占着
+  sock.once('data', buf => {
+    sock.removeListener('error', bail); sock.setTimeout(0); sock.removeAllListeners('timeout');
+    if (sameFront && buf[0] === 0x16) return tlsServer.emit('connection', relayTo(sock, buf));
+    sock.unshift(buf);
+    server.emit('connection', sock);
+    sock.resume();
+  });
+  sock.resume();                                       // pauseOnConnect 之后, 加 'data' 监听不会自动开始读, 要手动放行
+});
+if (tlsServer) {
+  // TLSSocket 包着 JS 流时取不到对端地址; 来源判断 (isLoopback / 令牌错误限速) 要用, 从包装流上补回去
+  tlsServer.on('secureConnection', c => { const p = c._handle?._parentWrap?.stream?._peer; if (p) for (const k in p) Object.defineProperty(c, k, { value: p[k], configurable: true }); });
+  tlsServer.on('tlsClientError', () => {});   // 浏览器对自签名证书的握手中断很常见，不当成错误
+  if (tlsOwn && !MEDIA_ONLY) {
+    tlsOwn.on('error', e => console.error('  [https] 监听失败，只用 http：', e.message));
+    tlsOwn.listen(HTTPS_PORT, HOST);
+  }
+}
+if (!MEDIA_ONLY) front.listen(PORT, HOST, () => {
   if (!cluster.isWorker) banner(1, !!FFMPEG, DL);
   if (IS_LEADER) {
     pump();

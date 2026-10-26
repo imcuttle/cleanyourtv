@@ -57,7 +57,8 @@ web/start.command        # macOS — or start.bat on Windows
 → http://localhost:9988 and http://<this machine>:9988 for the rest of the LAN
 ```
 
-**HTTPS.** The server also listens on `https://<host>:9989` (`PORT`+1, override with `HTTPS_PORT`; `TVBOX_HTTPS=0` turns it off).
+**HTTPS.** `https://<host>:9988` works on the same port as http (the first byte of each connection tells TLS from plain HTTP;
+set `HTTPS_PORT` to listen on a separate port instead, `TVBOX_HTTPS=0` turns it off).
 Phones only expose the system share sheet (WeChat, Messages, …), Service Worker and clipboard APIs on https, so use this
 address on the phone (the startup log prints it, with a QR code). With no certificate given it generates a self-signed one
 with `openssl` into `web/data/tls/` (localhost, host name and LAN IPs; regenerated when the IPs change) — the browser warns once,
