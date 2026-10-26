@@ -2243,6 +2243,12 @@ function openPlayer(startAt) {
   const useLocal = cur.kind === 'local' || local?.status === 'done';
   $('.local').hidden = !useLocal;
   load(local?.status === 'done' ? local.play : e.url, startAt, false, useLocal || e.url.startsWith('/media/'));
+  // 一直没有画面 (起播不了 / 卡在缓冲): 10 秒后提示, 并挂上「切换源」。别的源还在搜就等搜到再挂上
+  clearTimeout(stuckT);
+  stuckT = setTimeout(() => {
+    if (!cur || video.readyState >= 2) return;
+    msg(msgTxt === '点一下播放' ? msgTxt : '一直没加载出来…', true);
+  }, 10000);
   skipInit();
   syncMore();
   poke();
@@ -2335,17 +2341,22 @@ function hlsRecover(h, data) {
   if (data.type === Hls.ErrorTypes.MEDIA_ERROR && t.media++ < 2) { if (t.media === 2) h.swapAudioCodec?.(); h.recoverMediaError(); return true; }
   return false;
 }
+let loadMuteT = 0;
 function load(url, startAt, viaProxy, isLocal) {
+  // 换源 / 换线路 / 重新加载: 先把旧解码器彻底断开并静音, 新画面接上的瞬间就不会有「电流声」; 有画面后恢复原来的静音状态
+  video._duck = 1; video.muted = true;
+  clearTimeout(loadMuteT);
+  const undo = () => { clearTimeout(loadMuteT); loadMuteT = setTimeout(() => { if (video._duck) video._unduck?.(); }, 300); };
+  for (const ev of ['playing', 'loadeddata', 'error']) video.addEventListener(ev, undo, { once: true });
   if (hls) { hls.destroy(); hls = null; }
+  video.onerror = null; video.onloadedmetadata = null;
+  video.removeAttribute('src'); video.load();
   const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : url;
   // 本地媒体 originals (/media/f/…) play natively; /media/h/… is a growing HLS playlist, start at its beginning.
   const direct = /\.mp4(\?|$)/i.test(url) || url.startsWith('/media/f/');
   playingSrc = { src, hls: !direct };
   pvReset();
   msg('加载中…');
-  // 一直没有画面: 12 秒后提示, 并挂上「切换源」(别的源还在搜就等搜到再挂)
-  clearTimeout(stuckT);
-  stuckT = setTimeout(() => { if (cur && !video.paused && video.readyState < 2) msg('一直没加载出来…', true); }, 12000);
   showCover(cur?.kind === 'vod' && cur.d?.adult ? cardPic(cur.d) : '');   // adult sources only
   fixDuration(video, url.startsWith('/media/h/') ? url : '');
   const seek = () => { if (startAt) video.currentTime = startAt; video.play().catch(() => msg('点一下播放')); };
@@ -2445,7 +2456,7 @@ function closePlayer() {
   video.pause(); video.removeAttribute('src'); video.load();
   if (ms) { try { ms.metadata = null; ms.playbackState = 'none'; } catch {} }
   if (pipOn) { pipOn = false; player.classList.remove('pip'); document.exitPictureInPicture?.().catch(() => {}); }
-  player.hidden = true; togglePlist(false); msg(''); setLock(false); setBright(1); if (pcover) pcover.hidden = true;
+  player.hidden = true; togglePlist(false); clearTimeout(stuckT); msg(''); setLock(false); setBright(1); if (pcover) pcover.hidden = true;
   if (!$('#modal')) document.body.style.overflow = '';
   $('#modal')?.refresh?.();
   cur = null;
@@ -4219,10 +4230,12 @@ function recognizeFlow(text, auto) {
   const key = clipKey(text);
   localStorage.clipSeen = key;
   if (clipSess?.settled() && auto) return;   // the result of this task has been given: watching the clipboard stops
-  if (!clipSess) clipSess = openClipSession();
+  // 自动发现的 (窗口重新获得焦点时的剪贴板): 先不弹窗, 分析出能加的源才显示; 手动粘贴的立刻显示
+  if (!clipSess) clipSess = openClipSession(!!auto);
+  if (!auto) clipSess.show();
   clipSess.add(text, key);
 }
-function openClipSession() {
+function openClipSession(lazy = false) {
   const m = document.createElement('div');
   m.className = 'modal clipmodal'; m.id = 'clipModal';
   m.innerHTML = `<div class="sheet editor clipsheet"><div class="body clipbody">
@@ -4239,9 +4252,10 @@ function openClipSession() {
     <div id="clipRows" class="cliprows"></div>
     <div id="clipUnknown"></div>
     <div class="actions clipfoot"><button class="btn red" id="clipAdd" disabled>分析中…</button><button class="small" id="clipCancel">取消</button><span class="lan" id="clipMsg"></span></div></div></div>`;
-  document.body.append(m); document.body.style.overflow = 'hidden';
   const all = [], keys = new Set(), unknown = new Set(), seen = new Set(), notes = new Set();
-  let pending = 0, saving = false, closed = false, texts = 0, updates = 0, done = false;
+  let pending = 0, saving = false, closed = false, texts = 0, updates = 0, done = false, shown = false;
+  const show = () => { if (shown || closed) return; shown = true; document.body.append(m); document.body.style.overflow = 'hidden'; };
+  if (!lazy) show();
   const prog = { msg: '', done: 0, total: 0, long: false, t0: Date.now() };
   const ctl = new AbortController();
   const tick = setInterval(() => { if (pending && !closed) count(); }, 1000);   // done: the result has been handed over
@@ -4265,8 +4279,8 @@ function openClipSession() {
     syncFromDom();
     const n = boxes().filter(c => c.checked).length, tot = boxes().length;
     const busy = pending > 0;
-    $('#clipAdd').textContent = saving ? '保存中…' : busy ? `分析中，还有 ${pending} 段…` : n ? `添加选中的 ${n} 个` : '没有选中';
-    $('#clipAdd').disabled = saving || busy || !n;   // nothing picked (or still analysing): the button cannot be pressed
+    $('#clipAdd', m).textContent = saving ? '保存中…' : busy ? `分析中，还有 ${pending} 段…` : n ? `添加选中的 ${n} 个` : '没有选中';
+    $('#clipAdd', m).disabled = saving || busy || !n;   // nothing picked (or still analysing): the button cannot be pressed
     $('[data-cbulk=count]', m).textContent = tot ? `已选 ${n} / ${tot}` : '';
     $('[data-cbulk=all]', m).checked = n > 0 && n === tot;
     const st = $('#clipStatus', m); st.hidden = !busy;
@@ -4301,10 +4315,15 @@ function openClipSession() {
       keys.add(k); x._sel = !x.exists && !x.empty && x.ok !== false; all.push(x);
     }
     r.unknown.forEach(u => unknown.add(u));
+    if (!shown && all.some(x => !x.exists)) show();   // 自动发现: 有能加的新源才弹出来
   };
   const settle = () => {
     if (closed || pending) return render();
     render();
+    if (!shown) {                       // 自动发现的那次: 没有能加的新源就静默收掉 (不弹窗, 也不提示)
+      if (all.some(x => !x.exists)) show();
+      else return close();
+    }
     // One batch, one result. From here on a changed clipboard is no longer picked up by itself — only an explicit
     // paste (Ctrl/⌘+V) or 「追加剪贴板」 adds to the list.
     if (all.length && all.some(x => !x.exists)) {
@@ -4343,7 +4362,7 @@ function openClipSession() {
       if (m.phase === 'scan' || m.phase === 'probe') { prog.done = m.done || 0; prog.total = m.total || 0; } else if (m.phase) { prog.done = 0; prog.total = m.total && m.phase === 'files' ? 0 : 0; }
       if (!closed) count();
     }, ctl.signal)
-      .then(r => { prog.msg = ''; prog.done = prog.total = 0; if (r.notes?.length) r.notes.forEach(n => notes.add(n)); merge(r); }, e => { if (e.name !== 'AbortError') toast('识别失败：' + e.message); })
+      .then(r => { prog.msg = ''; prog.done = prog.total = 0; if (r.notes?.length) r.notes.forEach(n => notes.add(n)); merge(r); }, e => { if (e.name !== 'AbortError' && (!lazy || shown)) toast('识别失败：' + e.message); })
       .finally(() => { pending--; if (!closed) settle(); });
   };
   // Keeps watching while the sheet is open (only possible when the browser already allows reading the clipboard).
@@ -4358,7 +4377,7 @@ function openClipSession() {
   const lock = on => {   // while saving nothing in the sheet can be changed, cancelled or submitted twice
     saving = on;
     $$('input, button', m).forEach(x => { if (on) { x.dataset.was = x.disabled ? '1' : ''; x.disabled = true; } else if (x.dataset.was !== undefined) { x.disabled = x.dataset.was === '1'; delete x.dataset.was; } });
-    $('#clipMsg').textContent = on ? '正在写入，请稍等…' : '';
+    $('#clipMsg', m).textContent = on ? '正在写入，请稍等…' : '';
     count();
   };
   multiPick({ box: $('#clipRows', m), rows: () => $$('.crow:not(.dim)', m), box_: r => $('.csel', r), changed: count });
@@ -4405,8 +4424,8 @@ function openClipSession() {
     }
     count();
   };
-  $('#clipCancel').onclick = () => { if (!saving) close(); };
-  $('#clipAdd').onclick = async () => {
+  $('#clipCancel', m).onclick = () => { if (!saving) close(); };
+  $('#clipAdd', m).onclick = async () => {
     if (saving || pending) return;
     syncFromDom();
     const pick = all.filter(x => x._sel && !x.exists && !x.empty).map(x => ({ ...x, name: (x.name || '').trim() || x.name }));
@@ -4425,7 +4444,7 @@ function openClipSession() {
     } catch (e) { lock(false); toast(e.message); }
   };
   render();
-  return { add, close, settled: () => done };
+  return { add, close, show, settled: () => done };
 }
 
 // 预览模式的头部标记: 名称 + 「添加到我的源」+「关闭」。其余界面差异靠 html.pv 的样式 (隐藏源切换 / 榜单 / 收藏 / 下载 / 设置)。
