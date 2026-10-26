@@ -1,9 +1,9 @@
 // 更新：检查是否有新版本 / 应用更新。网页管理员页面 (server.js) 和 manage.js 共用。
 //   git 仓库       检查 = git fetch 后比较 HEAD 和上游；更新 = git pull --ff-only
 //   非 git (zip)   检查 = GitHub API 取默认分支最新提交；更新 = 下载该提交的 zip → 解压 → 校验 → 带回滚地替换程序文件
-// 下载加速 (国内 codeload.github.com 很慢): 直连和几个 GitHub 加速镜像同时发起，谁先出数据用谁，其它的立刻中断；带进度 (已下载 / 总大小 / 速度 / 来源)。
+// 下载加速 (国内 codeload.github.com 很慢): 默认先走国内 GitHub 加速镜像 (按顺序，一条不行换下一条)，最后才直连 GitHub；带进度 (已下载 / 总大小 / 速度 / 来源)。
 //   镜像是第三方，所以走镜像下载的内容必须通过校验才会用：向 GitHub API 取这个提交的完整文件树 (每个文件的 git blob SHA-1)，
-//   逐个文件比对，多一个 / 少一个 / 改一个字节都不行；校验不过或镜像失败就改用直连 (直连走 GitHub 自己的 HTTPS，不校验)。
+//   逐个文件比对，多一个 / 少一个 / 改一个字节都不行；校验不过或镜像失败就换下一条，最后直连 (直连走 GitHub 自己的 HTTPS，不校验)。
 //   镜像列表: 环境变量 TVBOX_MIRRORS=前缀1,前缀2 (例 https://ghfast.top/)，设成空字符串 = 不用镜像。
 // 保留不动：data/ (数据)、.env (令牌)、.tools/ (便携 Node / ffmpeg)、node_modules/。
 // 临时文件只放在 data/.update-tmp/ ，每次更新结束 (成功或失败) 都清掉，服务启动时也会清一次。
@@ -164,7 +164,7 @@ function findWebDir(dir, depth) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) if (e.isDirectory()) { const f = findWebDir(path.join(dir, e.name), depth - 1); if (f) return f; }
   return null;
 }
-// ---------- 下载: 多线路竞速 + 进度 ----------
+// ---------- 下载: 单线路 + 进度 (调用方按顺序逐条尝试；传多条才会竞速) ----------
 // 候选线路同时发起请求，第一个收到数据的赢，其余中断。onProgress({ done, total, speed, via })，total 可能为 0 (服务器没给大小)。
 async function raceDownload(cands, dest, onProgress, signal) {
   checkAbort(signal);
@@ -278,26 +278,34 @@ async function zipApply(log, onProgress, signal) {
       return { src, top };
     };
     const tree = await treeP;
-    const cands = tree ? [direct, ...mir] : [direct];
-    log(`下载 ${slug} ${sha ? short(sha) : '默认分支最新代码'}（${cands.length > 1 ? `${cands.length} 条线路竞速，谁快用谁` : '直连'}）…`);
-    let got = await raceDownload(cands, zip, onProgress, signal);
-    log(`已下载 ${(got.size / 1048576).toFixed(1)} MB，来源 ${got.via}，解压 …`);
-    let found;
-    if (got.mirror) {
+    // 默认走国内加速镜像 (按列表顺序，一条失败再换下一条)，直连 GitHub 只做最后兜底；不竞速。
+    // 镜像是第三方：内容必须通过文件树校验才会用，校验不过同样换下一条。
+    const cands = tree ? [...mir, direct] : [direct];
+    log(`下载 ${slug} ${sha ? short(sha) : '默认分支最新代码'}（${cands.length > 1 ? `优先国内镜像，失败再换，最后直连 GitHub` : '直连 GitHub'}）…`);
+    let got = null, found = null;
+    const errs = [];
+    for (const c of cands) {
+      checkAbort(signal);
       try {
-        found = await unpack();
-        checkAbort(signal);
-        log('校验文件 (对照 GitHub 文件树) …');
-        verifyAgainstTree(tree, found.top, found.src);
-        log('校验通过');
-      } catch (e) {
-        if (signal?.aborted) throw e;
-        log(`镜像内容没通过校验 (${e.message})，改用直连重新下载 …`);
-        got = await raceDownload([direct], zip, onProgress, signal);
+        log(`线路 ${c.name} …`);
+        got = await raceDownload([c], zip, onProgress, signal);
         log(`已下载 ${(got.size / 1048576).toFixed(1)} MB，解压 …`);
         found = await unpack();
+        if (c.mirror) {
+          checkAbort(signal);
+          log('校验文件 (对照 GitHub 文件树) …');
+          verifyAgainstTree(tree, found.top, found.src);
+          log('校验通过');
+        }
+        break;
+      } catch (e) {
+        if (signal?.aborted || e.message === CANCELLED) throw e;
+        errs.push(`${c.name}：${e.message}`);
+        got = found = null;
+        if (c !== cands[cands.length - 1]) log(`${c.name} 不可用 (${e.message})，换下一条 …`);
       }
-    } else found = await unpack();
+    }
+    if (!found) throw new Error('所有下载线路都失败了: ' + errs.join(' / '));
     const { src } = found;
     checkAbort(signal);
     const chk = await sh(process.execPath, ['--check', path.join(src, 'server.js')]);

@@ -270,6 +270,16 @@ function normalize(cfg) {
     if (Number(s.kids)) site.kids = 1;
     if (Number(s.adult)) site.adult = 1;
     if (Number(s.hidden)) site.hidden = 1;
+    // 转成本地片单前的样子, 供「撤销转换」: { api: 原接口 } 或 { group: 原聚合源 }
+    const rs = s.restore;
+    if (rs && typeof rs === 'object' && LOCAL_VOD.test(api)) {
+      if (/^https?:\/\//.test(str(rs.api).trim())) site.restore = { api: str(rs.api).trim() };
+      else if (rs.group && Array.isArray(rs.group.members) && rs.group.members.length) {
+        const g = rs.group;
+        site.restore = { group: { key: str(g.key).trim(), name: str(g.name).trim(), members: g.members.map(x => str(x).trim()).filter(Boolean),
+          ...(Number(g.kids) ? { kids: 1 } : {}), ...(Number(g.adult) ? { adult: 1 } : {}), ...(Number(g.hidden) ? { hidden: 1 } : {}) } };
+      }
+    }
     if (categories.length) site.categories = categories;
     out.push(site);
   }
@@ -2637,6 +2647,7 @@ rpcHandlers.admin = async ({ op, body = {} }) => {
       canRestart: canRestart(), autoCheck: process.env.TVBOX_NO_AUTOCHECK !== '1', ver, update: updater.cachedCheck(), caches, job: adminJob.cur, last,
       ffmpeg: !!FFMPEG, port: PORT });
   }
+  if (op === 'job') return ok({ boot: BOOT, job: adminJob.cur });
   if (op === 'check') {
     try { return ok({ update: await updater.check({ force: !!body.force }) }); }
     catch (e) { return ok({ update: updater.cachedCheck(), checkError: e.message }); }
@@ -2798,6 +2809,26 @@ async function api(route, q, res, req) {
     if (sub === 'logout' && write) { res.setHeader('Set-Cookie', `${ADMIN_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`); return send(res, 200, { ok: true }); }
     if (sub === 'status' && !write && !isAdmin) return send(res, 200, { authed: false });
     if (!isAdmin) return send(res, 403, { error: '需要管理员令牌', admin: true });
+    if (sub === 'events' && !write) {
+      // SSE: 任务状态 (进度 / 日志) 有变化就推一条，空闲时每 10 秒一条心跳; 服务重启时连接断开，浏览器自动重连并拿到新的 boot。
+      res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+      res.socket?.setNoDelay(true); res.socket?.setTimeout(0);
+      res.write('retry: 1500\n\n');
+      let last = '', beat = 0, gone = false, busy = false;
+      const tick = async () => {
+        if (gone || busy) return;
+        busy = true;
+        try {
+          const r = await rpc('admin', { op: 'job' }, 5000);
+          const data = JSON.stringify(r.body);
+          if (data !== last) { last = data; beat = 0; res.write(`event: job\ndata: ${data}\n\n`); }
+          else if (++beat >= 10) { beat = 0; res.write(': ping\n\n'); }
+        } catch {} finally { busy = false; }
+      };
+      const timer = setInterval(tick, 1000);
+      res.on('close', () => { gone = true; clearInterval(timer); });
+      return tick();
+    }
     const ops = { status: 'GET', cancel: 'POST', check: 'POST', restart: 'POST', update: 'POST', clear: 'POST', rotate: 'POST' };
     if (ops[sub] !== req.method) return send(res, 404, { error: 'unknown api' });
     return leader('admin', { op: sub, body: write ? await readBody(req) : {} });

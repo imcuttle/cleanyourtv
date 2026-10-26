@@ -2912,7 +2912,7 @@ const isStandalone = () => matchMedia('(display-mode: standalone)').matches || n
 const admApi = (method, path, body) => req(method, '/api/admin/' + path, body, false, null);
 const fmtUp = sec => { sec = Math.max(0, sec | 0); const d = Math.floor(sec / 86400), h = Math.floor(sec / 3600) % 24, m = Math.floor(sec / 60) % 60; return d ? `${d} 天 ${h} 小时` : h ? `${h} 小时 ${m} 分` : `${m} 分钟`; };
 const ago = t => { const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? '刚刚' : s < 3600 ? Math.floor(s / 60) + ' 分钟前' : s < 86400 ? Math.floor(s / 3600) + ' 小时前' : Math.floor(s / 86400) + ' 天前'; };
-let admPoll = 0;
+let admPoll = 0, admEs = null;
 async function initAdmin() {
   const box = $('#adminSec'); if (!box) return;
   const alive = () => box.isConnected;
@@ -2992,24 +2992,37 @@ async function initAdmin() {
       watch('换令牌', r);
     });
   };
-  // 任务进度: 每秒看一次; 服务重启时请求会失败, 等到启动时间 (boot) 变了就刷新页面, 用上新代码。
+  // 任务进度: SSE (/api/admin/events) 服务端有变化就推; 断了浏览器自动重连。服务重启时连接断开, 重连后 boot 变了就刷新页面, 用上新代码。
+  let esBoot = null, esLabel = '', esDownAt = 0;
+  const stopWatch = () => { if (admEs) { admEs.close(); admEs = null; } clearTimeout(admPoll); };
   const watch = (label, r) => {
-    const boot0 = st.boot; let n = 0, down = false;
-    st.job = r.job; busy = ''; paint();
-    clearInterval(admPoll);
-    admPoll = setInterval(async () => {
-      if (!alive()) return clearInterval(admPoll);
-      n++;
-      try {
-        const x = await admApi('GET', 'status');
-        if (!x.authed) { clearInterval(admPoll); st = x; return paint(); }
-        if (x.boot !== boot0) { clearInterval(admPoll); toast(label + '完成，服务已重启'); setTimeout(() => location.reload(), 400); return; }
-        st = x; paint();
+    st.job = r?.job || st.job; busy = ''; paint();
+    esLabel = label || esLabel || '操作'; esBoot = st.boot; esDownAt = 0;
+    stopWatch();
+    const open = () => {
+      if (!alive()) return stopWatch();
+      const es = admEs = new EventSource('/api/admin/events');
+      es.addEventListener('job', ev => {
+        if (!alive()) return stopWatch();
+        let x; try { x = JSON.parse(ev.data); } catch { return; }
+        if (esDownAt) { esDownAt = 0; busy = ''; }
+        if (esBoot && x.boot !== esBoot) { stopWatch(); toast(esLabel + '完成，服务已重启'); setTimeout(() => location.reload(), 400); return; }
+        esBoot = x.boot; st.job = x.job; paint();
         const j = x.job;
-        if (j && ['done', 'error', 'cancelled'].includes(j.status)) { clearInterval(admPoll); toast(j.status === 'done' ? label + '完成' : j.status === 'cancelled' ? '已取消' : (j.error || label + '失败')); }
-      } catch { if (!down) { down = true; busy = '服务重启中，等待重新连接…'; paint(); } }
-      if (n > 150) { clearInterval(admPoll); busy = '等了很久服务还没回来，看看启动窗口 / 日志，或手动刷新页面。'; paint(); }
-    }, 1000);
+        if (j && ['done', 'error', 'cancelled'].includes(j.status)) {
+          stopWatch(); toast(j.status === 'done' ? esLabel + '完成' : j.status === 'cancelled' ? '已取消' : (j.error || esLabel + '失败'));
+          load().then(paint, () => {});
+        }
+      });
+      es.onerror = () => {
+        if (admEs !== es) return;
+        // 重启中 / 网络断了: EventSource 自己会重连; 被浏览器彻底关掉 (比如 403) 才手动再开, 太久没回来就放弃。
+        if (!esDownAt) { esDownAt = Date.now(); busy = '连接断开，正在重连…'; paint(); }
+        if (Date.now() - esDownAt > 300e3) { stopWatch(); busy = '等了很久服务还没回来，看看启动窗口 / 日志，或手动刷新页面。'; paint(); return; }
+        if (es.readyState === 2) { es.close(); if (admEs === es) admEs = null; admPoll = setTimeout(open, 2000); }
+      };
+    };
+    open();
   };
   try { await load(); } catch (e) { st = { authed: false }; }
   // 浏览器记住了管理员令牌: Cookie 丢了 / 服务换了 Cookie 时自动静默登录 (令牌被换掉了才会丢掉记忆, 重新输入)
@@ -3018,6 +3031,7 @@ async function initAdmin() {
     catch (e) { if (/不对/.test(e.message)) delete localStorage.adminToken; }
   }
   paint();
+  if (st.authed && st.job && (st.job.status === 'running' || st.job.status === 'restarting')) watch({ update: '更新', restart: '重启', clear: '清理', rotate: '换令牌' }[st.job.kind] || '操作', { job: st.job });
   // 自动检查由服务端在启动时和每小时做 (有缓存); 这里打开时如果还没有结果, 顺手查一次
   if (st.authed && !st.update && st.autoCheck && !(st.job && st.job.status === 'running')) {
     try { await admApi('POST', 'check', {}); await load(); paint(); } catch {}
@@ -3049,11 +3063,11 @@ async function renderSettings() {
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="" readonly>
       <span class="ops"><span class="tagl">聚合源</span>${flags(x)}<span class="status"></span><button data-op="test" title="测速：逐个测成员，汇总能连上几个">测速</button><button data-op="edit" title="把聚合结果存成一个本地片单再编辑（会失去聚合状态）">编辑文本</button><button data-op="toggle"></button><button data-op="dissolve" title="解散：成员回到主列表，聚合源删除">解散</button><button data-op="del" title="删除聚合源和它的所有成员">删除</button></span></div>`
-    : `<div class="srow${parent ? ' mem' : ''}" data-i="${i}" ${parent ? `data-parent="${esc(parent)}" hidden` : ''} ${x.key && kind === 'site' ? `data-key="${esc(x.key)}"` : ''} ${x.from ? `data-from="${esc(x.from)}"` : ''} ${x.categories ? `data-cats="${esc(JSON.stringify(x.categories))}"` : ''} ${cacheOf(x) ? `data-ok="${cacheOf(x).cls === 'status ok' ? 1 : 0}"${cacheOf(x).total !== undefined ? ` data-total="${cacheOf(x).total}"` : ''}` : ''}>
+    : `<div class="srow${parent ? ' mem' : ''}" data-i="${i}" ${parent ? `data-parent="${esc(parent)}" hidden` : ''} ${x.key && kind === 'site' ? `data-key="${esc(x.key)}"` : ''} ${x.from ? `data-from="${esc(x.from)}"` : ''} ${x.restore ? `data-restore="${esc(JSON.stringify(x.restore))}"` : ''} ${x.categories ? `data-cats="${esc(JSON.stringify(x.categories))}"` : ''} ${cacheOf(x) ? `data-ok="${cacheOf(x).cls === 'status ok' ? 1 : 0}"${cacheOf(x).total !== undefined ? ` data-total="${cacheOf(x).total}"` : ''}` : ''}>
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="${esc(kind === 'site' ? x.api : x.url)}" placeholder="${kind === 'site' ? 'https://example.com/api.php/provide/vod' : 'https://…/live.m3u / .m3u8 / .txt'}">
-      <span class="ops">${kind === 'site' ? `${String(x.api).startsWith('local:') ? '<span class="tagl">本地片单</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit" title="把片单存成服务端本地文本再编辑">编辑文本</button><button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
+      <span class="ops">${kind === 'site' ? `${String(x.api).startsWith('local:') ? '<span class="tagl">本地片单</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit" title="把片单存成服务端本地文本再编辑">编辑文本</button>${x.restore && String(x.api).startsWith('local:') ? '<button data-op="undo" title="撤销转换：恢复成转换前的' + (x.restore.group ? '聚合源' : '点播源接口') + '">撤销转换</button>' : ''}<button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
         <button data-op="del">删除</button></span></div>`;
   const rowsHtml = (list, kind) => list.map((x, i) => rowHtml(x, kind, i)).join('');
   // 点播源 list: a 聚合源 row carries its members right under it (collapsed); they are not listed on their own any more.
@@ -3135,6 +3149,7 @@ async function renderSettings() {
     if ($('.adult', r).checked) s.adult = 1;
     if ($('.hid', r).checked) s.hidden = 1;
     if (r.dataset.cats) s.categories = JSON.parse(r.dataset.cats);
+    if (r.dataset.restore && url.startsWith('local:')) s.restore = JSON.parse(r.dataset.restore);
     return s;
   }).filter(x => (x.api || x.url));
   const current = () => ({ sites: collect($('#sites'), 'site'), lives: collect($('#lives'), 'live') });
@@ -3281,7 +3296,7 @@ async function renderSettings() {
     if (!url) return toast('先填接口地址');
     if (isGroup) {
       if (!keys.length) return toast('这个聚合源没有成员');
-      if (!confirm(`把聚合源「${name}」转成一个本地片单？\n\n· 会取 ${keys.length} 个成员各自前 3 页的片，同名同年的自动合并成一部（线路包含所有成员的线路）\n· 转换后它变成普通的本地点播源，不再是聚合源：成员不再被实时聚合，之后新增的片不会自动出现\n· 只含能直接播放的线路；原来的成员源本身不受影响\n\n继续？`)) return;
+      if (!confirm(`把聚合源「${name}」转成一个本地片单？\n\n· 会取 ${keys.length} 个成员各自全部页的片（含封面和详情，片多时需要几分钟），同名同年的自动合并成一部（线路包含所有成员的线路）\n· 转换后它变成普通的本地点播源，不再是聚合源：成员不再被实时聚合，之后新增的片不会自动出现\n· 只含能直接播放的线路；原来的成员源本身不受影响\n\n继续？`)) return;
     }
     const m = document.createElement('div');
     let editorOf = null;
@@ -3321,7 +3336,7 @@ async function renderSettings() {
         if (isGroup) {
           // The group row turns into an ordinary 本地片单 source: swap it for a plain row in place (its members stay in the list).
           const tpl = document.createElement('div');
-          tpl.innerHTML = rowHtml({ name: $('.nm', r).value.trim(), api: out.api, kids: $('.kids', r).checked ? 1 : 0, adult: $('.adult', r).checked ? 1 : 0, hidden: $('.hid', r).checked ? 1 : 0 }, 'site', +r.dataset.i || 0);
+          tpl.innerHTML = rowHtml({ name: $('.nm', r).value.trim(), api: out.api, restore: { group: { key: r.dataset.key, name: $('.nm', r).value.trim(), members: keys, ...($('.kids', r).checked ? { kids: 1 } : {}), ...($('.adult', r).checked ? { adult: 1 } : {}), ...($('.hid', r).checked ? { hidden: 1 } : {}) } }, kids: $('.kids', r).checked ? 1 : 0, adult: $('.adult', r).checked ? 1 : 0, hidden: $('.hid', r).checked ? 1 : 0 }, 'site', +r.dataset.i || 0);
           const plain = tpl.firstElementChild;
           blockOf(r).slice(1).forEach(unMem);
           r.replaceWith(plain);
@@ -3330,7 +3345,7 @@ async function renderSettings() {
           toast(`已转成本地片单：${out.titles} 部 / ${out.cats} 个分类（已不再是聚合源）${out.bad ? `，有 ${out.bad} 行格式不对被跳过` : ''}`);
           return renderSettings();
         }
-        if (!url.startsWith('local:') && !isGroup) r.dataset.from = url;
+        if (!url.startsWith('local:') && !isGroup) { r.dataset.from = url; r.dataset.restore = JSON.stringify({ api: url }); }
         $('.url', r).value = out.api;
         close();
         await persist(current());
@@ -3407,6 +3422,25 @@ async function renderSettings() {
     }
     if (op === 'edit') return editText(r);
     if (op === 'del') return dropRows([r]);
+    if (op === 'undo') {
+      let rs; try { rs = JSON.parse(r.dataset.restore || 'null'); } catch {}
+      if (!rs) return toast('没有可以撤销的记录');
+      if (!confirm(rs.group ? `撤销转换：把「${$('.nm', r).value.trim()}」恢复成聚合源（${rs.group.members.length} 个成员）？\n本地片单文件会留在服务器上，不会删除。` : `撤销转换：把「${$('.nm', r).value.trim()}」恢复成原来的点播源接口？\n${rs.api}\n本地片单文件会留在服务器上，不会删除。`)) return;
+      if (rs.group) {
+        const g = rs.group, mem = g.members.map(k => $$('#sites .srow[data-key]').find(x => x.dataset.key === k && x !== r && !x.dataset.members)).filter(Boolean);
+        if (!mem.length) return toast('原来的成员源都不在列表里了，没法恢复成聚合源');
+        const tpl = document.createElement('div');
+        tpl.innerHTML = rowHtml({ ...g, keep: false }, 'site', +r.dataset.i || 0);
+        const head = tpl.firstElementChild;
+        r.replaceWith(head);
+        let at = head;
+        for (const m of mem) { m.classList.add('mem'); m.dataset.parent = g.key; m.hidden = true; at.after(m); at = m; }
+      } else {
+        $('.url', r).value = rs.api; delete r.dataset.restore; delete r.dataset.from;
+      }
+      try { await persist(current(), true); toast('已撤销转换'); } catch (err) { toast(err.message); }
+      return;
+    }
     if (op === 'toggle') { r.dataset.open = r.dataset.open ? '' : '1'; return syncGroups(); }
     if (op === 'dissolve') {
       if (!confirm(`解散聚合源「${$('.nm', r).value.trim()}」？成员回到主列表。`)) return;
