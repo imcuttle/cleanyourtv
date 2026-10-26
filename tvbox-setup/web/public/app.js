@@ -3041,13 +3041,13 @@ async function renderSettings() {
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="" readonly>
-      <span class="ops"><span class="tagl">聚合源</span>${flags(x)}<span class="status"></span><button data-op="test" title="测速：逐个测成员，汇总能连上几个">测速</button><button data-op="edit" title="把聚合结果存成一个本地片单再编辑（会失去聚合状态）">编辑文本</button><button data-op="toggle"></button><button data-op="dissolve" title="解散：成员回到主列表，聚合源删除">解散</button><button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del" title="删除聚合源和它的所有成员">删除</button></span></div>`
+      <span class="ops"><span class="tagl">聚合源</span>${flags(x)}<span class="status"></span><button data-op="test" title="测速：逐个测成员，汇总能连上几个">测速</button><button data-op="edit" title="把聚合结果存成一个本地片单再编辑（会失去聚合状态）">编辑文本</button><button data-op="toggle"></button><button data-op="dissolve" title="解散：成员回到主列表，聚合源删除">解散</button><button data-op="del" title="删除聚合源和它的所有成员">删除</button></span></div>`
     : `<div class="srow${parent ? ' mem' : ''}" data-i="${i}" ${parent ? `data-parent="${esc(parent)}" hidden` : ''} ${x.key && kind === 'site' ? `data-key="${esc(x.key)}"` : ''} ${x.from ? `data-from="${esc(x.from)}"` : ''} ${x.categories ? `data-cats="${esc(JSON.stringify(x.categories))}"` : ''} ${cacheOf(x) ? `data-ok="${cacheOf(x).cls === 'status ok' ? 1 : 0}"${cacheOf(x).total !== undefined ? ` data-total="${cacheOf(x).total}"` : ''}` : ''}>
       <label class="selcell">${dragH}<input type="checkbox" class="sel"><span class="lan">${i + 1}</span></label>
       <input class="nm" value="${esc(x.name)}" placeholder="名称">
       <input class="url" value="${esc(kind === 'site' ? x.api : x.url)}" placeholder="${kind === 'site' ? 'https://example.com/api.php/provide/vod' : 'https://…/live.m3u / .m3u8 / .txt'}">
       <span class="ops">${kind === 'site' ? `${String(x.api).startsWith('local:') ? '<span class="tagl">本地片单</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit" title="把片单存成服务端本地文本再编辑">编辑文本</button><button data-op="release" class="rel" title="移出聚合源，回到主列表">释放</button>` : `${String(x.url).startsWith('local:') ? '<span class="tagl">本地文本</span>' : ''}${flags(x)}${stOf(x)}<button data-op="test">测速</button><button data-op="edit">编辑文本</button>`}
-        <button data-op="up">↑</button><button data-op="down">↓</button><button data-op="del">删除</button></span></div>`;
+        <button data-op="del">删除</button></span></div>`;
   const rowsHtml = (list, kind) => list.map((x, i) => rowHtml(x, kind, i)).join('');
   // 点播源 list: a 聚合源 row carries its members right under it (collapsed); they are not listed on their own any more.
   const siteRowsHtml = () => {

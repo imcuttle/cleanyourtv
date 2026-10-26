@@ -205,6 +205,7 @@ a.btn { text-decoration: none; cursor: pointer; }
 :root { --hh: 64px; }
 .actions.bulk { position: sticky; top: var(--hh); z-index: 6; margin: 0 0 6px; padding: 9px 0; background: #141414fa; border-bottom: 1px solid #ffffff14; }
 .srow .ops { display: flex; gap: 4px; align-items: center; }
+.srow .ops > * { flex: none; white-space: nowrap; }
 .srow .ops button, .small { background: #2a2a2a; border: 1px solid #3a3a3a; color: #ddd; border-radius: 4px; padding: 5px 9px; font-size: 12px; }
 .srow .ops button:hover, .small:hover { background: #3a3a3a; }
 .status { font-size: 12px; min-width: 70px; text-align: right; color: var(--muted); }
@@ -1118,7 +1119,8 @@ input::placeholder, textarea::placeholder { color: #ffffff80; opacity: 1; }
 .field label.flag, .field label.lan { display: inline-flex; align-items: center; gap: 6px; }
 @media (max-width: 760px) {
   .srow { grid-template-columns: auto 1fr; gap: 8px 10px; }
-  .srow .ops { flex-wrap: wrap; gap: 6px; justify-content: flex-start; }
+  .srow .ops { flex-wrap: nowrap; gap: 6px; justify-content: flex-start; overflow-x: auto; scrollbar-width: none; }
+  .srow .ops::-webkit-scrollbar { display: none; }
   .srow .ops .flag { margin-right: 2px; }
   .srow .ops button { padding: 6px 11px; font-size: 13px; }
   .srow .selcell { min-width: 0; }
