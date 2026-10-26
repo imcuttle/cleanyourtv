@@ -16,6 +16,7 @@ if (require('cluster').isPrimary && !process.env.TVBOX_SUPERVISED && process.env
 }
 const GUARD = require('./guard');
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
@@ -31,6 +32,7 @@ const zlib = require('zlib');
 
 const PORT = Number(process.env.PORT) || 9988;
 const HOST = process.env.HOST || '0.0.0.0';
+const HTTPS_PORT = process.env.TVBOX_HTTPS === '0' ? 0 : Number(process.env.HTTPS_PORT) || PORT + 1;   // 0 = 不开 https (见 tls.js)
 const ROOT = __dirname;
 const CONFIG = path.join(ROOT, '..', 'config');
 const PUBLIC = path.join(ROOT, 'public');
@@ -46,6 +48,9 @@ const MEDIA_OP = /^(local|hls)/; // rpc ops handled by the media process
 const AUTH = require('./auth');
 const TOKEN = AUTH.ensureToken().token;
 const ADMIN_TOKEN = AUTH.ensureToken().adminToken;   // 管理员令牌 (TVBOX_ADMIN_TOKEN)：设置页「管理员」用，能重启 / 更新服务
+// HTTPS 证书: 主进程先生成 (写到 data/tls)，工作进程之后直接读文件。没有证书 / 没有 openssl 时只提示，http 照常。
+const TLS = HTTPS_PORT ? require('./tls').load() : null;
+if (TLS && TLS.error && !cluster.isWorker) console.log('  [https] ' + TLS.error);
 if (cluster.isPrimary && WORKERS > 1) return primary();
 const IS_LEADER = !cluster.isWorker || process.env.TVBOX_LEADER === '1';
 // 本地媒体 (folder scans, poster frames, ffmpeg → HLS) runs in its own process that never serves HTTP,
@@ -130,6 +135,12 @@ function banner(n, ffmpeg, dl) {
   console.log('\n  TVBox 已启动，浏览器打开：\n');
   console.log(`    本机      http://localhost:${PORT}`);
   for (const ip of lan) console.log(`    局域网    http://${ip}:${PORT}`);
+  if (TLS?.cert) {
+    console.log(`\n  HTTPS（手机「分享」要唤起系统分享面板 / 微信，必须用 https 打开）：`);
+    console.log(`    本机      https://localhost:${HTTPS_PORT}`);
+    for (const ip of lan) console.log(`    局域网    https://${ip}:${HTTPS_PORT}`);
+    if (TLS.source === 'self-signed') console.log('    自签名证书：浏览器第一次会提示不安全，点「继续访问 / 高级」即可 (证书 ' + require('./tls').DIR + '；有域名证书用 TVBOX_TLS_CERT / TVBOX_TLS_KEY)');
+  }
   console.log(`\n  访问令牌  ${TOKEN}`);
   console.log(`  管理员令牌  ${ADMIN_TOKEN}   （设置页「管理员」里用，可重启 / 更新服务；存在 ${AUTH.ENV_FILE} 的 ${AUTH.ADMIN_KEY}）`);
   console.log(`  （浏览器第一次打开要输入它，之后一直记住；存在 ${AUTH.ENV_FILE} 的 ${AUTH.KEY}，换令牌就删掉那一行再重启）`);
@@ -140,6 +151,7 @@ function banner(n, ffmpeg, dl) {
   // 二维码: 手机 / 电视扫一下就能打开。局域网的马上显示，公网的等查到 IP 再显示。
   const qr = (title, url) => { try { console.log(`\n  ${title}  ${url}\n${toTerminal(url)}`); } catch {} };
   if (lan[0]) qr('局域网二维码（手机和这台电脑连同一个 Wi-Fi）', `http://${lan[0]}:${PORT}`);
+  if (lan[0] && TLS?.cert) qr('局域网 HTTPS 二维码（可唤起系统分享）', `https://${lan[0]}:${HTTPS_PORT}`);
   publicIp().then(ip => {
     if (!ip) return console.log('\n  公网：没查到公网 IP（离线或被墙），只能在局域网里访问。');
     const url = `http://${ip}:${PORT}`;
@@ -3080,7 +3092,7 @@ async function api(route, q, res, req) {
   if (process.env.TVBOX_TEST_HOOKS === '1' && route === '_busy') { const t = Date.now() + (Number(q.get('ms')) || 3000); while (Date.now() < t); return send(res, 200, { ok: 1 }); }
   if (process.env.TVBOX_TEST_HOOKS === '1' && route === '_throw') { setTimeout(() => { throw new Error('test boom'); }, 10); return send(res, 200, { ok: 1 }); }
   if (route === 'health') return send(res, 200, { pid: process.pid, uptime: Math.round(process.uptime()), ...GUARD.stats, limits: global.__tvboxGuard?.limits || null });
-  if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ffmpeg: !!FFMPEG, loopback: isLoopback(req) });
+  if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ...(TLS?.cert ? { httpsUrls: lanIps().map(ip => `https://${ip}:${HTTPS_PORT}`) } : {}), ffmpeg: !!FFMPEG, loopback: isLoopback(req) });
 
   // ---- 本地媒体: folders, scan, and the CMS API for TVBox / FongMi ----
   if (route === 'local') {
@@ -3107,7 +3119,7 @@ async function api(route, q, res, req) {
   if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
   if (route === 'local/vod') {
     const host = /^([\w-]+\.)*[\w-]+(:\d+)?$|^\[[\da-f:]+\](:\d+)?$/i.test(req.headers.host || '') ? req.headers.host : `${lanIps()[0] || '127.0.0.1'}:${PORT}`;
-    return send(res, 200, localCms(Object.fromEntries(q), `http://${host}`));
+    return send(res, 200, localCms(Object.fromEntries(q), `${req.socket.encrypted ? 'https' : 'http'}://${host}`));
   }
 
   // ---- live: speed test, raw text editing, covers ----
@@ -3698,7 +3710,7 @@ function checkAuth(req, u) {
   const drain = why => {
     if (draining) return; draining = true;
     console.log(`  [保护] ${role || 'main'} 进程 ${process.pid} 开始退出：${why}`);
-    try { server.close(); } catch {}                         // no new connections; the ones in flight finish
+    try { server.close(); tlsServer?.close(); } catch {}      // no new connections; the ones in flight finish
     const done = () => process.exit(0);
     const t = setInterval(() => { if (!openConns) done(); }, 500); t.unref?.();
     setTimeout(done, 15e3).unref();
@@ -3717,7 +3729,7 @@ function checkAuth(req, u) {
   process.on('unhandledRejection', e => console.error(`  [保护] ${role || 'main'} 未处理的 Promise 错误（已拦截）：`, e && e.stack || e));
   global.__tvboxGuard = { limits: watch.limits, track: s => { openConns++; s.on('close', () => { openConns--; }); } };
 }
-const server = http.createServer(async (req, res) => {
+const handle = async (req, res) => {
   const u = new URL(req.url, 'http://x');
   const guarded = /^\/(api|hls|img|dl|media)(\/|$)/.test(u.pathname);
   const a = checkAuth(req, u);
@@ -3745,10 +3757,19 @@ const server = http.createServer(async (req, res) => {
     if (!res.headersSent) send(res, 502, { error: e.message || String(e) });
     else res.destroy();
   }
-});
-server.on('connection', s => global.__tvboxGuard.track(s));
-server.keepAliveTimeout = 65000;
-server.headersTimeout = 66000;
+};
+const server = http.createServer(handle);
+const tlsServer = TLS?.cert ? https.createServer({ cert: TLS.cert, key: TLS.key }, handle) : null;
+for (const s of [server, tlsServer]) if (s) {
+  s.on(s === tlsServer ? 'secureConnection' : 'connection', c => global.__tvboxGuard.track(c));
+  s.keepAliveTimeout = 65000;
+  s.headersTimeout = 66000;
+}
+if (tlsServer && !MEDIA_ONLY) {
+  tlsServer.on('tlsClientError', () => {});   // 浏览器对自签名证书的握手中断很常见，不当成错误
+  tlsServer.on('error', e => console.error('  [https] 监听失败，只用 http：', e.message));
+  tlsServer.listen(HTTPS_PORT, HOST);
+}
 if (!MEDIA_ONLY) server.listen(PORT, HOST, () => {
   if (!cluster.isWorker) banner(1, !!FFMPEG, DL);
   if (IS_LEADER) {

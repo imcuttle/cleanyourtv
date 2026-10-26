@@ -57,6 +57,13 @@ web/start.command        # macOS — or start.bat on Windows
 → http://localhost:9988 and http://<this machine>:9988 for the rest of the LAN
 ```
 
+**HTTPS.** The server also listens on `https://<host>:9989` (`PORT`+1, override with `HTTPS_PORT`; `TVBOX_HTTPS=0` turns it off).
+Phones only expose the system share sheet (WeChat, Messages, …), Service Worker and clipboard APIs on https, so use this
+address on the phone (the startup log prints it, with a QR code). With no certificate given it generates a self-signed one
+with `openssl` into `web/data/tls/` (localhost, host name and LAN IPs; regenerated when the IPs change) — the browser warns once,
+tap continue. For a warning-free setup point `TVBOX_TLS_CERT` / `TVBOX_TLS_KEY` at a real certificate. The origin differs
+from http, so enter the access token once more on the https address.
+
 **Access token.** The first start generates `TVBOX_TOKEN` into `web/.env` (git-ignored) and prints it in the
 log. Browsers ask for it once (a full-screen mask, no flash either way),
 then keep it for good (HttpOnly cookie + localStorage backup). One gate in front of every route guards
