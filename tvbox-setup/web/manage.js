@@ -12,6 +12,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 
 const ROOT = __dirname;
@@ -116,49 +117,98 @@ function listenerPids() {
   const r = run('lsof', ['-nP', `-iTCP:${PORT}`, '-sTCP:LISTEN', '-t']);
   return [...new Set((r.stdout || '').split(/\s+/).filter(Boolean).map(Number))];
 }
-function procInfo(pid) {
-  if (WIN) {
-    const r = run('powershell', ['-NoProfile', '-Command', `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if($p){@{ppid=$p.ParentProcessId;cmd=$p.CommandLine}|ConvertTo-Json -Compress}`]);
-    try { const j = JSON.parse(r.stdout); return { ppid: j.ppid, cmd: j.cmd || '' }; } catch { return null; }
+// Windows 一次取整张进程表 (比逐个查快，也不用在命令行里嵌双引号)；PowerShell 不行就退回 wmic。
+let winTable = null;
+function winProcs() {
+  if (winTable) return winTable;
+  const map = new Map();
+  const add = (pid, ppid, name, cmd) => { if (pid) map.set(+pid, { ppid: +ppid || 0, name: String(name || '').toLowerCase(), cmd: cmd || '' }); };
+  const r = run('powershell', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"], { timeout: 20000 });
+  try {
+    let j = JSON.parse(r.stdout); if (!Array.isArray(j)) j = [j];
+    for (const x of j) add(x.ProcessId, x.ParentProcessId, x.Name, x.CommandLine);
+  } catch {}
+  if (!map.size) {
+    const w = run('wmic', ['process', 'get', 'ProcessId,ParentProcessId,Name,CommandLine', '/format:csv'], { timeout: 20000 });
+    for (const l of (w.stdout || '').split(/\r?\n/)) {      // Node,CommandLine,Name,ParentProcessId,ProcessId
+      const m = /^[^,]*,(.*),([^,]*),(\d+),(\d+)\s*$/.exec(l);
+      if (m) add(m[4], m[3], m[2], m[1]);
+    }
   }
+  return (winTable = map);
+}
+function procInfo(pid) {
+  if (WIN) { const p = winProcs().get(pid); return p ? { ppid: p.ppid, cmd: p.cmd, name: p.name } : null; }
   const r = run('ps', ['-o', 'ppid=,command=', '-p', String(pid)]);
   const m = /^\s*(\d+)\s+(.*)$/.exec((r.stdout || '').trim());
-  return m ? { ppid: +m[1], cmd: m[2] } : null;
+  return m ? { ppid: +m[1], cmd: m[2], name: '' } : null;
 }
 const isOurs = cmd => /(^|[\s/\\"])server\.js\b/.test(cmd);
-function findRunning() {
+const isNode = info => !!info && (/^node(\.exe)?$/.test(info.name) || /node(\.exe)?"?\s/i.test(info.cmd));
+
+// 端口上到底是不是 TVBox: 直接问它。TVBox 的 /api/ 没带令牌会回 401 + X-Auth-Required: 1 (或带令牌回健康信息)。
+// 比看进程命令行可靠 (Windows 上命令行经常取不到 / 带引号 / 路径形式不一样)。注意: 请求不带令牌, 所以一定得到 401。
+function isTvboxOnPort() {
+  return new Promise(resolve => {
+    const rq = http.get({ host: '127.0.0.1', port: PORT, path: '/api/health', timeout: 2500 }, res => {
+      res.resume(); resolve(res.statusCode === 401 && res.headers['x-auth-required'] === '1');   // 不带令牌访问 /api/* 一定是 401 + 这个头；别的 HTTP 服务不会有
+    });
+    rq.on('timeout', () => { rq.destroy(); resolve(false); });
+    rq.on('error', () => resolve(false));
+  });
+}
+const PIDFILE = path.join(ROOT, 'data', '.server.pid');
+const readPid = () => { try { const n = +fs.readFileSync(PIDFILE, 'utf8').trim(); return n > 0 ? n : 0; } catch { return 0; } };
+const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+// 要停掉的最外层进程 (看守进程): 只杀它整棵树, 否则它会把子进程又拉起来。
+async function findRunning() {
+  winTable = null;
+  const listeners = listenerPids();
   const tops = new Set();
-  let foreign = false;
-  for (const pid of listenerPids()) {
+  const unknown = [];
+  for (const pid of listeners) {
     let cur = procInfo(pid);
-    if (!cur || !isOurs(cur.cmd)) { foreign = true; continue; }
+    if (!cur || !(isOurs(cur.cmd) || (WIN && isNode(cur)))) { unknown.push(pid); continue; }
     let top = pid;
-    for (let n = 0; n < 6; n++) {
+    for (let n = 0; n < 8; n++) {                       // 一路往上找: 父进程也是 node 跑的 server.js (或 Windows 上命令行取不到的 node.exe)
       const up = procInfo(cur.ppid);
-      if (!up || !isOurs(up.cmd)) break;
+      if (!up || !(isOurs(up.cmd) || (WIN && isNode(up) && !up.cmd.trim()))) break;
       top = cur.ppid; cur = up;
     }
     tops.add(top);
   }
-  return { pids: [...tops], foreign };
+  const probe = listeners.length ? await isTvboxOnPort() : false;
+  const saved = readPid();
+  if (listeners.length && probe && saved && alive(saved)) tops.add(saved);      // 本脚本启动时记下的看守进程
+  if (probe) for (const pid of unknown.splice(0)) tops.add(pid);               // 命令行认不出来, 但端口上确实是 TVBox: 照样停
+  return { pids: [...tops], foreign: unknown.length > 0 || (listeners.length > 0 && !probe && !tops.size), listeners };
 }
-const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+function killTree(pid, force) {
+  if (WIN) run('taskkill', ['/PID', String(pid), '/T', '/F']);
+  else try { process.kill(pid, force ? 'SIGKILL' : 'SIGTERM'); } catch {}
+}
 async function stopRunning() {
-  const { pids, foreign } = findRunning();
+  const { pids, foreign } = await findRunning();
   if (!pids.length) {
     if (foreign) throw new Error(`端口 ${PORT} 被别的程序占用了 (不是 TVBox)，没有动它。换个端口: PORT=9989 再运行。`);
     ok('没有正在运行的实例');
+    try { fs.rmSync(PIDFILE, { force: true }); } catch {}
     return;
   }
   step(`停止正在运行的实例 (进程 ${pids.join(', ')})…`);
-  for (const pid of pids) {
-    if (WIN) run('taskkill', ['/PID', String(pid), '/T', '/F']);
-    else try { process.kill(pid, 'SIGTERM'); } catch {}
-  }
+  for (const pid of pids) killTree(pid, false);
   for (let i = 0; i < 40 && pids.some(alive); i++) await sleep(250);
-  if (!WIN) for (const pid of pids) if (alive(pid)) { warn(`进程 ${pid} 没有及时退出，强制结束`); try { process.kill(pid, 'SIGKILL'); } catch {} }
+  for (const pid of pids) if (alive(pid)) { warn(`进程 ${pid} 没有及时退出，强制结束`); killTree(pid, true); }
   for (let i = 0; i < 20 && listenerPids().length; i++) await sleep(250);
+  // 还有进程占着端口: 如果端口上还是 TVBox (比如看守进程没杀到、工作进程被重新拉起), 连同它们和父进程一起强杀
+  for (let round = 0; round < 3 && listenerPids().length && await isTvboxOnPort(); round++) {
+    winTable = null;
+    for (const pid of listenerPids()) { const up = procInfo(pid); if (up && isNode(up) && up.ppid) killTree(up.ppid, true); killTree(pid, true); }
+    for (let i = 0; i < 12 && listenerPids().length; i++) await sleep(250);
+  }
   if (listenerPids().length) throw new Error(`端口 ${PORT} 仍被占用，请手动结束后重试`);
+  try { fs.rmSync(PIDFILE, { force: true }); } catch {}
   ok('已停止旧实例');
 }
 
@@ -233,6 +283,7 @@ async function start() {
   const child = spawn(process.execPath, ['server.js'], { cwd: ROOT, detached: true, windowsHide: true, stdio: ['ignore', fd, fd], env: { ...process.env, PORT: String(PORT) } });
   child.unref();
   fs.closeSync(fd);
+  try { fs.writeFileSync(PIDFILE, String(child.pid)); } catch {}
   let early = null; child.on('exit', c => { early = c; });
   for (let i = 0; i < 60 && !listenerPids().length && early === null; i++) await sleep(500);
   if (early !== null || !listenerPids().length) {
@@ -248,8 +299,8 @@ async function start() {
 function tail(file, n) {
   try { return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).slice(-n); } catch { return []; }
 }
-function doStatus() {
-  const { pids, foreign } = findRunning();
+async function doStatus() {
+  const { pids, foreign } = await findRunning();
   if (!pids.length) { say(foreign ? `${C.y}!${C.x} 端口 ${PORT} 被别的程序占用 (不是 TVBox)` : `${C.r}●${C.x} 没有在运行`); return; }
   say(`${C.g}●${C.x} 运行中  进程 ${pids.join(', ')}  ${urlOf()}`);
   const lan = Object.values(os.networkInterfaces()).flat().filter(x => x && x.family === 'IPv4' && !x.internal).map(x => x.address);
