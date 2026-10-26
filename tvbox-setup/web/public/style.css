@@ -423,6 +423,7 @@ a.ch { color: inherit; }
 .cbar { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
 .cbar button { width: 40px; height: 40px; border: 0; border-radius: 50%; background: none; color: #fff; display: grid; place-items: center; padding: 0; transition: background .15s, transform .15s; }
 .cbar button:hover { background: #ffffff1f; transform: scale(1.08); }
+.cbar button[hidden] { display: none; }
 .cbar svg { width: 26px; height: 26px; fill: currentColor; }
 .cbar svg text { font-size: 7px; font-weight: 800; text-anchor: middle; fill: currentColor; }
 .cbar button.txt { width: auto; padding: 0 12px; border-radius: 20px; font-size: 14px; font-weight: 700; }

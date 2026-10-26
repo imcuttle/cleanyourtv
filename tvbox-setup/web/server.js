@@ -773,7 +773,9 @@ const sizeQuality = (w, h) => (w >= 3000 || h >= 1900) ? '4K' : (w >= 1800 || h 
 // ---- /api/probe?u=: real resolution of the stream about to play (called after the detail page is up) ----
 // HLS master playlists list RESOLUTION per variant; media playlists don't say, so those stay unknown.
 // Local files go to the media process (ffmpeg -i). Results are cached for a day; identical probes share one request.
+const skipMarks = require('./skipmarks')({ ffmpeg: FFMPEG, ua: UA, file: path.join(DATA, 'skipmarks.json') });
 const probeCache = new Map(), probeBusy = new Map();
+rpcHandlers.skipmarks = ({ u, n }) => skipMarks(u, n);   // 只在主进程算 + 写缓存, 多个 worker 不会互相覆盖
 let probeRunning = 0; const probeWait = [];
 async function probeStream(u) {
   const hit = probeCache.get(u);
@@ -3030,6 +3032,8 @@ async function api(route, q, res, req) {
     return send(res, 200, { ok: true });
   }
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
+  // 自动识别片头 / 片尾 / 每集重复的广告: 立刻返回，没算完是 pending，客户端过一会儿再问
+  if (route === 'skipmarks') return send(res, 200, await rpc('skipmarks', { u: q.get('u') || '', n: q.get('n') || '' }, 5000).catch(() => ({ status: 'none' })));
   if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
   if (route === 'local/vod') {
     const host = /^([\w-]+\.)*[\w-]+(:\d+)?$|^\[[\da-f:]+\](:\d+)?$/i.test(req.headers.host || '') ? req.headers.host : `${lanIps()[0] || '127.0.0.1'}:${PORT}`;

@@ -2070,6 +2070,7 @@ function openPlayer(startAt) {
   const useLocal = cur.kind === 'local' || local?.status === 'done';
   $('.local').hidden = !useLocal;
   load(local?.status === 'done' ? local.play : e.url, startAt, false, useLocal || e.url.startsWith('/media/'));
+  skipInit();
   poke();
 }
 // 收藏 / 下载 inside the player (点播 only, not 本地媒体): same actions as the detail sheet, so a title opened by double-click
@@ -2145,6 +2146,39 @@ video.addEventListener('timeupdate', () => {
   hist.put({ site: d.site, adult: d.adult ? 1 : 0, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
     line, ep, epName: eps[ep].name, t: video.currentTime, dur: vdur(video) });
 });
+// ---------- 自动跳过片头 / 片尾 / 每集重复的广告 ----------
+// 服务端拿相邻两集的音频做指纹, 找出两集里一模一样的片段 (片头曲、片尾曲、每集都插的同一条广告), 算好后缓存。
+// 这里只管问结果、播放到那一段时自动跳过 (每一段只跳一次, 跳完想回看不会再拦)。只有点播多集、普通播放器用; 沉浸看片不用。
+let ask = null;
+const skipOn = () => localStorage.autoSkip !== '0';
+function paintSkip() { const b = $('[data-act=skipt]'); if (!b) return; b.classList.toggle('on', skipOn()); setL('skipt', skipOn() ? '自动跳过' : '不跳过'); }
+function skipInit() {
+  clearTimeout(ask?.timer);
+  const e = cur.eps[cur.ep], n = cur.eps[cur.ep + 1] || cur.eps[cur.ep - 1];
+  const ok = cur.kind === 'vod' && !cur.d.local && n && /^https?:/.test(e.url) && /^https?:/.test(n.url);
+  $('[data-act=skipt]').hidden = !ok;
+  ask = ok ? { tok: Math.random(), head: [], tail: [], done: new Set(), tries: 0, timer: 0 } : null;
+  if (ok) { paintSkip(); const tok = ask.tok; ask.timer = setTimeout(() => skipFetch(tok, e.url, n.url), 8000); }   // 先让正片稳稳播起来, 再去问
+}
+function skipFetch(tok, u, n) {
+  api('skipmarks', { u, n }, null).then(r => {
+    if (!ask || ask.tok !== tok) return;
+    if (r.status === 'ready') { ask.head = r.head || []; ask.tail = r.tail || []; }
+    if (r.status === 'pending' && ++ask.tries < 40) ask.timer = setTimeout(() => skipFetch(tok, u, n), 15000);
+  }).catch(() => {});
+}
+video.addEventListener('timeupdate', () => {
+  if (!ask || !skipOn() || (!ask.head.length && !ask.tail.length) || scrubbing || video.seeking) return;
+  const t = video.currentTime, d = vdur(video);
+  for (const [name, list] of [['片头', ask.head], ['片尾', ask.tail]]) for (const r of list) {
+    const id = name + r[0];
+    if (ask.done.has(id) || t < r[0] - 0.3 || t >= r[1] - 2) continue;
+    ask.done.add(id);
+    video.currentTime = r[1] >= d - 1 ? d : r[1];
+    return toast('已跳过' + name);
+  }
+});
+
 function step(n) { cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(0); }
 // Episode / channel picker. Live: numbered single column with a filter; 点播: compact grid.
 // Picking closes the panel; click outside or Esc also closes it.
@@ -2175,6 +2209,7 @@ function togglePlist(open = $('.plist').hidden) {
   }
 }
 function closePlayer() {
+  clearTimeout(ask?.timer); ask = null;
   if (hls) { hls.destroy(); hls = null; }
   pvReset(); playingSrc = null;
   video.pause(); video.removeAttribute('src'); video.load();
@@ -2210,6 +2245,7 @@ player.addEventListener('click', e => {
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); paintStar(liveFavs.has(c.url)); return; }
   if (act === 'more') { const m = $('.pmore'); m.hidden = !m.hidden; e.target.closest('[data-act]').setAttribute('aria-expanded', !m.hidden); return; }
   if (act === 'rate') return cycleRate();
+  if (act === 'skipt') { localStorage.autoSkip = skipOn() ? '0' : '1'; paintSkip(); return toast(skipOn() ? '已开启自动跳过片头片尾' : '已关闭自动跳过'); }
   if (act === 'fs') return toggleFs();
   if (act === 'lock') return setLock(true);
   if (!$('.pmore').hidden && !e.target.closest('.pmore, [data-act=more]')) { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); }
@@ -2234,7 +2270,10 @@ let gesturing = false;
 document.documentElement.classList.toggle('touchui', !fineCursor);
 const pacts = $('.pacts');
 if (!fineCursor) { ctrl.append(pacts); $('.pmore').prepend($('[data-act=vfav]'), $('[data-act=star]'), $('[data-act=dl]')); }   // 触屏: 收藏 / 下载 / 分享 / 倍速都在「更多」里
-else pacts.insertBefore($('[data-act=share]'), $('[data-act=more]'));   // desktop: no 更多, share stays in the top bar
+else {
+  pacts.insertBefore($('[data-act=share]'), $('[data-act=more]')); pacts.insertBefore($('[data-act=skipt]'), $('[data-act=more]'));
+  $('[data-c=rate]').before($('[data-act=prev]'), $('[data-act=next]'), $('[data-act=list]'));   // 大屏: 上一集 / 下一集 / 选集在播放器下面, 倍速左边
+}   // desktop: no 更多, share stays in the top bar
 $('[data-c=pip]').hidden = !pipSupported();
 $('[data-c=fs]').hidden = hideFs();
 video.addEventListener('loadedmetadata', () => { if (cur) $('[data-act=pip]').hidden = !pipSupported() || fineCursor; });
