@@ -1174,6 +1174,28 @@ document.addEventListener('click', e => {
 document.addEventListener('pointerdown', e => { if (ctxEl && !ctxSheet && !e.target.closest('.ctxm')) closeCardMenu(); }, true);
 addEventListener('scroll', () => { if (!ctxSheet) closeCardMenu(); }, true);
 sheetScrim.addEventListener('click', e => { if (!ctxSheet) return; e.preventDefault(); e.stopPropagation(); if (Date.now() - ctxAt > 400) closeCardMenu(); });   // 长按松手补的那一下 click 不算
+// 排序浮窗 (手机): 选项取自隐藏的 select，选中后写回 select 并触发它的 change，页面逻辑不用区分手机 / 桌面
+function openSortSheet(btn) {
+  const sel = document.getElementById(btn.dataset.for); if (!sel) return;
+  closeCardMenu();
+  ctxAt = Date.now();
+  const m = ctxEl = document.createElement('div');
+  m.className = 'ctxm csheet ssheet';
+  m.setAttribute('role', 'listbox');
+  m.innerHTML = `<div class="chead">排序</div>${[...sel.options].map(o => `<button type="button" role="option" data-v="${esc(o.value)}" class="${o.value === sel.value ? 'on' : ''}">${esc(o.textContent)}</button>`).join('')}`;
+  document.body.append(m);
+  ctxSheet = true; sheetScrim.hidden = false; document.body.classList.add('sheet-open', 'card-sheet');
+  m.addEventListener('click', e => {
+    const b = e.target.closest('[data-v]'); if (!b) return;
+    e.stopPropagation();
+    closeCardMenu();
+    if (sel.value === b.dataset.v) return;
+    sel.value = b.dataset.v;
+    btn.textContent = sel.selectedOptions[0].textContent;
+    sel.dispatchEvent(new Event('change'));
+  });
+}
+document.addEventListener('click', e => { const b = e.target.closest('.ssort .sbtn'); if (b) openSortSheet(b); });
 addEventListener('resize', () => { if (!ctxSheet) closeCardMenu(); });
 addEventListener('keydown', e => { if (e.key === 'Escape') closeCardMenu(); });
 const cardItems = new Map();
@@ -1403,11 +1425,28 @@ async function renderPerson(role, name, scopeKey = '') {
   observeRatings(view);
 }
 
+// ---------- 排序 (分类页 / 搜索页) ----------
+// 只在浏览器里排：CMS 的 list 接口没有统一的排序参数 (实测源站会忽略 by=)，源站默认顺序就是更新时间倒序。
+const SORTS = {
+  time: ['最近更新', (a, b) => (b.time || '').localeCompare(a.time || '')],
+  year: ['年份', (a, b) => (parseInt(b.year) || 0) - (parseInt(a.year) || 0) || (b.time || '').localeCompare(a.time || '')],
+  quality: ['画质', (a, b) => (Q_RANK[b.quality] ?? -1) - (Q_RANK[a.quality] ?? -1)],
+  name: ['名称', (a, b) => (a.name || '').localeCompare(b.name || '', 'zh')],
+};
+// '' = 不排序 (保持原顺序)
+const sortPref = (key, allowed) => ({ get: () => allowed.includes(localStorage[key]) ? localStorage[key] : '', set(v) { localStorage[key] = v; } });
+// 桌面: 原生下拉。手机 (≤760px): 同一个 select 藏起来当数据源，露出一个按钮，点开是底部上拉浮窗 (openSortSheet)
+const sortSelect = (id, cur, first, keys, tip) => `<div class="ssort" title="${esc(tip)}"><span>排序</span><select id="${id}"><option value="">${first}</option>${keys.map(k => `<option value="${k}"${k === cur ? ' selected' : ''}>${SORTS[k][0]}</option>`).join('')}</select><button type="button" class="sbtn" data-for="${id}" aria-haspopup="listbox">${esc(cur ? SORTS[cur][0] : first)}</button></div>`;
+const catSort = sortPref('catSort', ['time', 'year', 'name']);
+
 // ---------- category grid (infinite scroll) ----------
 async function renderCategory(t, name, siteKey) {
   const site = state.sites.some(x => x.key === siteKey) ? siteKey : state.site;
   const other = site !== state.site ? state.sites.find(x => x.key === site)?.name : '';
-  const head = `<div class="page"><div class="pagehead"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><button class="small ibs feedgo" data-feed="cat" data-t="${esc(t || '')}" data-name="${esc(name || '全部')}" data-site="${esc(site)}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button></div><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
+  let mode = catSort.get();
+  const base = [];                                         // everything loaded so far, in load order
+  const order = list => mode ? [...list].sort(SORTS[mode][1]) : list;
+  const head = `<div class="page"><div class="pagehead"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><button class="small ibs feedgo" data-feed="cat" data-t="${esc(t || '')}" data-name="${esc(name || '全部')}" data-site="${esc(site)}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button></div><div class="stool">${sortSelect('cSort', mode, '默认', ['time', 'year', 'name'], '只对已加载的内容排序；继续下滑加载的新内容在各自这一批里排序')}</div><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
   let pg = 0, count = 1, busy = false;
   const seen = new Set();
   const sk = history.state?.sk;
@@ -1422,8 +1461,9 @@ async function renderCategory(t, name, siteKey) {
       const g = $('#grid');
       for (const j of js) {
         pg = j.page; count = j.pagecount;
-        g.insertAdjacentHTML('beforeend', j.list.filter(it => !seen.has(it.id) && seen.add(it.id)).map(it => card(it)).join('') );
+        base.push(...j.list.filter(it => !seen.has(it.id) && seen.add(it.id)));
       }
+      g.insertAdjacentHTML('beforeend', order(base).map(it => card(it)).join(''));
       observeRatings(g); observeJav(g);
       $('#tail').innerHTML = pg >= count ? (seen.size ? '' : '<div class="empty">这个分类是空的</div>') : spinner;
     } else view.innerHTML = head;
@@ -1435,7 +1475,8 @@ async function renderCategory(t, name, siteKey) {
     pg = j.page; count = j.pagecount;
     if (sk) saveScroll(sk + '#p', pg);                      // how deep this entry was, so Back can rebuild it at once
     const fresh = j.list.filter(it => !seen.has(it.id) && seen.add(it.id));
-    $('#grid')?.insertAdjacentHTML('beforeend', fresh.map(it => card(it)).join(''));
+    base.push(...fresh);
+    $('#grid')?.insertAdjacentHTML('beforeend', order(fresh).map(it => card(it)).join(''));
     if ($('#grid')) { observeRatings($('#grid')); observeJav($('#grid')); }
     if (pg >= count && $('#tail')) $('#tail').innerHTML = seen.size ? '' : '<div class="empty">这个分类是空的</div>';
     busy = false;
@@ -1444,9 +1485,26 @@ async function renderCategory(t, name, siteKey) {
     const tailEl = $('#tail');
     if (tailEl && pg < count && tailEl.getBoundingClientRect().top < innerHeight + 600) setTimeout(() => more().catch(() => { busy = false; }), 0);
   };
+  $('#cSort', view).onchange = e => {
+    mode = e.target.value; catSort.set(mode);
+    const g = $('#grid'); if (!g) return;
+    g.innerHTML = order(base).map(it => card(it)).join('');
+    observeRatings(g); observeJav(g);
+  };
   if (!pg) await more();
   else if (pg < count) { const tailEl = $('#tail'); if (tailEl && tailEl.getBoundingClientRect().top < innerHeight + 600) await more(); }
   const sig = pageCtl.signal;
+  // revalidate：第一页有新片，插到网格最前面（已有的不动；页面滚到下面时补偿高度，不跳）
+  swrWatch((route, p, body) => {
+    if (route !== 'list' || p.site !== site || (p.t || '') !== (t || '') || String(p.pg) !== '1') return;
+    const g = $('#grid'); if (!g) return;
+    const nu = body.list.filter(it => !seen.has(it.id) && seen.add(it.id)); if (!nu.length) return;
+    const h = view.scrollHeight;
+    base.unshift(...nu);
+    g.insertAdjacentHTML('afterbegin', order(nu).map(it => card(it)).join(''));
+    if (view.scrollTop > 0) view.scrollTop += view.scrollHeight - h;
+    observeRatings(g); observeJav(g);
+  });
   // Scroll-driven (not IntersectionObserver): a restored / programmatic scroll can move the tail into reach in the same
   // frame the grid grew, which an observer sees as "still intersecting" and never reports.
   let tick = 0;
@@ -1498,8 +1556,14 @@ async function renderSearch(q, scopeKey = '') {
     const sites = [...new Set(g.srcs.map(x => names[x.site] || x.siteName))];
     return sites.length > 1 ? `${sites.length} 个源` : sites[0];
   };
+  const searchSort = sortPref('searchSort', ['time', 'year', 'quality', 'name']);
   const cards = () => {
-    const groups = searchMerge.on() ? mergeDupes(res) : res.map(it => ({ main: it, srcs: [it] }));
+    let groups = searchMerge.on() ? mergeDupes(res) : res.map(it => ({ main: it, srcs: [it] }));
+    const mode = searchSort.get();
+    if (mode) {                                            // a merged title is as new as its newest source
+      const rep = g => ({ ...g.main, time: g.srcs.reduce((m, x) => (x.time || '') > m ? x.time : m, '') });
+      groups = groups.map(g => [g, rep(g)]).sort((a, b) => SORTS[mode][1](a[1], b[1])).map(x => x[0]);
+    }
     const html = groups.map(g => {
       const n = new Set(g.srcs.map(x => x.site)).size;
       return card(g.main, { sub: sub(g), dup: n });
@@ -1512,6 +1576,7 @@ async function renderSearch(q, scopeKey = '') {
     <div class="stool">
       <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>仅 ${esc(curName)}</span></button></div>
       <label class="swt" title="同名同年的影片只显示一张，点开后在「其他源」里切换"><input type="checkbox" id="sMerge" ${searchMerge.on() ? 'checked' : ''}><i></i><span>合并同名资源</span></label>
+      ${res.length ? sortSelect('sSort', searchSort.get(), '相关性', ['time', 'year', 'quality', 'name'], '换个顺序看搜索结果') : ''}
       <span class="lan" id="sStatus">${status(first.shown)}</span>
     </div>
     ${res.length ? `<div class="grid" id="sGrid">${first.html}</div>` : `<div class="empty">${scoped ? `「${esc(scoped.name)}」里没有匹配的影片。` : '没有影片匹配，换个关键词（片名、演员或导演）。'}${scoped ? ' <a href="#" id="sAll"><u>改成在全部源里搜</u></a>' : ''}</div>`}
@@ -1522,12 +1587,13 @@ async function renderSearch(q, scopeKey = '') {
     searchScope.set(sc); location.hash = searchHash(q, sc);
   });
   const all = $('#sAll', view); if (all) all.onclick = e => { e.preventDefault(); searchScope.set('all'); location.hash = searchHash(q, 'all'); };
-  $('#sMerge', view).onchange = e => {
-    searchMerge.set(e.target.checked);
+  const refresh = () => {
     const c = cards(); const g = $('#sGrid', view); if (g) g.innerHTML = c.html;
     $('#sStatus', view).innerHTML = status(c.shown);
     observeRatings(view); observeJav(view);
   };
+  $('#sMerge', view).onchange = e => { searchMerge.set(e.target.checked); refresh(); };
+  const ss = $('#sSort', view); if (ss) ss.onchange = e => { searchSort.set(e.target.value); refresh(); };
   observeRatings(view);
   observeJav(view);
 }

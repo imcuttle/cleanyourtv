@@ -817,7 +817,7 @@ function adultOf(site, d) {
 function item(site, d) {
   const adult = adultOf(site, d);
   return { site: site.key, siteName: site.name, id: str(d.vod_id), name: str(d.vod_name), pic: str(d.vod_pic),
-    remarks: str(d.vod_remarks), type: str(d.type_name), typeId: str(d.type_id), year: str(d.vod_year), area: str(d.vod_area),
+    remarks: str(d.vod_remarks), type: str(d.type_name), typeId: str(d.type_id), year: str(d.vod_year), area: str(d.vod_area), time: str(d.vod_time),
     quality: qualityOf(d.vod_remarks, d.vod_version, d.vod_name), blurb: clean(d.vod_content).slice(0, 300),
     ...(adult ? { adult } : {}) };
 }
