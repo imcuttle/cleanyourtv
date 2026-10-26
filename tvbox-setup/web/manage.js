@@ -19,6 +19,7 @@ const ROOT = __dirname;
 const WIN = process.platform === 'win32';
 const PORT = Number(process.env.PORT) || 9988;
 const STATE = path.join(ROOT, 'data', '.manage.json');
+const HTTPS_PORT = process.env.TVBOX_HTTPS === '0' ? 0 : Number(process.env.HTTPS_PORT) || PORT + 1;   // 同 server.js；0 = 没开 https
 const updater = require('./updater');
 
 const C = process.stdout.isTTY ? { b: '\x1b[1m', d: '\x1b[2m', g: '\x1b[32m', y: '\x1b[33m', r: '\x1b[31m', c: '\x1b[36m', x: '\x1b[0m', inv: '\x1b[7m' }
@@ -254,11 +255,28 @@ async function doCheck() {
   warn(`有新版本: ${u.current || '版本未知'} → ${u.latest}${u.behind ? `（落后 ${u.behind} 个提交）` : ''}`);
   for (const c of u.commits || []) say(`   ${C.d}${c.id}${C.x} ${c.subject || ''}`);
 }
-function doInfo() {
+const lanOf = () => Object.values(os.networkInterfaces()).flat().filter(x => x && x.family === 'IPv4' && !x.internal && !x.address.startsWith('169.254.')).map(x => x.address);
+// https 入口 (server.js 同时开着): 手机要唤起系统分享面板必须用它。证书不可用时服务端只会在日志里留一行 [https]，这里就不显示。
+function httpsUrls() {
+  if (!HTTPS_PORT) return [];
+  return ['localhost', ...lanOf()].map(h => `https://${h}:${HTTPS_PORT}`);
+}
+const httpsOk = () => new Promise(res => {
+  if (!HTTPS_PORT) return res(false);
+  const s = require('net').connect({ host: '127.0.0.1', port: HTTPS_PORT, timeout: 1500 }, () => { s.destroy(); res(true); });
+  s.on('error', () => res(false)); s.on('timeout', () => { s.destroy(); res(false); });
+});
+async function printHttps(indent = '') {
+  if (!await httpsOk()) return;
+  say(`${indent}${C.d}HTTPS (手机分享 / 唤起微信用这个；自签名证书第一次点「继续访问」):${C.x}`);
+  for (const u of httpsUrls()) say(`${indent}   ${u}`);
+}
+async function doInfo() {
   const a = require('./auth').ensureToken();
-  const lan = Object.values(os.networkInterfaces()).flat().filter(x => x && x.family === 'IPv4' && !x.internal).map(x => x.address);
+  const lan = lanOf();
   say(`本机      http://localhost:${PORT}`);
   for (const ip of lan) say(`局域网    http://${ip}:${PORT}`);
+  await printHttps();
   say(`\n访问令牌    ${a.token}`);
   say(`管理员令牌  ${a.adminToken}   ${C.d}(设置页「管理员」里用)${C.x}`);
   say(`${C.d}令牌存在 ${a.file}${C.x}`);
@@ -286,6 +304,9 @@ async function start() {
     throw new Error('服务没有起来，完整日志: ' + LOG);
   }
   ok(`已在后台运行 (进程 ${child.pid})  ${urlOf()}`);
+  await printHttps();
+  const tlsNote = tail(LOG, 40).reverse().find(l => l.includes('[https]'));
+  if (tlsNote && !await httpsOk()) warn(tlsNote.trim());
   say(`${C.d}日志: ${LOG}${C.x}`);
   say(`${C.d}关掉这个窗口不影响服务；再次运行本脚本可重启 / 更新 / 停止 / 看日志。${C.x}`);
 }
@@ -296,8 +317,8 @@ async function doStatus() {
   const { pids, foreign } = await findRunning();
   if (!pids.length) { say(foreign ? `${C.y}!${C.x} 端口 ${PORT} 被别的程序占用 (不是 TVBox)` : `${C.r}●${C.x} 没有在运行`); return; }
   say(`${C.g}●${C.x} 运行中  进程 ${pids.join(', ')}  ${urlOf()}`);
-  const lan = Object.values(os.networkInterfaces()).flat().filter(x => x && x.family === 'IPv4' && !x.internal).map(x => x.address);
-  for (const ip of lan) say(`   局域网 http://${ip}:${PORT}`);
+  for (const ip of lanOf()) say(`   局域网 http://${ip}:${PORT}`);
+  await printHttps('');
   say(`${C.d}日志: ${LOG}${C.x}`);
 }
 function doLogs() {
