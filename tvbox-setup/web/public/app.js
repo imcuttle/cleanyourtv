@@ -2355,7 +2355,8 @@ function hlsRecover(h, data) {
   if (data.type === Hls.ErrorTypes.MEDIA_ERROR && t.media++ < 2) { if (t.media === 2) h.swapAudioCodec?.(); h.recoverMediaError(); return true; }
   return false;
 }
-let loadMuteT = 0, flashT = 0;
+let loadMuteT = 0, flashT = 0, lastRebuild = 0;
+const REBUILD_CC = 6;   // 跨过多少个断点后重建一次 (断点二十来秒一个, 约 2 分钟); 没有断点的源永远不会触发
 // 跨过 #EXT-X-DISCONTINUITY (不少采集源每二十来秒就断一次): 音频解码器重开, 会蹦一下「电流声」。
 // 和拖动时一样: 先静音一小会儿再恢复, 不动音量, 也不改动用户的静音设置。
 function duckFlash(ms = 600) {
@@ -2363,7 +2364,9 @@ function duckFlash(ms = 600) {
   clearTimeout(flashT);
   flashT = setTimeout(() => { if (video._duck) video._unduck?.(); }, ms);
 }
-function load(url, startAt, viaProxy, isLocal) {
+// rebuild: 播放中悄悄重建 (见 FRAG_CHANGED 里的说明): 不弹「加载中」、不盖封面, 倍速保留
+function load(url, startAt, viaProxy, isLocal, rebuild = false) {
+  const keepRate = rebuild ? video.playbackRate : 0;
   // 换源 / 换线路 / 重新加载: 先把旧解码器彻底断开并静音, 新画面接上的瞬间就不会有「电流声」; 有画面后恢复原来的静音状态
   video._duck = 1; video.muted = true;
   clearTimeout(loadMuteT);
@@ -2377,19 +2380,34 @@ function load(url, startAt, viaProxy, isLocal) {
   const direct = /\.mp4(\?|$)/i.test(url) || url.startsWith('/media/f/');
   playingSrc = { src, hls: !direct };
   pvReset();
-  msg('加载中…');
-  showCover(cur?.kind === 'vod' && cur.d?.adult ? cardPic(cur.d) : '');   // adult sources only
+  if (!rebuild) { msg('加载中…'); showCover(cur?.kind === 'vod' && cur.d?.adult ? cardPic(cur.d) : ''); }   // adult sources only
   fixDuration(video, url.startsWith('/media/h/') ? url : '');
-  const seek = () => { if (startAt) video.currentTime = startAt; video.play().catch(() => msg('点一下播放')); };
+  const seek = () => { if (startAt) video.currentTime = startAt; if (keepRate) video.playbackRate = keepRate; video.play().catch(() => msg('点一下播放')); };
   const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集或换个源试试', true); };
   if (window.Hls && Hls.isSupported() && !direct) {
     // 缓冲只留近处: 向前最多 30 秒 / 30MB, 向后只留 30 秒。码率高的源 (2~3Mbps) 如果让它一路缓冲下去, 几分钟后音频
     // SourceBuffer 先满, 浏览器被迫丢旧数据, 音频出现缺口, 之后就是一段「电流声」; 刷新后缓冲清空又正常。
-    hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60, maxBufferSize: 30 * 1000 * 1000, backBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 8, ...(url.startsWith('/media/h/') ? { startPosition: startAt || 0 } : {}) });
+    hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60, maxBufferSize: 30 * 1000 * 1000, backBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 8, ...(url.startsWith('/media/h/') || rebuild ? { startPosition: startAt || 0 } : {}) });
     hls.on(Hls.Events.MANIFEST_PARSED, seek);
-    // 每跨一个断点静音挡一下, 电流声就听不到了
-    let cc = null;
-    hls.on(Hls.Events.FRAG_CHANGED, (_, d) => { const c = d.frag?.cc; if (cc !== null && c !== undefined && c !== cc) duckFlash(); cc = c ?? cc; });
+    // 每跨一个断点静音挡一下, 蹦的一声就听不到了
+    // 有的源每二十来秒一个断点 (#EXT-X-DISCONTINUITY), 浏览器里音频时间轴每跨一次就比画面多落后一点点 (实测约 0.15 秒 / 100 秒),
+    // 连续看十来分钟后每个断点处都会「电流」一下, 一直到刷新或暂停很久才恢复。刷新其实就是把时间轴清零: 这里跨过 REBUILD_CC 个断点后,
+    // 在断点处 (本来就是不连续的位置) 静音、销毁并重建播放链路, 回到当前位置接着放, 把偏差清零。
+    let cc = null, crossed = 0;
+    const me = hls;
+    hls.on(Hls.Events.FRAG_CHANGED, (_, d) => {
+      const c = d.frag?.cc;
+      if (cc !== null && c !== undefined && c !== cc) {
+        duckFlash();
+        // 只在点播里重建 (直播没有「当前位置」可回, 本地转码流本身没有这个问题)
+        if (++crossed >= REBUILD_CC && me === hls && !isLocal && cur?.kind === 'vod' && !video.paused && !video.seeking && Date.now() - lastRebuild > 60e3) {
+          lastRebuild = Date.now();
+          const at = video.currentTime + 0.15;
+          return load(url, at, viaProxy, isLocal, true);
+        }
+      }
+      cc = c ?? cc;
+    });
     hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal && !hlsRecover(hls, data)) retry(data.details); });
     hls.loadSource(src); hls.attachMedia(video);
   } else {
