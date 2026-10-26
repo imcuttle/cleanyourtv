@@ -78,7 +78,7 @@ const state = { sites: [], lives: [], level: 'standard', site: localStorage.site
 const cardMode = () => localStorage.cardMode === 'wide' ? 'wide' : 'poster';
 const applyCardMode = () => {
   document.documentElement.classList.toggle('wide-cards', cardMode() === 'wide');
-  const b = $('#cardBtn'); if (b) { b.classList.toggle('on', cardMode() === 'wide'); b.title = cardMode() === 'wide' ? '当前：宽卡，点一下换竖版封面' : '当前：竖版，点一下换宽卡'; }
+  const b = $('#cardBtn'); if (b) { b.classList.toggle('on', cardMode() === 'wide'); b.title = cardMode() === 'wide' ? '当前：横版，点一下换竖版' : '当前：竖版，点一下换横版'; }
 };
 // 卡片大小: ⌘/Ctrl + / − / 0 (and the − + buttons in the cover menu) scale every card, the grid columns follow. Remembered.
 // The page itself is never zoomed. Past 1.35× the covers switch to the sharp size, so a big card does not look blurry.
@@ -98,7 +98,7 @@ const setCardScale = (v, quiet) => {
   localStorage.cardScale = String(v); applyCardScale();
   if (sharpWanted() !== wasBig) { clearTimeout(csHiT); csHiT = setTimeout(upgradeCovers, 120); }
   else if (sharpWanted()) { clearTimeout(csHiT); csHiT = setTimeout(upgradeCovers, 300); }
-  if (!quiet) toast('卡片大小 ' + Math.round(v * 100) + '%');
+  if (!quiet) toast('封面大小 ' + Math.round(v * 100) + '%');
 };
 // Already-painted covers get the sharp version (only 豆瓣 posters have bigger sizes; others are shown as they are).
 function upgradeCovers() {
@@ -494,7 +494,7 @@ function filterMenu() {
 function renderMenu() {
   $('#siteMenu').innerHTML = `<div class="msearch"><input id="menuQ" class="find" type="search" placeholder="搜点播源" autocomplete="off" value="${esc(menuQ)}"></div><div class="mhead">点播源 · <span class="mcount"></span><span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + state.sites.filter(s => !s.inGroup).map(s =>
     `<button data-k="${esc(s.key)}" data-n="${esc((s.name + ' ' + s.key).toLowerCase())}" class="${s.key === state.site ? 'on' : ''}${isDead(s) ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, isBusy(s))}${s.key === 'local' || s.local || state.level !== 'all' ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('')
-    + `<div class="mempty" hidden>没有匹配的点播源</div><div class="mfoot"><span>封面</span><div class="mseg"><button type="button" data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版</button><button type="button" data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div></div><div class="mfoot"><span>大小</span><div class="mseg cssz"><button type="button" data-csz="-" title="缩小 (⌘/Ctrl −)">−</button><button type="button" data-csz="0" data-cs="val" title="还原 (⌘/Ctrl 0)">${Math.round(cardScale() * 100)}%</button><button type="button" data-csz="+" title="放大 (⌘/Ctrl +)">+</button></div></div>`;
+    + `<div class="mempty" hidden>没有匹配的点播源</div>`;
   filterMenu();
 }
 function watchMenu() {
@@ -3092,9 +3092,9 @@ async function renderSettings() {
       <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}">${v}</button>`).join('')}</div>
       <div class="actions"><button class="small" id="setPin">${safety.hasPin ? '修改 / 清除 PIN' : '设置家长 PIN'}</button>${safety.hasPin ? '<span class="lan">切到更宽松的级别、改 PIN 都要输入 PIN；切到更严的级别不用；只有在「全部」下才能清除 PIN。</span>' : ''}</div>
     </section>
-    <section><h2>封面卡片</h2><p class="hint">竖版：2:3 海报；宽卡：16:9，一屏能放更多标题，详情页和首页大图同步变成宽版。也可以点右上角的卡片图标快速切换。</p>
-      <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版海报</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">宽卡</button></div>
-      <div class="actions"><span class="lan">卡片大小</span><button class="small" data-csz="-">−</button><button class="small" data-csz="0" data-cs="val">${Math.round(cardScale() * 100)}%</button><button class="small" data-csz="+">+</button><span class="lan">也可以按 ⌘/Ctrl 加 + / − / 0，触控板双指捏合也行；放大到 135% 以上封面会换成高清图。</span></div></section>
+    <section><h2>封面</h2><p class="hint">竖版：2:3 海报；横版：16:9，一屏能放更多标题，详情页和首页大图同步变成横版。</p>
+      <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">横版</button></div>
+      <div class="actions"><span class="lan">大小</span><button class="small" data-csz="-">−</button><button class="small" data-csz="0" data-cs="val">${Math.round(cardScale() * 100)}%</button><button class="small" data-csz="+">+</button><span class="lan">也可以按 ⌘/Ctrl 加 + / − / 0，触控板双指捏合也行；放大到 135% 以上封面会换成高清图。</span></div></section>
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
     <section id="adminSec"><h2>管理员</h2><p class="lan">加载中…</p></section>
