@@ -1312,3 +1312,18 @@ html.cs-big .card .img img { image-rendering: auto; }
 .edhost .monaco-editor { position: absolute; inset: 0; }
 .sheet.editor { width: min(1100px, 96vw); }
 @media (max-width: 760px) { .edhost { height: 58vh; } }
+
+/* 设置页 · 管理员 */
+.admgrid { display: grid; grid-template-columns: 56px 1fr; gap: 8px 14px; font-size: 14px; align-items: baseline; }
+.admgrid > span { color: var(--muted); }
+.admgrid .okc { color: #46d369; }
+.admgrid .newc { color: #ffb020; }
+.set .warn { color: #ffb020; }
+.adcommits { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+.adcommits li { margin: 2px 0; }
+.actions .grow { flex: 1; }
+.admmore { margin-top: 12px; }
+.admmore summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.admlog { margin: 14px 0 0; padding: 10px 12px; background: #111; border-radius: 6px; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; color: #cfcfcf; }
+.admlog.error { color: #ff7a7a; }
+.admlog.done { color: #8be0a0; }

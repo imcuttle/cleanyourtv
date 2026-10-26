@@ -14,16 +14,17 @@ const log = (...a) => console.log('  [保护]', ...a);
 // ---- 最外层：把 server.js 当子进程跑，退出了（非主动停止）就重启 ----
 //   TVBOX_NO_SUPERVISOR=1 关闭；快速连续崩溃时间隔 1s → 2s → 4s … 最长 30s；稳定运行 60s 后清零。
 function supervise(entry) {
-  let child = null, stopping = false, crashes = 0, lastBeat = Date.now(), startedAt = 0, killTimer = null;
+  let child = null, stopping = false, planned = false, crashes = 0, lastBeat = Date.now(), startedAt = 0, killTimer = null;
   const HANG = num('TVBOX_PRIMARY_HANG_MS', 90e3);
   const start = () => {
     startedAt = lastBeat = Date.now();
     child = fork(entry, process.argv.slice(2), { env: { ...process.env, TVBOX_SUPERVISED: '1' }, stdio: 'inherit' });
-    child.on('message', m => { if (m && m.t === 'hb') lastBeat = Date.now(); else if (m && m.t === 'restart') { log('收到重启请求：' + (m.why || '')); try { child.kill('SIGTERM'); } catch {} } });
+    child.on('message', m => { if (m && m.t === 'hb') lastBeat = Date.now(); else if (m && m.t === 'restart') { log('收到重启请求：' + (m.why || '')); planned = true; try { child.kill('SIGTERM'); } catch {} } });
     child.on('exit', (code, sig) => {
       clearInterval(killTimer);
       if (stopping) return process.exit(code || 0);
       const alive = Date.now() - startedAt;
+      if (planned) { planned = false; crashes = 0; log('按请求重启中…'); return setTimeout(start, 500); }   // 主动重启 (管理员 / 自检): 不算崩溃, 不退避
       crashes = alive > 60e3 ? 1 : crashes + 1;
       const wait = Math.min(30e3, 1000 * 2 ** Math.min(crashes - 1, 5));
       log(`主进程退出（${sig || 'code ' + code}，运行了 ${Math.round(alive / 1000)} 秒），${Math.round(wait / 1000)} 秒后自动重启${crashes > 5 ? `（已连续异常 ${crashes} 次，请检查日志）` : ''}`);

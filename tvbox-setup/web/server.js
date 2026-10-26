@@ -42,6 +42,7 @@ const MEDIA_OP = /^(local|hls)/; // rpc ops handled by the media process
 // 访问令牌 (web/.env 的 TVBOX_TOKEN，第一次启动自动生成)。必须在 fork 之前定下来：子进程继承 process.env，用的是同一个。
 const AUTH = require('./auth');
 const TOKEN = AUTH.ensureToken().token;
+const ADMIN_TOKEN = AUTH.ensureToken().adminToken;   // 管理员令牌 (TVBOX_ADMIN_TOKEN)：设置页「管理员」用，能重启 / 更新服务
 if (cluster.isPrimary && WORKERS > 1) return primary();
 const IS_LEADER = !cluster.isWorker || process.env.TVBOX_LEADER === '1';
 // 本地媒体 (folder scans, poster frames, ffmpeg → HLS) runs in its own process that never serves HTTP,
@@ -75,6 +76,7 @@ function primary() {
       if (!m || typeof m !== 'object') return;
       if (m.t === 'hb') { dog.beat(w); w.stats = m.stats; return; }
       if (m.t === 'recycle') return recycle(w, m.why);
+      if (m.t === 'restart') { console.log(`  [管理] 重启请求：${m.why || ''}`); try { process.send({ t: 'restart', why: m.why }); } catch {} return; }   // → 最外层看守进程 (guard.js) 整体重拉
       if (m.t === 'rpc') {
         const to = MEDIA_OP.test(m.op) ? media : leader;
         if (!to || !to.isConnected()) return w.send({ t: 'rpc-res', id: m.id, error: '服务重启中，稍后再试' });
@@ -125,6 +127,7 @@ function banner(n, ffmpeg, dl) {
   console.log(`    本机      http://localhost:${PORT}`);
   for (const ip of lan) console.log(`    局域网    http://${ip}:${PORT}`);
   console.log(`\n  访问令牌  ${TOKEN}`);
+  console.log(`  管理员令牌  ${ADMIN_TOKEN}   （设置页「管理员」里用，可重启 / 更新服务；存在 ${AUTH.ENV_FILE} 的 ${AUTH.ADMIN_KEY}）`);
   console.log(`  （浏览器第一次打开要输入它，之后一直记住；存在 ${AUTH.ENV_FILE} 的 ${AUTH.KEY}，换令牌就删掉那一行再重启）`);
   console.log(`\n  进程：${n} 个（CPU ${CPUS} 核，环境变量 WORKERS 可调）`);
   console.log(`  下载目录：${dl}`);
@@ -1885,7 +1888,9 @@ const MEDIA_EXT = new Set(['mp4', 'm4v', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'f4v
   'mpg', 'mpeg', 'vob', '3gp', 'ogv', 'divx', 'asf', 'mp3', 'flac', 'm4a', 'aac', 'wav', 'ogg', 'opus', 'ape', 'wma']);
 // What a browser <video> plays as is; the rest is remuxed (or transcoded) to HLS by ffmpeg on demand.
 const BROWSER_EXT = new Set(['mp4', 'm4v', 'webm', 'mov', 'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus']);
-const LOCAL_DEFAULT = { enabled: true, name: '本地媒体', exts: ['mp4', 'mkv', 'avi', 'mov', 'm4v', 'webm', 'flv', 'wmv', 'rmvb'], rescan: 60, dirs: [] };
+const LOCAL_DEFAULT = { enabled: true, name: '本地媒体', exts: ['mp4', 'mkv', 'avi', 'mov', 'm4v', 'webm', 'flv', 'wmv', 'rmvb', 'ts', 'm2ts', 'mts'], rescan: 60, dirs: [] };
+// .ts / .mts 同时是 TypeScript 的后缀：扫描时按文件内容判断 (见 isMpegTs)，真的是 MPEG-TS 视频才收，所以这几个后缀始终开着，不会把代码当视频。
+const SNIFFED_EXT = ['ts', 'm2ts', 'mts'];
 const SKIP_NAME = /^(\.|node_modules$|recycler$|@eaDir$|#recycle$|\$recycle\.bin$|system volume information$|lost\+found$|samples?$|extras?$|featurettes$)/i;
 const SKIP_SAMPLE = /(^|[\s._-])sample\.\w+$/i;
 const IMG_RE = /\.(jpe?g|png|webp)$/i;
@@ -1894,7 +1899,7 @@ const POSTERS = ['poster', 'folder', 'cover', 'movie', 'show', 'fanart', 'thumb'
 function normLocal(c) {
   c = c && typeof c === 'object' ? c : {};
   const extList = Array.isArray(c.exts) ? c.exts : str(c.exts).split(/[\s,，;；]+/);
-  const exts = [...new Set(extList.map(e => str(e).trim().toLowerCase().replace(/^\./, '')).filter(e => MEDIA_EXT.has(e)))];
+  const exts = [...new Set([...extList.map(e => str(e).trim().toLowerCase().replace(/^\./, '')).filter(e => MEDIA_EXT.has(e)), ...SNIFFED_EXT])];
   const dirs = [];
   for (const d of Array.isArray(c.dirs) ? c.dirs : []) {
     let p = str(d && d.path).trim().replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim(); // Windows "复制为路径" wraps it in quotes
@@ -1906,7 +1911,7 @@ function normLocal(c) {
   }
   const rescan = Math.round(Number(c.rescan ?? LOCAL_DEFAULT.rescan));
   return { enabled: c.enabled !== false, name: str(c.name).trim().slice(0, 20) || LOCAL_DEFAULT.name,
-    exts: exts.length ? exts : LOCAL_DEFAULT.exts, rescan: Math.max(0, Math.min(rescan || 0, 1440)), dirs };
+    exts: exts.length > SNIFFED_EXT.length ? exts : LOCAL_DEFAULT.exts, rescan: Math.max(0, Math.min(rescan || 0, 1440)), dirs };
 }
 function readLocalCfg() { return normLocal(readJson(LOCAL_CFG, LOCAL_DEFAULT)); }
 let localCfg = readLocalCfg();
@@ -1984,14 +1989,25 @@ async function io(fn) {
   try { return await fn(); } finally { ioBusy--; ioWait.shift()?.(); }
 }
 // MPEG-TS = 188-byte packets (192 with a 4-byte timestamp, m2ts) that each start with sync byte 0x47.
+// 真正的 MPEG-TS: 每 188 字节 (m2ts 是 192, 前面多 4 字节时间戳) 有一个 0x47 同步字节。录制 / 截取的文件开头可能不对齐，
+// 所以在前 ~200 字节里找第一个对齐点，要求连续 5 个同步字节。TypeScript 源码是文本，不会满足。
 async function isMpegTs(file) {
   let fh;
   try {
     fh = await io(() => fsp.open(file));
-    const b = Buffer.alloc(580);
+    const b = Buffer.alloc(1400);
     const { bytesRead } = await io(() => fh.read(b, 0, b.length, 0));
-    const at = (o, step) => [0, 1, 2].every(i => o + i * step < bytesRead && b[o + i * step] === 0x47);
-    return at(0, 188) || at(4, 192);
+    if (bytesRead < 188 * 2) return false;
+    for (const step of [188, 192]) {
+      for (let o = 0; o < Math.min(step + 4, bytesRead); o++) {
+        if (b[o] !== 0x47) continue;
+        let n = 0;
+        while (o + n * step < bytesRead && b[o + n * step] === 0x47) n++;
+        const need = Math.min(5, Math.floor((bytesRead - o - 1) / step) + 1);
+        if (n >= need && n >= 2) return true;
+      }
+    }
+    return false;
   } catch { return false; } finally { await fh?.close().catch(() => {}); }
 }
 
@@ -2365,6 +2381,7 @@ if (IS_MEDIA) {
 const hlsJobs = new Map(), hlsFail = new Map();
 const HLS_MAX = Math.max(2, Math.min(4, Math.floor(CPUS / 3)));
 const HLS_IDLE = 5 * 60e3;
+const HLS_VER = 'v2';   // bump when the ffmpeg arguments change: finished transcodes from an older version are redone
 function probeVideo(file) {
   return new Promise(ok => {
     let err = '';
@@ -2395,9 +2412,10 @@ function startHls(f) {
     const v = await probeVideo(f.path);
     if (j.stopped) return;
     const vargs = v.copy ? ['-c:v', 'copy'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p', '-force_key_frames', 'expr:gte(t,n_forced*6)'];
-    const p = j.proc = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', f.path,
-      '-map', '0:V:0?', '-map', '0:a:0?', ...vargs, '-c:a', 'aac', '-ac', '2', '-b:a', '192k',
-      '-f', 'hls', '-hls_time', '6', '-hls_list_size', '0', '-hls_playlist_type', 'event',
+    // Audio: resampled onto one continuous 48 kHz timeline (aresample async) so segment joins don't click / crackle.
+    const p = j.proc = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-fflags', '+genpts', '-i', f.path,
+      '-map', '0:V:0?', '-map', '0:a:0?', ...vargs, '-c:a', 'aac', '-ac', '2', '-ar', '48000', '-b:a', '192k', '-af', 'aresample=async=1000:first_pts=0',
+      '-max_muxing_queue_size', '1024', '-f', 'hls', '-hls_time', '6', '-hls_list_size', '0', '-hls_playlist_type', 'event', '-hls_flags', 'independent_segments',
       '-hls_segment_filename', path.join(dir, '%05d.ts'), path.join(dir, 'index.m3u8')], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     try { os.setPriority(p.pid, 10); } catch {} // yields to the request workers
     p.stderr.on('data', d => { j.error = (j.error + d).slice(-300); });
@@ -2406,7 +2424,7 @@ function startHls(f) {
       j.exited = true;
       if (hlsJobs.get(f.id) === j) hlsJobs.delete(f.id);
       if (j.stopped) return;
-      if (code === 0) fs.writeFileSync(path.join(dir, '.done'), '');
+      if (code === 0) fs.writeFileSync(path.join(dir, '.done'), HLS_VER);
       else hlsFail.set(f.id, { at: Date.now(), error: j.error.trim() || 'exit ' + code });
     });
     // Ready once the first segment is listed (or ffmpeg gave up).
@@ -2445,14 +2463,14 @@ function mediaInfo(file) {
 rpcHandlers.localProbe = async ({ id }) => {
   const f = localIndex().byFile.get(id);
   if (!f || !FFMPEG) return {};
-  const { width, height } = await mediaInfo(f.path);
-  return width ? { width, height } : {};
+  const { width, height, duration } = await mediaInfo(f.path);
+  return width || duration ? { ...(width ? { width, height } : {}), ...(duration > 0 ? { duration } : {}) } : {};
 };
 rpcHandlers.hlsOpen = async ({ id }) => {
   const f = localIndex().byFile.get(id);
   if (!f || !FFMPEG) return { error: '找不到文件' };
   const dir = path.join(TRANS, id), done = path.join(dir, '.done');
-  if (fs.existsSync(done)) { const now = new Date(); fsp.utimes(done, now, now).catch(() => {}); return { ok: true }; }
+  if (fs.existsSync(done) && fs.readFileSync(done, 'utf8') === HLS_VER) { const now = new Date(); fsp.utimes(done, now, now).catch(() => {}); return { ok: true }; }
   const fail = hlsFail.get(id);
   if (!hlsJobs.has(id) && fail && Date.now() - fail.at < 10 * 60e3) return { error: 'ffmpeg 转换失败：' + fail.error };
   const j = hlsJobs.get(id) || startHls(f);
@@ -2510,6 +2528,116 @@ async function serveMedia(rest, req, res) {
   send(res, 404, 'not found', 'text/plain');
 }
 
+// ======================= 管理员 (设置页 → 管理员) =======================
+// 管理员令牌 (.env 的 TVBOX_ADMIN_TOKEN) 登录后得到一个 HttpOnly Cookie；之后可以：看版本 / 检查更新 / 更新并重启 / 重启 / 清理缓存 / 换令牌。
+// 状态和任务都在 leader 进程里 (admin rpc)，其它 web 进程只负责验令牌后转过去。
+const updater = require('./updater');
+const BOOT = Date.now();
+const ADMIN_LAST = path.join(DATA, '.admin-last.json');
+const adminJob = { cur: null };
+const canRestart = () => !!process.env.TVBOX_SUPERVISED;
+function requestRestart(why) { if (!canRestart()) throw new Error('当前不是由看守进程启动的 (TVBOX_NO_SUPERVISOR=1)，没法自动重启，请手动重启'); process.send({ t: 'restart', why }); }
+const rmContents = async dir => { for (const e of await fsp.readdir(dir).catch(() => [])) await fsp.rm(path.join(dir, e), { recursive: true, force: true, maxRetries: 3 }).catch(() => {}); };
+async function dirSize(dir) {
+  let n = 0, files = 0;
+  const walk = async d => {
+    for (const e of await fsp.readdir(d, { withFileTypes: true }).catch(() => [])) {
+      if (files > 30000) return;
+      const f = path.join(d, e.name);
+      if (e.isDirectory()) await walk(f);
+      else { files++; n += (await fsp.stat(f).catch(() => ({ size: 0 }))).size; }
+    }
+  };
+  await walk(dir);
+  return n;
+}
+let sizeMemo = { at: 0, v: null };
+async function cacheSizes() {
+  if (sizeMemo.v && Date.now() - sizeMemo.at < 30e3) return sizeMemo.v;
+  const [transcode, covers, tmp] = await Promise.all([dirSize(TRANS), Promise.all([dirSize(THUMBS), dirSize(IMGS)]).then(a => a[0] + a[1]), dirSize(updater.TMP)]);
+  sizeMemo = { at: Date.now(), v: { transcode, covers, tmp } };
+  return sizeMemo.v;
+}
+const saveLast = o => { try { fs.writeFileSync(ADMIN_LAST, JSON.stringify({ ...o, at: Date.now() })); } catch {} };
+function startJob(kind, fn) {
+  const c = adminJob.cur;
+  if (c && (c.status === 'running' || c.status === 'restarting')) throw new Error('已有任务在进行：' + ({ update: '更新', restart: '重启', clear: '清理', rotate: '换令牌' }[c.kind] || c.kind));
+  const j = adminJob.cur = { id: Date.now(), kind, status: 'running', log: [], at: Date.now(), error: '', needRestart: false };
+  const log = t => { j.log.push(String(t).slice(0, 300)); if (j.log.length > 60) j.log.shift(); };
+  Promise.resolve().then(() => fn(log, j)).catch(e => { j.status = 'error'; j.error = e.message || String(e); log('✘ ' + j.error); saveLast({ kind, ok: false, error: j.error }); });
+  return j;
+}
+// 到点重启：先让页面拿到响应
+function restartSoon(j, log, why, extra = {}) {
+  if (!canRestart()) { j.status = 'done'; j.needRestart = true; log('当前不是由看守进程启动的，请手动重启生效'); saveLast({ kind: j.kind, ok: true, needRestart: true, ...extra }); return; }
+  j.status = 'restarting'; log('正在重启服务…');
+  saveLast({ kind: j.kind, ok: true, ...extra });
+  setTimeout(() => { try { requestRestart(why); } catch (e) { j.status = 'error'; j.error = e.message; } }, 800);
+}
+const autoCheck = () => { if (process.env.TVBOX_NO_AUTOCHECK !== '1') updater.check().catch(() => {}); };
+rpcHandlers.admin = async ({ op, body = {} }) => {
+  const ok = b => ({ code: 200, body: b }), no = (code, error) => ({ code, body: { error } });
+  if (op === 'status') {
+    const [ver, caches] = await Promise.all([updater.current().catch(e => ({ mode: 'unknown', error: e.message })), cacheSizes()]);
+    let last = null; try { last = JSON.parse(fs.readFileSync(ADMIN_LAST, 'utf8')); } catch {}
+    return ok({ authed: true, boot: BOOT, pid: process.pid, uptime: Math.round(process.uptime()), node: process.version, platform: process.platform, workers: WORKERS,
+      canRestart: canRestart(), autoCheck: process.env.TVBOX_NO_AUTOCHECK !== '1', ver, update: updater.cachedCheck(), caches, job: adminJob.cur, last,
+      ffmpeg: !!FFMPEG, port: PORT });
+  }
+  if (op === 'check') {
+    try { return ok({ update: await updater.check({ force: !!body.force }) }); }
+    catch (e) { return ok({ update: updater.cachedCheck(), checkError: e.message }); }
+  }
+  if (op === 'restart') {
+    if (!canRestart()) return no(409, '当前不是由看守进程启动的，没法自动重启，请手动重启');
+    const j = startJob('restart', (log, j) => restartSoon(j, log, '管理员：重启'));
+    return ok({ job: j });
+  }
+  if (op === 'update') {
+    const j = startJob('update', async (log, j) => {
+      log('开始更新…');
+      const r = await updater.apply(log);
+      j.result = r;
+      if (!r.changed) { j.status = 'done'; log('已是最新，无需重启'); saveLast({ kind: 'update', ok: true, unchanged: true }); return; }
+      restartSoon(j, log, '管理员：更新后重启', { from: r.from, to: r.to });
+    });
+    return ok({ job: j });
+  }
+  if (op === 'clear') {
+    const what = body.what;
+    if (!['transcode', 'covers'].includes(what)) return no(400, '不认识的缓存类型');
+    const j = startJob('clear', async (log, j) => {
+      if (what === 'transcode') { log('停掉转码任务并清空转码缓存…'); await rpc('hlsPurge', {}, 30000); }
+      else { log('清空封面 / 图片缓存…'); await rmContents(THUMBS); await rmContents(IMGS); }
+      sizeMemo = { at: 0, v: null };
+      log('已清理');
+      if (what === 'covers') return restartSoon(j, log, '管理员：清理封面缓存');   // 各进程里还记着旧封面的索引, 重启后重建
+      j.status = 'done'; saveLast({ kind: 'clear', ok: true, what });
+    });
+    return ok({ job: j });
+  }
+  if (op === 'rotate') {
+    const which = body.which === 'admin' ? AUTH.ADMIN_KEY : body.which === 'access' ? AUTH.KEY : '';
+    if (!which) return no(400, '要换哪个令牌？');
+    if (!canRestart()) return no(409, '换令牌后需要重启才生效，但当前没法自动重启；请手动改 .env 后重启');
+    let fresh;
+    const j = startJob('rotate', (log, j) => { fresh = AUTH.rotate(which); log('新令牌已写入 .env'); restartSoon(j, log, '管理员：换令牌'); });
+    return ok({ job: j, token: fresh, which: body.which });
+  }
+  return no(404, 'unknown admin op');
+};
+rpcHandlers.hlsPurge = async () => {
+  for (const j of [...hlsJobs.values()]) j.stop();
+  hlsFail.clear();
+  await rmContents(TRANS);
+  return {};
+};
+if (IS_LEADER) {
+  setTimeout(() => { updater.cleanup(); autoCheck(); }, 20e3).unref();   // 启动后清掉上次遗留的更新临时文件，并自动查一次有没有新版本
+  setInterval(autoCheck, 3600e3).unref();                                // 之后每小时看一眼 (结果缓存 6 小时，期间不会真的联网)
+}
+if (IS_MEDIA) for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { for (const j of hlsJobs.values()) { try { j.proc?.kill('SIGKILL'); } catch {} } process.exit(0); });   // 重启时不留孤儿 ffmpeg
+
 // ======================= HTTP =======================
 function send(res, code, body, type = 'application/json; charset=utf-8') {
   if (res.destroyed) return;
@@ -2536,6 +2664,7 @@ const needPin = res => send(res, 403, { error: '需要家长 PIN', pin: true });
 // ---- batch support ----
 const BATCH_MAX = 60, BATCH_PAR = 6;
 // Read-only GET routes the client may bundle. Slow ones (search / detail / javdb) don't hold up fast ones: results stream back as each finishes.
+const searchNorm = x => str(x).toLowerCase().replace(/[\s\u3000·•・:：\-—–_.,，。、!！?？'"“”‘’()（）\[\]【】《》<>~～]/g, '');
 const BATCHABLE = /^(list|categories|detail|search|person|sites|info|live|probe|javdb|douban\/(rating|hot|chart|charts))$/;
 // Runs api() as a GET against an in-memory response and returns {status, body}.
 async function captureApi(route, params, req) {
@@ -2586,6 +2715,32 @@ async function api(route, q, res, req) {
     };
     await Promise.all(Array.from({ length: Math.min(BATCH_PAR, list.length) }, worker));
     return res.end();
+  }
+
+  // ---- 管理员 ----
+  if (route.startsWith('admin/')) {
+    const sub = route.slice(6), ip = req.socket.remoteAddress || '';
+    const isAdmin = adminAuthed(req);
+    if (sub === 'login' && write) {
+      const f = failures.get('a|' + ip);
+      if (f && f.n >= 5 && f.reset > Date.now()) { res.setHeader('Retry-After', '60'); return send(res, 429, { error: '管理员令牌错误次数太多，请 1 分钟后再试' }); }
+      const t = String((await readBody(req)).token || '').trim();
+      if (!adminTokenOk(t)) {
+        const x = f && f.reset > Date.now() ? f : { n: 0, reset: Date.now() + 60000 };
+        x.n++; failures.set('a|' + ip, x);
+        return send(res, 403, { error: '管理员令牌不对' });
+      }
+      failures.delete('a|' + ip);
+      const secure = req.socket.encrypted || /^https\b/i.test(req.headers['x-forwarded-proto'] || '');
+      res.setHeader('Set-Cookie', `${ADMIN_COOKIE}=${encodeURIComponent(ADMIN_TOKEN)}; Path=/; Max-Age=315360000; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`);
+      return send(res, 200, { ok: true });
+    }
+    if (sub === 'logout' && write) { res.setHeader('Set-Cookie', `${ADMIN_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`); return send(res, 200, { ok: true }); }
+    if (sub === 'status' && !write && !isAdmin) return send(res, 200, { authed: false });
+    if (!isAdmin) return send(res, 403, { error: '需要管理员令牌', admin: true });
+    const ops = { status: 'GET', check: 'POST', restart: 'POST', update: 'POST', clear: 'POST', rotate: 'POST' };
+    if (ops[sub] !== req.method) return send(res, 404, { error: 'unknown api' });
+    return leader('admin', { op: sub, body: write ? await readBody(req) : {} });
   }
 
   // ---- safety / config: written by the leader, then every worker reloads ----
@@ -2774,14 +2929,26 @@ async function api(route, q, res, req) {
     // `site` limits the search to one source (a 聚合源 → its members); without it every source is searched.
     const only = SITES.find(s => s.key === q.get('site'));
     const targets = only ? (only.memberSites || [only]) : SITES.filter(s => !s.memberSites);
+    // Many sources answer a keyword with loosely related (or unrelated) titles. Keep a title only when the query is in its
+    // name / alias, or its name is inside the query (a longer phrase such as "名字 第二季"); actors / directors are covered below.
+    const nq = searchNorm(wd);
+    const nameHit = d => {
+      if (!nq) return true;
+      for (const f of [d.vod_name, d.vod_sub, d.vod_en]) {
+        const n = searchNorm(f);
+        if (n && (n.includes(nq) || (n.length >= 2 && nq.includes(n)))) return true;
+      }
+      return false;
+    };
     const out = await Promise.all(targets.map(s => cmsGet(s, { ac: 'detail', wd }, false, 8000)
-      .then(b => ({ site: s.key, list: (b.list || []).map(d => ({ d, it: item(s, d) })).filter(x => itemOk(s, x.it)) }))
+      .then(b => ({ site: s.key, all: (b.list || []).map(d => ({ d, it: item(s, d) })).filter(x => itemOk(s, x.it)) }))
+      .then(o => ({ site: o.site, all: o.all, list: o.all.filter(x => nameHit(x.d)) }))
       .catch(e => ({ site: s.name, error: e.message, list: [] }))));
     // Many sites' `wd` also matches vod_actor / vod_director. Any credited name containing the query counts;
     // hits are grouped per person (most works first), each list one per title + year, newest first.
     const credit = field => {
       const people = new Map();
-      for (const { d, it } of out.flatMap(o => o.list)) {
+      for (const { d, it } of out.flatMap(o => o.all || o.list)) {
         if (!wd || /解说|预告/.test(it.name + it.type)) continue;
         for (const p of new Set(splitPeople(d[field]).filter(p => p.includes(wd)))) {
           if (!people.has(p)) people.set(p, { seen: new Set(), list: [] });
@@ -3174,6 +3341,11 @@ const COOKIE = 'tvbox_token';
 const tokenHash = crypto.createHash('sha256').update(TOKEN).digest();
 const tokenOk = v => typeof v === 'string' && v.length > 0 && v.length < 512 &&
   crypto.timingSafeEqual(crypto.createHash('sha256').update(v).digest(), tokenHash);
+const ADMIN_COOKIE = 'tvbox_admin';
+const adminHash = crypto.createHash('sha256').update(ADMIN_TOKEN).digest();
+const adminTokenOk = v => typeof v === 'string' && v.length > 0 && v.length < 512 &&
+  crypto.timingSafeEqual(crypto.createHash('sha256').update(v).digest(), adminHash);
+const adminAuthed = req => adminTokenOk(cookieOf(req, ADMIN_COOKIE)) || adminTokenOk(String(req.headers['x-admin-token'] || ''));
 const cookieOf = (req, name) => {
   for (const part of String(req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');

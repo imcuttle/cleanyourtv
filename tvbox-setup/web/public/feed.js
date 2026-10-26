@@ -93,7 +93,7 @@ const saveLikes = () => { localStorage.feedLikes = JSON.stringify([...likes].sli
 
 // ---------- state ----------
 const F = { recN: 0, names: new Set(), gen: 0, mode: 'rec', extra: null, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
-  pool: [], pcount: {}, cats: null, catsSite: '', catUsed: new Set(), catCount: 1, once: false, dir: 1,
+  visited: new Set(), pool: [], pcount: {}, cats: null, catsSite: '', catUsed: new Set(), catCount: 1, once: false, dir: 1,
   muted: localStorage.feedMuted === '1', autoMuted: false, userPaused: false };   // autoMuted: the browser refused sound-on autoplay, muted for now only
 const AHEAD = 6;                                    // titles kept validated (detail fetched) beyond the current one
 
@@ -136,6 +136,7 @@ function mkSlide() {
   { const vol = parseFloat(localStorage.playerVolume); if (Number.isFinite(vol)) v.volume = Math.min(1, Math.max(0, vol)); }   // same level as the main player
   for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize']) v.addEventListener(ev, () => layoutLand(s));   // HLS 的画面尺寸有时晚一点才知道
   v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); });
+  duckOnSeek(v, () => F.muted || F.autoMuted);
   const framed = () => { if (v.readyState >= 2 && v.videoWidth) el.classList.add('framed'); };
   for (const ev of ['loadeddata', 'canplay', 'playing', 'seeked', 'timeupdate']) v.addEventListener(ev, framed);
   v.addEventListener('waiting', () => { if (s === cur()) el.classList.add('wait'); });
@@ -148,7 +149,7 @@ function mkSlide() {
     const dt = v.currentTime - s.lastT; s.lastT = v.currentTime;
     if (s !== cur()) return;
     if (dt > 0 && dt < 1.5 && !v.paused) s.watched += dt;
-    if (Date.now() - s.lastSave > 4000 && v.duration) saveHist(s);
+    if (Date.now() - s.lastSave > 4000 && vdur(v)) saveHist(s);
   });
   return s;
 }
@@ -168,14 +169,15 @@ const cur = () => ring[1];
 const covered = () => !!$('#modal') || !player.hidden;
 
 function saveHist(s) {
-  if (!s.d || !s.video.duration || !isFinite(s.video.duration)) return;
+  if (!s.d || !vdur(s.video) || !isFinite(vdur(s.video))) return;
   s.lastSave = Date.now();
   const d = s.d;
   hist.put({ site: d.site, adult: d.adult ? 1 : 0, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
-    line: s.line, ep: s.ep, epName: s.eps[s.ep]?.name || '', t: s.video.currentTime, dur: s.video.duration });
+    line: s.line, ep: s.ep, epName: s.eps[s.ep]?.name || '', t: s.video.currentTime, dur: vdur(s.video) });
 }
 
 function teardown(s) {
+  clearTimeout(s.dog); s.tried = null;
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = s.video;
   v.onerror = null; v.onloadedmetadata = null;
@@ -219,7 +221,7 @@ function bind(s, i) {
   s.el.classList.remove('framed');
   s.h2.textContent = it.name; s.meta.textContent = ''; s.blurb.textContent = '';
   if (it._d) return ready(s, it._d);
-  validate(it).then(d => { if (s.it !== it) return; if (!d) { s.err = true; s.msg.textContent = '这部暂时播不了'; return; } it._d = d; ready(s, d); });
+  validate(it).then(d => { if (s.it !== it) return; if (!d) { s.err = true; s.msg.textContent = '这部暂时播不了，点一下重试'; if (s === cur() && canAutoSkip(s)) setTimeout(() => { if (s === cur() && s.err && canAutoSkip(s)) go(F.dir); }, 1200); return; } it._d = d; ready(s, d); });
 }
 function ready(s, d) {
   s.d = d; pickStart(s); paintInfo(s);
@@ -236,8 +238,10 @@ function attach(s, viaProxy = false) {
   const direct = /\.mp4(\?|$)/i.test(url) || url.startsWith('/media/f/');
   const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : url;
   s.via = viaProxy; s.err = false; s.msg.textContent = '';
+  clearTimeout(s.dog);
   if (s.hls) { s.hls.destroy(); s.hls = null; }
-  const startAt = s.startAt;
+  fixDuration(v, url.startsWith('/media/h/') ? url : '');       // 本地转码中的长度: 用真实长度, 不跟着转码进度变长
+  const startAt = s.startAt, growing = url.startsWith('/media/h/');   // 边转码边播的列表: 必须从头 (0) 起播, -1 会跳到当前已有部分的末尾
   let seeked = false;
   const onMeta = () => {
     if (!s.hls && startAt && !seeked) { seeked = true; v.currentTime = startAt; }
@@ -246,22 +250,54 @@ function attach(s, viaProxy = false) {
   v.onerror = () => fail(s, '无法解码');
   if (window.Hls && Hls.isSupported() && !direct) {
     s.loading = role === 0 || s.pre;
-    const h = s.hls = new Hls({ enableWorker: true, capLevelToPlayerSize: true, backBufferLength: 20, autoStartLoad: s.loading, startPosition: startAt || -1, ...bufCfg(role) });
+    const h = s.hls = new Hls({ enableWorker: true, maxAudioFramesDrift: 4, capLevelToPlayerSize: true, backBufferLength: 20, autoStartLoad: s.loading, startPosition: startAt || (growing ? 0 : -1), ...bufCfg(role) });
     h.on(Hls.Events.MANIFEST_PARSED, onMeta);
-    h.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) fail(s, data.details); });
+    h.on(Hls.Events.ERROR, (_, data) => { if (data.fatal && !hlsRecover(h, data)) fail(s, data.details); });
     h.loadSource(src); h.attachMedia(v);
   } else {
     v.preload = role === 0 || s.pre ? 'auto' : 'metadata';
     v.src = src; v.onloadedmetadata = onMeta;
   }
-  if (s === cur()) { s.el.classList.add('wait'); tryPlay(s); }
+  if (s === cur()) { s.el.classList.add('wait'); tryPlay(s); watch(s); }
 }
+// 起播看门狗: 当前这部 15 秒还没出画面 (既没报错也没动), 当作失败处理 -> 换中转 / 换线路 / 停住提示。
+function watch(s) {
+  clearTimeout(s.dog);
+  if (s.err || !s.d) return;
+  const v = s.video, t0 = v.currentTime;
+  s.dog = setTimeout(() => {
+    if (s !== cur() || s.err || F.userPaused || document.hidden || covered()) return;
+    if (v.paused && s.el.classList.contains('paused')) return;       // 浏览器没让自动播放: 不是资源的问题
+    if (v.readyState < 3 && v.currentTime === t0) fail(s, 'stalled');
+  }, 15000);
+}
+// 失败处理: 先走中转, 再试这部的其他线路 (同一集), 都不行才算播放失败。失败后停在当前页, 不自动跳走 (见 canAutoSkip)。
 function fail(s, why) {
+  clearTimeout(s.dog);
   const url = s.eps[s.ep]?.url || '';
   if (!s.via && !url.startsWith('/media/')) { attach(s, true); return; }
+  s.tried = s.tried || new Set(); s.tried.add(s.line);
+  const d = s.d;
+  if (d && !url.startsWith('/media/')) {
+    for (let i = 0; i < d.lines.length; i++) {
+      const eps = d.lines[i].episodes;
+      if (s.tried.has(i) || !eps?.length) continue;
+      const ep = Math.min(s.ep, eps.length - 1);
+      s.tried.add(i); s.line = i; s.eps = eps; s.ep = ep; s.startAt = 0;
+      paintInfo(s); attach(s);
+      return;
+    }
+  }
   s.err = true; s.el.classList.remove('wait');
-  s.msg.textContent = '这部播放失败了，已为你跳过';
-  if (s === cur()) setTimeout(() => { if (s === cur() && s.err) go(F.dir); }, 1200);
+  s.msg.textContent = '这部暂时播不了' + (touchUi ? '，点一下重试，上滑看下一部' : '，点一下重试，↓ 看下一部');
+  if (s === cur() && canAutoSkip(s)) setTimeout(() => { if (s === cur() && s.err && canAutoSkip(s)) go(F.dir); }, 1200);
+}
+// 只有「往回翻 (下滑) 到一部从没看过的」才会自动跳走; 上滑遇到播不了的、或下滑回到已经看过的, 都停在原地由用户决定。
+const canAutoSkip = s => F.dir < 0 && !F.visited.has(s.i);
+function retry(s) {
+  if (!s.d) { bind(s, s.i); return; }
+  s.tried = null; s.via = false; s.startAt = 0;
+  pickStart(s); paintInfo(s); attach(s);
 }
 // Only the current title loads at full speed. The neighbours stay idle until the current one has ~6 s buffered (kick), so
 // they never fight it for bandwidth; after that they pre-buffer a few seconds each so a swipe lands on a ready picture.
@@ -300,7 +336,7 @@ for (const ev of ['pointerdown', 'keydown', 'touchend']) addEventListener(ev, ()
 function tryPlay(s) {
   if (s !== cur() || F.userPaused || covered() || document.hidden || !s.d) return;
   const v = s.video;
-  v.muted = F.muted || F.autoMuted;
+  if (!v._duck) v.muted = F.muted || F.autoMuted;
   const p = v.play();
   if (p) p.catch(err => {
     if (err?.name === 'AbortError') {            // interrupted by a newer load / pause (a normal part of switching titles): not a sound problem
@@ -311,11 +347,13 @@ function tryPlay(s) {
       F.autoMuted = true; v.muted = true; paintMute();   // preference untouched; sound returns at the next gesture
       v.play().catch(() => s.el.classList.add('paused'));
       toast('浏览器拦截了自动播放声音，已先静音，点一下屏幕就恢复');
-    } else s.el.classList.add('paused');
+    } else if (err?.name === 'NotSupportedError') fail(s, 'unsupported');
+    else s.el.classList.add('paused');
   });
 }
 function togglePause() {
-  const s = cur(); if (!s?.d) return;
+  const s = cur(); if (s?.err) return retry(s);
+  if (!s?.d) return;
   if (s.video.paused) { F.userPaused = false; tryPlay(s); } else { F.userPaused = true; s.video.pause(); }
 }
 function onEnded(s) {
@@ -339,15 +377,17 @@ function activate() {
   markSeen(s.it);
   syncRail();
   clearTimeout(kickT); kickT = setTimeout(kick, 7000);
-  if (s.err) { s.msg.textContent = s.msg.textContent || '这部暂时播不了'; setTimeout(() => { if (s === cur() && s.err) go(F.dir); }, 800); return; }
+  if (s.err) { s.msg.textContent = s.msg.textContent || '这部暂时播不了，点一下重试'; if (canAutoSkip(s)) setTimeout(() => { if (s === cur() && s.err && canAutoSkip(s)) go(F.dir); }, 800); return; }
   tryPlay(s);
+  watch(s);
 }
 // Leaving a title tells the profile what it was worth.
 function leave(s) {
   if (!s.it) return;
+  F.visited.add(s.i);
   saveHist(s);
   if (s.judged) return; s.judged = true;
-  const dur = s.video.duration;
+  const dur = vdur(s.video);
   if (s.watched < 3) bump(s.it, s.d, -.8);
   else if (s.watched > 25 || (dur && isFinite(dur) && s.watched / dur > .5)) bump(s.it, s.d, 1.2);
 }
@@ -545,7 +585,7 @@ function startMode(mode, extra) {
   F.names = new Set();
   ring.forEach(s => { teardown(s); Object.assign(s, { i: -1, it: null, d: null }); s.el.classList.add('empty'); });
   Object.assign(F, { gen: F.gen + 1, mode, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
-    pool: [], once: false, catUsed: new Set(), catCount: 1, userPaused: false });
+    pool: [], once: false, catUsed: new Set(), catCount: 1, userPaused: false, visited: new Set(), dir: 1 });
   if (extra) F.extra = extra;
   root.classList.add('booting'); bootEl.classList.remove('empty'); bootEl.querySelector('span').textContent = '正在为你挑选…';
   closeOverlays();
@@ -662,7 +702,7 @@ root.addEventListener('pointerdown', e => {
   if (g) return;
   const s = cur();
   g = { low: e.pointerType === 'touch' && e.clientY > root.getBoundingClientRect().bottom - 120, id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), axis: '', dx: 0, dy: 0, long: false, t0: s.video.currentTime || 0, target: 0,
-    lp: setTimeout(() => { if (g && !g.axis && s.d) { g.long = true; setRate(2); } }, 450) };
+    lp: setTimeout(() => { if (g && !g.axis && s.d) { g.long = true; setRate(2); window.haptic?.(); } }, 450) };
   root.setPointerCapture(e.pointerId);
 });
 root.addEventListener('pointermove', e => {
@@ -679,7 +719,7 @@ root.addEventListener('pointermove', e => {
     if ((dy > 0 && F.idx === 0) || (dy < 0 && F.idx >= F.items.length - 1)) dy *= .3;        // nothing there: rubber band
     root.style.setProperty('--dy', dy + 'px');
   } else if (g.axis === 'x') {
-    const v = cur().video, dur = v.duration;
+    const v = cur().video, dur = vdur(v);
     if (!dur || !isFinite(dur)) return;
     const span = Math.min(Math.max(dur * .4, 60), 300);
     g.target = Math.max(0, Math.min(dur - .5, g.t0 + g.dx / W() * span));
@@ -738,18 +778,18 @@ const fracOf = e => { const r = prog.querySelector('.rail').getBoundingClientRec
 function scrubTo(e) {
   const v = cur().video; scrub.frac = fracOf(e);
   root.style.setProperty('--p', scrub.frac);
-  showTip(fmtT(scrub.frac * v.duration), `/ ${fmtT(v.duration)}`);
-  liveSeek(scrub.frac * v.duration);
+  showTip(fmtT(scrub.frac * vdur(v)), `/ ${fmtT(vdur(v))}`);
+  liveSeek(scrub.frac * vdur(v));
 }
 prog.addEventListener('pointerdown', e => {
-  const v = cur()?.video; if (!v || !v.duration || !isFinite(v.duration)) return;
+  const v = cur()?.video; if (!v || !vdur(v) || !isFinite(vdur(v))) return;
   scrub = { id: e.pointerId, frac: 0, t0: v.currentTime };
   prog.setPointerCapture(e.pointerId); root.classList.add('scrubbing'); scrubTo(e); e.stopPropagation();
 });
 prog.addEventListener('pointermove', e => { if (scrub && e.pointerId === scrub.id) scrubTo(e); });
 const scrubEnd = (e, ok) => {
   if (!scrub || e.pointerId !== scrub.id) return;
-  const v = cur().video; seekWant = null; v.currentTime = ok ? scrub.frac * v.duration : scrub.t0;
+  const v = cur().video; seekWant = null; v.currentTime = ok ? scrub.frac * vdur(v) : scrub.t0;
   scrub = null; root.classList.remove('scrubbing'); tipEl.hidden = true;
 };
 prog.addEventListener('pointerup', e => { armGuard(); scrubEnd(e, true); });
@@ -764,7 +804,7 @@ root.addEventListener('wheel', e => {
   const dx = e.deltaX * k, dy = e.deltaY * k;
   clearTimeout(wTimer);
   wTimer = setTimeout(() => { if (performance.now() - wLockAt >= 400) { wLocked = false; wAcc = 0; } else wTimer = setTimeout(() => { wLocked = false; wAcc = 0; }, 400 - (performance.now() - wLockAt)); }, 130);
-  if (Math.abs(dx) > Math.abs(dy)) { const v = cur().video; if (v.duration && isFinite(v.duration)) v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + dx * .08)); return; }
+  if (Math.abs(dx) > Math.abs(dy)) { const v = cur().video; if (vdur(v) && isFinite(vdur(v))) seekBy(v, dx * .08); return; }
   if (wLocked) return;
   wAcc += dy;
   if (Math.abs(wAcc) >= 40) { wLocked = true; wLockAt = performance.now(); go(wAcc > 0 ? 1 : -1); wAcc = 0; }
@@ -780,8 +820,8 @@ addEventListener('keydown', e => {
   if (k === 'Escape') { if (!menuEl.hidden || !sheetEl.hidden) { used(); return closeOverlays(); } if (document.fullscreenElement) return; used(); guardUntil = 0; return history.back(); }
   if (k === 'ArrowDown' || k === 'j' || k === 'PageDown') { used(); return go(1); }
   if (k === 'ArrowUp' || k === 'k' || k === 'PageUp') { used(); return go(-1); }
-  if (k === 'ArrowRight' && v?.duration) { used(); v.currentTime = Math.min(v.duration, v.currentTime + 5); return; }
-  if (k === 'ArrowLeft' && v?.duration) { used(); v.currentTime = Math.max(0, v.currentTime - 5); return; }
+  if (k === 'ArrowRight' && vdur(v)) { used(); seekBy(v, 5); return; }
+  if (k === 'ArrowLeft' && vdur(v)) { used(); seekBy(v, -5); return; }
   if (k === ' ') { used(); return togglePause(); }
   const map = { l: 'like', s: 'fav', e: 'eps', i: 'detail', d: 'dislike', m: 'mute', f: 'fs' };
   if (map[k]) { used(); return act(map[k]); }
@@ -794,10 +834,10 @@ function tick() {
   if (root.hidden) return;
   raf = requestAnimationFrame(tick);
   const s = cur(), v = s?.video;
-  const vod = !!v && v.duration > 0 && isFinite(v.duration);
+  const vod = !!v && vdur(v) > 0 && isFinite(vdur(v));
   root.classList.toggle('live', !vod);
   if (!vod) return;
-  const t = v.currentTime, d = v.duration;
+  const t = v.currentTime, d = vdur(v);
   if (!scrub && !(g && g.axis === 'x')) {
     const p = t / d; if (Math.abs(p - lastP) > 1e-4) { lastP = p; root.style.setProperty('--p', p); }
   }

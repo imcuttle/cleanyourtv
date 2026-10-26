@@ -1,0 +1,208 @@
+// 更新：检查是否有新版本 / 应用更新。网页管理员页面 (server.js) 和 manage.js 共用。
+//   git 仓库       检查 = git fetch 后比较 HEAD 和上游；更新 = git pull --ff-only
+//   非 git (zip)   检查 = GitHub API 取默认分支最新提交；更新 = 下载该提交的 zip → 解压 → 校验 → 带回滚地替换程序文件
+// 保留不动：data/ (数据)、.env (令牌)、.tools/ (便携 Node / ffmpeg)、node_modules/。
+// 临时文件只放在 data/.update-tmp/ ，每次更新结束 (成功或失败) 都清掉，服务启动时也会清一次。
+// 检查成功的结果缓存在 data/.update-check.json (6 小时)；失败不缓存。
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
+
+const ROOT = __dirname;
+const WIN = process.platform === 'win32';
+const DATA = process.env.TVBOX_DATA || path.join(ROOT, 'data');
+const TMP = path.join(DATA, '.update-tmp');
+const VER_FILE = path.join(DATA, '.version.json');
+const CHECK_FILE = path.join(DATA, '.update-check.json');
+const MANAGE_FILE = path.join(DATA, '.manage.json');
+const DEFAULT_REPO = 'imcuttle/cleanyourtv';   // 非 git 的拷贝默认从这个仓库更新；TVBOX_REPO=owner/repo 可改
+const KEEP = new Set(['data', '.env', '.tools', 'node_modules']);
+const CACHE_MS = 6 * 3600e3;      // 检查结果缓存多久
+const MIN_GAP = 20e3;             // 手动检查的最小间隔 (防连点)
+const UA = 'tvbox-updater';
+
+const readJson = f => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+const writeJson = (f, v) => { try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(v)); } catch {} };
+const short = s => String(s || '').slice(0, 7);
+
+function sh(cmd, args, { cwd = ROOT, timeout = 60e3 } = {}) {
+  return new Promise(ok => {
+    let out = '', err = '', done = false;
+    const fin = r => { if (!done) { done = true; clearTimeout(t); ok(r); } };
+    let p;
+    try { p = spawn(cmd, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' } }); }
+    catch (e) { return ok({ status: -1, stdout: '', stderr: e.message }); }
+    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} fin({ status: -2, stdout: out, stderr: err + '\n超时' }); }, timeout);
+    p.stdout.on('data', d => { if (out.length < 1e6) out += d; });
+    p.stderr.on('data', d => { if (err.length < 1e6) err += d; });
+    p.on('error', e => fin({ status: -1, stdout: out, stderr: e.message }));
+    p.on('close', code => fin({ status: code, stdout: out, stderr: err }));
+  });
+}
+const lastLines = (s, n = 3) => String(s || '').trim().split(/\r?\n/).slice(-n).join(' ');
+
+function repoSlug() {
+  const raw = String(process.env.TVBOX_REPO || (readJson(MANAGE_FILE) || {}).repo || (readJson(VER_FILE) || {}).repo || DEFAULT_REPO).trim();
+  const m = /(?:github\.com[/:])?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(raw);
+  if (!m) throw new Error('仓库地址看不懂: ' + raw + ' (写成 owner/repo)');
+  return `${m[1]}/${m[2]}`;
+}
+
+// ---------- 当前版本 ----------
+async function gitInfo() {
+  const top = await sh('git', ['rev-parse', '--show-toplevel']);
+  if (top.status !== 0) return null;
+  const cwd = top.stdout.trim();
+  const g = async a => (await sh('git', a, { cwd })).stdout.trim();
+  const up = await sh('git', ['rev-parse', '--abbrev-ref', '@{u}'], { cwd });
+  return { top: cwd, sha: await g(['rev-parse', 'HEAD']), branch: await g(['rev-parse', '--abbrev-ref', 'HEAD']),
+    subject: await g(['log', '-1', '--format=%s']), upstream: up.status === 0 ? up.stdout.trim() : '',
+    dirty: !!(await g(['status', '--porcelain', '--untracked-files=no'])) };
+}
+async function current() {
+  const g = await gitInfo();
+  if (g) return { mode: 'git', sha: g.sha, short: short(g.sha), branch: g.branch, subject: g.subject, dirty: g.dirty, upstream: g.upstream };
+  const v = readJson(VER_FILE) || {};
+  let repo = ''; try { repo = repoSlug(); } catch {}
+  return { mode: 'zip', sha: v.sha || '', short: short(v.sha), at: v.at || 0, repo };
+}
+
+// ---------- 检查 ----------
+async function ghLatest(slug) {
+  const h = { 'User-Agent': UA, Accept: 'application/vnd.github+json' };
+  const tk = process.env.GITHUB_TOKEN || process.env.GH_TOKEN; if (tk) h.Authorization = 'Bearer ' + tk;
+  const r = await fetch(`https://api.github.com/repos/${slug}/commits/HEAD`, { headers: h, signal: AbortSignal.timeout(15e3) });
+  if (r.status === 403 || r.status === 429) throw new Error('GitHub 接口限流了，稍后再试 (设置 GITHUB_TOKEN 可放宽)');
+  if (!r.ok) throw new Error(`GitHub 返回 HTTP ${r.status} (${slug})`);
+  const j = await r.json();
+  return { sha: j.sha, subject: String(j.commit?.message || '').split('\n')[0], date: j.commit?.committer?.date || '' };
+}
+async function checkRemote() {
+  const cur = await current();
+  if (cur.mode === 'git') {
+    const g = await gitInfo();
+    const remote = g.upstream ? g.upstream.split('/')[0] : 'origin';
+    const f = await sh('git', ['fetch', '--quiet', remote], { cwd: g.top, timeout: 90e3 });
+    if (f.status !== 0) throw new Error('git fetch 失败: ' + (lastLines(f.stderr) || '未知错误'));
+    const target = g.upstream || `${remote}/${g.branch}`;
+    const v = await sh('git', ['rev-parse', '--verify', '--quiet', target], { cwd: g.top });
+    if (v.status !== 0) throw new Error(`远端没有分支 ${target}，无法比较`);
+    const num = async a => Number((await sh('git', a, { cwd: g.top })).stdout.trim()) || 0;
+    const behind = await num(['rev-list', '--count', `HEAD..${target}`]);
+    const ahead = await num(['rev-list', '--count', `${target}..HEAD`]);
+    const log = (await sh('git', ['log', '--format=%h\t%s', '-n', '8', `HEAD..${target}`], { cwd: g.top })).stdout.trim();
+    return { mode: 'git', current: cur.short, latest: short(v.stdout.trim()), available: behind > 0, behind, ahead, dirty: g.dirty, target,
+      commits: log ? log.split('\n').map(l => { const [h, ...s] = l.split('\t'); return { id: h, subject: s.join('\t') }; }) : [] };
+  }
+  const slug = repoSlug(), l = await ghLatest(slug);
+  const unknown = !cur.sha;
+  return { mode: 'zip', repo: slug, current: cur.short, latest: short(l.sha), latestSha: l.sha, available: unknown || l.sha !== cur.sha, unknown,
+    commits: [{ id: short(l.sha), subject: l.subject, date: l.date }] };
+}
+let inflight = null;
+// -> { ...result, at, cached }. 成功才写缓存；当前版本变了 (刚更新过) 缓存自动作废。
+async function check({ force = false } = {}) {
+  const cur = await current();
+  const c = readJson(CHECK_FILE);
+  const same = c && c.result && c.curSha === cur.sha && c.mode === cur.mode;
+  if (same && (!force ? Date.now() - c.at < CACHE_MS : Date.now() - c.at < MIN_GAP)) return { ...c.result, at: c.at, cached: true };
+  if (!inflight) inflight = checkRemote().finally(() => { inflight = null; });
+  const result = await inflight;
+  const at = Date.now();
+  writeJson(CHECK_FILE, { at, mode: cur.mode, curSha: cur.sha, result });
+  return { ...result, at, cached: false };
+}
+const cachedCheck = () => {
+  const c = readJson(CHECK_FILE);
+  return c && c.result ? { ...c.result, at: c.at, cached: true } : null;
+};
+
+// ---------- 应用 ----------
+const rmrf = p => fs.rmSync(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+function cleanup() { try { rmrf(TMP); } catch {} }
+function move(a, b) {
+  try { fs.renameSync(a, b); }
+  catch (e) { if (e.code !== 'EXDEV') throw e; fs.cpSync(a, b, { recursive: true }); rmrf(a); }
+}
+
+async function gitApply(g, log) {
+  log('git pull …');
+  const pull = args => sh('git', args, { cwd: g.top, timeout: 180e3 });
+  let r = await pull(['pull', '--ff-only']);
+  if (r.status !== 0 && /no tracking information|has no upstream/i.test(r.stderr)) r = await pull(['pull', '--ff-only', 'origin', g.branch]);
+  if (r.stdout.trim()) log(r.stdout.trim());
+  if (r.status !== 0) throw new Error('git pull 失败: ' + (lastLines(r.stderr) || lastLines(r.stdout) || '未知错误') + '（本地改动冲突时先处理: git status）');
+  const after = (await sh('git', ['rev-parse', 'HEAD'], { cwd: g.top })).stdout.trim();
+  log(g.sha === after ? '已经是最新' : `已更新 ${short(g.sha)} → ${short(after)}`);
+  return { from: short(g.sha), to: short(after), changed: g.sha !== after };
+}
+
+async function extractZip(zip, dir) {
+  let r = await sh('tar', ['-xf', zip, '-C', dir], { timeout: 120e3 });     // bsdtar: macOS / Windows 10+ 自带
+  if (r.status === 0) return;
+  r = WIN ? await sh('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${dir}' -Force`], { timeout: 180e3 })
+    : await sh('unzip', ['-q', '-o', zip, '-d', dir], { timeout: 120e3 });
+  if (r.status !== 0) throw new Error('解压失败: ' + lastLines(r.stderr));
+}
+function findWebDir(dir, depth) {
+  if (fs.existsSync(path.join(dir, 'server.js')) && fs.existsSync(path.join(dir, 'public'))) return dir;
+  if (depth <= 0) return null;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) if (e.isDirectory()) { const f = findWebDir(path.join(dir, e.name), depth - 1); if (f) return f; }
+  return null;
+}
+async function zipApply(log) {
+  const slug = repoSlug();
+  let sha = '';
+  try { sha = (await ghLatest(slug)).sha; } catch (e) { log('取不到最新提交号，改下载默认分支 (' + e.message + ')'); }
+  const url = `https://codeload.github.com/${slug}/zip/${sha || 'HEAD'}`;
+  const from = short((readJson(VER_FILE) || {}).sha);
+  cleanup();
+  const work = path.join(TMP, String(Date.now()));
+  fs.mkdirSync(work, { recursive: true });
+  try {
+    log(`下载 ${slug} ${sha ? short(sha) : '默认分支最新代码'} …`);
+    const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(300e3) });
+    if (!res.ok || !res.body) throw new Error(`下载失败 HTTP ${res.status}`);
+    const zip = path.join(work, 'src.zip');
+    await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(zip));
+    log(`已下载 ${(fs.statSync(zip).size / 1048576).toFixed(1)} MB，解压 …`);
+    const out = path.join(work, 'x');
+    fs.mkdirSync(out);
+    await extractZip(zip, out);
+    const src = findWebDir(out, 4);
+    if (!src) throw new Error('压缩包里没找到 web 程序目录 (server.js + public)');
+    const chk = await sh(process.execPath, ['--check', path.join(src, 'server.js')]);
+    if (chk.status !== 0) throw new Error('新版 server.js 没通过语法检查，已放弃更新: ' + lastLines(chk.stderr));
+    log('替换程序文件 (data / .env / .tools 保留) …');
+    const backup = path.join(work, 'old');
+    fs.mkdirSync(backup);
+    const oldNames = fs.readdirSync(ROOT).filter(n => !KEEP.has(n) && !n.startsWith('.'));
+    const newNames = fs.readdirSync(src).filter(n => !KEEP.has(n) && !n.startsWith('.'));
+    const moved = [], placed = [];
+    try {
+      for (const n of oldNames) { move(path.join(ROOT, n), path.join(backup, n)); moved.push(n); }
+      for (const n of newNames) { move(path.join(src, n), path.join(ROOT, n)); placed.push(n); }
+    } catch (e) {                                   // 中途失败: 撤回新文件, 放回旧文件
+      for (const n of placed) { try { rmrf(path.join(ROOT, n)); } catch {} }
+      for (const n of moved) { try { move(path.join(backup, n), path.join(ROOT, n)); } catch {} }
+      throw new Error('替换文件失败，已恢复旧版本: ' + e.message);
+    }
+    if (!WIN) for (const f of fs.readdirSync(ROOT)) if (f.endsWith('.command')) { try { fs.chmodSync(path.join(ROOT, f), 0o755); } catch {} }
+    writeJson(VER_FILE, { sha, repo: slug, at: Date.now() });
+    log('代码已替换为最新版本');
+    return { from, to: short(sha), changed: true };
+  } finally { cleanup(); }
+}
+
+// -> { from, to, changed }
+async function apply(log = () => {}) {
+  const g = await gitInfo();
+  const r = g ? await gitApply(g, log) : await zipApply(log);
+  try { fs.rmSync(CHECK_FILE, { force: true }); } catch {}
+  return r;
+}
+
+module.exports = { current, check, cachedCheck, apply, cleanup, repoSlug, TMP };

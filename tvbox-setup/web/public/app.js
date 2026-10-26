@@ -1044,6 +1044,24 @@ async function feedFromCard(c) {
   start = Math.min(start, items.length - 1);
   window.openFeed({ mode: 'list', items, start, label });
 }
+// 触感反馈: 安卓用 navigator.vibrate; iOS Safari 没有这个接口, 但 17.4+ 点一下 <input switch> 的标签会有系统触感, 借它用一下。
+const haptic = (() => {
+  let lab = null;
+  return (ms = 18) => {
+    try { if (navigator.vibrate && navigator.vibrate(ms)) return; } catch {}
+    try {
+      if (!lab) {
+        lab = document.createElement('label');
+        lab.setAttribute('aria-hidden', 'true');
+        lab.style.cssText = 'position:fixed;left:-99px;top:-99px;width:1px;height:1px;opacity:0;pointer-events:none';
+        lab.innerHTML = '<input type="checkbox" switch tabindex="-1">';
+        document.body.append(lab);
+      }
+      lab.click();
+    } catch {}
+  };
+})();
+window.haptic = haptic;
 const cardOf = e => e.target.closest?.('#view .card');
 document.addEventListener('contextmenu', e => {
   const c = cardOf(e); if (!c || e.target.closest('.rm')) return;
@@ -1057,7 +1075,7 @@ document.addEventListener('touchstart', e => {
   const t = e.touches[0]; lpXY = [t.clientX, t.clientY];
   lpT = setTimeout(() => {
     lpFired = Date.now();
-    if (navigator.vibrate) navigator.vibrate(10);
+    haptic();
     openCardMenu(c, 0, 0, true);
   }, 500);
 }, { passive: true });
@@ -1698,7 +1716,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
         <div class="info"><h1>${esc(d.name)}</h1><div class="btns">
           ${eps.length ? `<a class="btn play" data-ep="${resumeIdx}" href="${esc(playHref(site, id, line, resumeIdx))}">▶ ${h && h.line === line ? '继续 ' + esc(eps[resumeIdx].name) : eps.length > 1 ? '播放 ' + esc(eps[0].name) : '播放'}</a>
             ${d.local ? '' : `<button class="btn more ico ib dlbtn" id="dlToggle" title="下载" aria-label="下载">${IC.dl}</button>`}` : ''}
-          ${canOpen && eps.length ? `<button class="btn more ico" id="extPlay" title="用系统默认播放器打开${eps.length > 1 ? ' ' + esc(eps[resumeIdx].name) : ''}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14zM5 5h6v2H5v12h12v-6h2v8H3V5z"/></svg>播放器</button><button class="btn more ico" id="extReveal" title="在文件夹中显示这个文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5A1.5 1.5 0 0 1 4.5 4h5.2c.4 0 .8.2 1.1.5L12.3 6H19.5A1.5 1.5 0 0 1 21 7.5v10A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>文件夹</button>` : ''}
+          ${canOpen && eps.length ? `<button class="btn more ico ib" id="extPlay" aria-label="用系统播放器打开" title="用系统默认播放器打开${eps.length > 1 ? ' ' + esc(eps[resumeIdx].name) : ''}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></button><button class="btn more ico ib" id="extReveal" aria-label="在文件夹中显示" title="在文件夹中显示这个文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.7c.4 0 .8.2 1.1.5L11.8 7h7.7A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg></button>` : ''}
           <button class="btn more ico" id="shareBtn" title="分享" aria-label="分享"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2"/></svg></button>
           ${kidsMode() ? '' : `<button class="btn more ico ib fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn" title="${favs.has(site, id) ? '取消收藏' : '收藏'}" aria-label="收藏">${IC.heart}</button>`}
         </div></div></div>
@@ -1960,14 +1978,14 @@ if (ms) {
   const on = (a, f) => { try { ms.setActionHandler(a, f); } catch {} };
   on('play', () => video.play().catch(() => {}));
   on('pause', () => video.pause());
-  const vod = () => cur && cur.kind !== 'live' && isFinite(video.duration);
+  const vod = () => cur && cur.kind !== 'live' && isFinite(vdur(video));
   on('seekbackward', d => { if (vod()) video.currentTime -= d?.seekOffset || 10; });
   on('seekforward', d => { if (vod()) video.currentTime += d?.seekOffset || 10; });
   on('seekto', d => { if (vod() && d.seekTime != null && isFinite(d.seekTime)) video.currentTime = d.seekTime; });
   on('enterpictureinpicture', () => { if (cur && !video.paused && !pipOn) togglePip(); });
   video.addEventListener('play', () => { ms.playbackState = 'playing'; });
   video.addEventListener('pause', () => { ms.playbackState = 'paused'; });
-  const pos = () => { if (isFinite(video.duration) && video.duration > 0) try { ms.setPositionState({ duration: video.duration, position: Math.min(video.currentTime, video.duration), playbackRate: video.playbackRate || 1 }); } catch {} };
+  const pos = () => { if (isFinite(vdur(video)) && vdur(video) > 0) try { ms.setPositionState({ duration: vdur(video), position: Math.min(video.currentTime, vdur(video)), playbackRate: video.playbackRate || 1 }); } catch {} };
   video.addEventListener('loadedmetadata', pos); video.addEventListener('ratechange', pos); video.addEventListener('seeked', pos);
 }
 
@@ -2039,6 +2057,13 @@ function showCover(url) {
   pcover.classList.remove('gone'); pcover.hidden = false;
 }
 function hideCover() { if (!pcover || pcover.hidden) return; pcover.classList.add('gone'); setTimeout(() => { if (pcover.classList.contains('gone')) pcover.hidden = true; }, 260); }
+// 致命错误先让 hls.js 自己恢复 (网络抖动 / 解码器卡住), 各最多两次; 恢复不了才换线路 / 报错。
+function hlsRecover(h, data) {
+  const t = h._rec || (h._rec = { net: 0, media: 0 });
+  if (data.type === Hls.ErrorTypes.NETWORK_ERROR && t.net++ < 2) { h.startLoad(); return true; }
+  if (data.type === Hls.ErrorTypes.MEDIA_ERROR && t.media++ < 2) { if (t.media === 2) h.swapAudioCodec?.(); h.recoverMediaError(); return true; }
+  return false;
+}
 function load(url, startAt, viaProxy, isLocal) {
   if (hls) { hls.destroy(); hls = null; }
   const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : url;
@@ -2048,12 +2073,13 @@ function load(url, startAt, viaProxy, isLocal) {
   pvReset();
   msg('加载中…');
   showCover(cur?.kind === 'vod' && cur.d?.adult ? cardPic(cur.d) : '');   // adult sources only
+  fixDuration(video, url.startsWith('/media/h/') ? url : '');
   const seek = () => { if (startAt) video.currentTime = startAt; video.play().catch(() => msg('点一下播放')); };
   const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集/换个源试试'); };
   if (window.Hls && Hls.isSupported() && !direct) {
-    hls = new Hls({ maxBufferLength: 30, enableWorker: true, ...(url.startsWith('/media/h/') ? { startPosition: startAt || 0 } : {}) });
+    hls = new Hls({ maxBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 4, ...(url.startsWith('/media/h/') ? { startPosition: startAt || 0 } : {}) });
     hls.on(Hls.Events.MANIFEST_PARSED, seek);
-    hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) retry(data.details); });
+    hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal && !hlsRecover(hls, data)) retry(data.details); });
     hls.loadSource(src); hls.attachMedia(video);
   } else {
     video.src = src;
@@ -2069,11 +2095,11 @@ video.addEventListener('waiting', () => msg('缓冲中…'));
 video.addEventListener('ended', () => { if (cur && cur.ep < cur.eps.length - 1) step(1); });
 let lastSave = 0;
 video.addEventListener('timeupdate', () => {
-  if (!cur || cur.kind !== 'vod' || Date.now() - lastSave < 4000 || !video.duration) return;
+  if (!cur || cur.kind !== 'vod' || Date.now() - lastSave < 4000 || !vdur(video)) return;
   lastSave = Date.now();
   const { d, line, ep, eps } = cur;
   hist.put({ site: d.site, adult: d.adult ? 1 : 0, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
-    line, ep, epName: eps[ep].name, t: video.currentTime, dur: video.duration });
+    line, ep, epName: eps[ep].name, t: video.currentTime, dur: vdur(video) });
 });
 function step(n) { cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(0); }
 // Episode / channel picker. Live: numbered single column with a filter; 点播: compact grid.
@@ -2168,13 +2194,39 @@ else pacts.insertBefore($('[data-act=share]'), $('[data-act=more]'));   // deskt
 $('[data-c=pip]').hidden = !pipSupported();
 $('[data-c=fs]').hidden = hideFs();
 video.addEventListener('loadedmetadata', () => { if (cur) $('[data-act=pip]').hidden = !pipSupported() || fineCursor; });
+// ---- 拖动 / 快进快退时的杂音处理 ----
+// 远程 HLS 切换进度后偶尔有「电流音」: 一是连续的 seek 把解码器冲得太快 (滚轮 / 连按快进 / 拖动进度条), 二是跳转瞬间新旧音频接缝处的爆音。
+// duckOnSeek: 一发生 seek 就静音, seek 完成 220ms 后恢复 (拖动中一直静音, 像大多数播放器那样); 只动 muted, 不动音量, 也不记进 playerMuted。
+// seekBy: 连续的相对快进快退合并成一次, 140ms 内没有新的才真正跳。
+function duckOnSeek(v, wantMuted) {
+  let t = 0;
+  const up = () => { clearTimeout(t); v._duck = 0; if (v.muted !== wantMuted()) v.muted = wantMuted(); };
+  v.addEventListener('seeking', () => { clearTimeout(t); v._duck = 1; if (!v.muted) v.muted = true; t = setTimeout(up, 2500); });   // 2.5s: seeked 一直不来也要恢复
+  v.addEventListener('seeked', () => { clearTimeout(t); t = setTimeout(up, 220); });
+  v._unduck = up;
+}
+function seekBy(v, d, apply) {
+  const dur = vdur(v), lim = dur > 0 && isFinite(dur) ? dur : Infinity;
+  v._st = Math.max(0, Math.min(lim, (v._st ?? v.currentTime) + d));
+  clearTimeout(v._stT);
+  v._stT = setTimeout(() => { const x = v._st; v._st = undefined; v.currentTime = x; apply?.(x); }, 140);
+  return v._st;
+}
+// 视频长度: 本地媒体边转码边播 (HLS EVENT 列表), 浏览器报的长度会随转码进度一路变长。服务端用 ffmpeg 读出真实长度 (probe),
+// 记在 video._fixDur 上, 之后进度条 / 快进都按它走; 转码完成后浏览器自己的长度追上来, 取两者较大值。
+function vdur(v) { if (!v) return NaN; const k = v._fixDur; return k > 0 ? Math.max(k, v.duration || 0) : v.duration; }
+function fixDuration(v, url) {
+  v._fixDur = 0; v._fixUrl = url;
+  if (!url || !url.startsWith('/media/h/')) return;
+  api('probe', { u: url }, null).then(r => { if (r && r.duration > 0 && v._fixUrl === url) { v._fixDur = r.duration; v.dispatchEvent(new Event('durationchange')); } }).catch(() => {});
+}
 const fmtT = s => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = String(s % 60).padStart(2, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`; };
-const isVodTime = () => Number.isFinite(video.duration) && video.duration > 0;
+const isVodTime = () => Number.isFinite(vdur(video)) && vdur(video) > 0;
 function paintCtrl() {
-  const d = video.duration, t = video.currentTime;
+  const d = vdur(video), t = video.currentTime;
   player.classList.toggle('paused', video.paused);
-  player.classList.toggle('muted', video.muted || video.volume === 0);
-  $('.vol').value = video.muted ? 0 : video.volume;
+  player.classList.toggle('muted', (video.muted && !video._duck) || video.volume === 0);
+  $('.vol').value = video.muted && !video._duck ? 0 : video.volume;
   tl.hidden = !isVodTime();
   $('.rem').textContent = isVodTime() ? '-' + fmtT(d - t) : cur?.kind === 'live' ? '● 直播' : '';
   if (!isVodTime()) return;
@@ -2190,10 +2242,12 @@ for (const ev of ['timeupdate', 'durationchange', 'progress', 'play', 'pause', '
   if (Number.isFinite(vol)) video.volume = Math.min(1, Math.max(0, vol));
   video.muted = localStorage.playerMuted === '1';
   video.addEventListener('volumechange', () => {
+    if (video._duck) return;   // 拖动 / 跳转时的临时静音, 不记
     localStorage.playerMuted = video.muted ? '1' : '0';
     if (video.volume > 0) localStorage.playerVolume = String(+video.volume.toFixed(3));   // keep the last audible level through a mute
   });
 }
+duckOnSeek(video, () => localStorage.playerMuted === '1');
 const togglePlay = () => (video.paused ? video.play().catch(() => {}) : video.pause());
 // iPhone can only fullscreen the <video> itself (its native player then takes over); everything else fullscreens the player.
 const toggleFs = () => {
@@ -2208,9 +2262,9 @@ const onCtrl = e => {
   const c = e.target.closest('[data-c]')?.dataset.c; if (!c) return;
   e.stopPropagation(); poke();
   if (c === 'play') togglePlay();
-  if (c === 'back') video.currentTime = Math.max(0, video.currentTime - 10);
-  if (c === 'fwd') video.currentTime += 10;
-  if (c === 'mute') { video.muted = !video.muted; if (!video.muted && !video.volume) video.volume = 0.5; }
+  if (c === 'back') seekBy(video, -10);
+  if (c === 'fwd') seekBy(video, 10);
+  if (c === 'mute') { video._unduck?.(); video.muted = !video.muted; if (!video.muted && !video.volume) video.volume = 0.5; }
   if (c === 'fs') toggleFs();
   if (c === 'pip') togglePip();
   if (c === 'rate') cycleRate();
@@ -2227,7 +2281,7 @@ const tlFrac = e => { const r = tl.getBoundingClientRect(); return Math.min(1, M
 function hoverAt(e) { showAt(tlFrac(e)); }
 function showAt(f) {
   if (!isVodTime()) return;
-  const t = f * video.duration, r = tl.getBoundingClientRect();
+  const t = f * vdur(video), r = tl.getBoundingClientRect();
   tl.style.setProperty('--h', f * 100 + '%');
   tip.hidden = false;
   $('span', tip).textContent = fmtT(t);
@@ -2245,7 +2299,7 @@ tl.addEventListener('pointerdown', e => {
 tl.addEventListener('pointerup', e => {
   if (!scrubbing) return;
   scrubbing = false; tl.classList.remove('drag');
-  video.currentTime = tlFrac(e) * video.duration;
+  video.currentTime = tlFrac(e) * vdur(video);
   if (!fineCursor || !tl.matches(':hover')) { tip.hidden = true; tl.style.setProperty('--h', '0%'); }
 });
 tl.addEventListener('pointercancel', () => { scrubbing = false; tl.classList.remove('drag'); tip.hidden = true; tl.style.setProperty('--h', '0%'); });
@@ -2265,7 +2319,7 @@ function showHud(kind, f) {
 function setBright(b) { bright = Math.min(1.6, Math.max(.25, b)); video.style.filter = bright === 1 ? '' : `brightness(${bright})`; }
 function skip(n) {
   if (!isVodTime()) return;
-  video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + n));
+  seekBy(video, n);
   skipEl.className = 'pskip ' + (n < 0 ? 'l' : 'r'); skipEl.textContent = (n < 0 ? '« ' : '') + Math.abs(n) + ' 秒' + (n > 0 ? ' »' : '');
   skipEl.hidden = false; void skipEl.offsetWidth; skipEl.classList.add('go');
   clearTimeout(skipTimer); skipTimer = setTimeout(() => { skipEl.hidden = true; }, 600);
@@ -2291,7 +2345,7 @@ if (!fineCursor) {
     const dx = e.clientX - g.x, dy = e.clientY - g.y;
     if (!g.axis && Math.max(Math.abs(dx), Math.abs(dy)) > 10) g.axis = Math.abs(dx) > Math.abs(dy) ? (isVodTime() ? 'x' : 'none') : 'y';
     if (g.axis === 'x') {
-      const d = video.duration, span = Math.min(Math.max(d * .35, 60), 600);
+      const d = vdur(video), span = Math.min(Math.max(d * .35, 60), 600);
       g.target = Math.min(d, Math.max(0, g.t0 + dx / g.r.width * span));
       if (!gesturing) { gesturing = true; player.classList.remove('idle'); clearTimeout(idleTimer); }
       tl.style.setProperty('--p', g.target / d * 100 + '%');
@@ -2847,6 +2901,118 @@ let installEvt = null;
 addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; });
 addEventListener('appinstalled', () => { installEvt = null; });
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+// ---------- 管理员 (设置页): 管理员令牌登录后可重启 / 检查更新 / 更新并重启 / 清理缓存 / 换令牌 ----------
+const admApi = (method, path, body) => req(method, '/api/admin/' + path, body, false, null);
+const fmtUp = sec => { sec = Math.max(0, sec | 0); const d = Math.floor(sec / 86400), h = Math.floor(sec / 3600) % 24, m = Math.floor(sec / 60) % 60; return d ? `${d} 天 ${h} 小时` : h ? `${h} 小时 ${m} 分` : `${m} 分钟`; };
+const ago = t => { const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? '刚刚' : s < 3600 ? Math.floor(s / 60) + ' 分钟前' : s < 86400 ? Math.floor(s / 3600) + ' 小时前' : Math.floor(s / 86400) + ' 天前'; };
+let admPoll = 0;
+async function initAdmin() {
+  const box = $('#adminSec'); if (!box) return;
+  const alive = () => box.isConnected;
+  let st = null, busy = '', checkErr = '';
+  const load = async () => { st = await admApi('GET', 'status'); };
+  const verTxt = v => !v ? '' : v.mode === 'git' ? `git · ${esc(v.branch)} @ <code>${esc(v.short)}</code>${v.subject ? ' · ' + esc(v.subject.slice(0, 60)) : ''}${v.dirty ? ' <span class="warn">（有未提交的本地改动）</span>' : ''}`
+    : v.mode === 'zip' ? `压缩包安装 · ${v.short ? `<code>${esc(v.short)}</code>` : '版本未知（更新一次后记录）'}${v.at ? ' · 更新于 ' + ago(v.at) : ''} · 来源 ${esc(v.repo || '')}` : esc(v.error || '未知');
+  const updTxt = u => {
+    if (checkErr) return `<span class="warn">检查失败：${esc(checkErr)}</span>${u ? '（以下是上次的结果）<br>' : ''}` + (u ? updBody(u) : '');
+    return u ? updBody(u) : '还没检查过。点「检查更新」。';
+  };
+  const updBody = u => {
+    const when = `<span class="lan">检查于 ${ago(u.at)}${u.cached ? '（缓存结果）' : ''}</span>`;
+    if (!u.available) return `<b class="okc">已是最新</b> ${u.mode === 'git' && u.ahead ? `<span class="lan">本地领先 ${u.ahead} 个提交</span> ` : ''}${when}`;
+    const list = (u.commits || []).map(c => `<li><code>${esc(c.id)}</code> ${esc(c.subject || '')}</li>`).join('');
+    return `<b class="newc">${u.unknown ? '可更新（当前版本未知）' : u.mode === 'git' ? `有新版本：落后 ${u.behind} 个提交` : '有新版本'}</b> → <code>${esc(u.latest)}</code> ${when}${list ? `<ul class="adcommits">${list}</ul>` : ''}`;
+  };
+  const jobTxt = j => !j ? '' : (j.log || []).map(esc).join('\n');
+  const paint = () => {
+    if (!alive()) return;
+    if (!st || !st.authed) {
+      box.innerHTML = `<h2>管理员</h2><p class="hint">用管理员令牌登录后，可以在网页里重启服务、检查更新、更新并重启、清理缓存。令牌在服务启动窗口里显示，也存在 <code>web/.env</code> 的 <code>TVBOX_ADMIN_TOKEN</code>（第一次启动自动生成）。</p>
+        <div class="actions"><input type="password" id="admTok" placeholder="管理员令牌" autocomplete="off" style="max-width:280px"><button class="small" id="admLogin">登录</button></div>`;
+      const go = async () => {
+        const token = $('#admTok', box).value.trim(); if (!token) return;
+        try { await admApi('POST', 'login', { token }); localStorage.adminToken = token; await load(); paint(); toast('已登录管理员'); } catch (e) { toast(e.message); }
+      };
+      $('#admLogin', box).onclick = go;
+      $('#admTok', box).onkeydown = e => { if (e.key === 'Enter') go(); };
+      return;
+    }
+    const u = st.update, j = st.job, run = j && (j.status === 'running' || j.status === 'restarting') || !!busy;
+    const last = st.last && !j ? `<p class="lan">上一次操作：${{ update: '更新', restart: '重启', clear: '清理缓存', rotate: '换令牌' }[st.last.kind] || st.last.kind}${st.last.ok ? '成功' + (st.last.to ? `（${esc(st.last.from || '?')} → ${esc(st.last.to)}）` : st.last.unchanged ? '（已是最新）' : '') : '失败：' + esc(st.last.error || '')} · ${ago(st.last.at)}</p>` : '';
+    box.innerHTML = `<h2>管理员 <span class="tagl">已登录</span></h2>
+      <div class="admgrid">
+        <span>版本</span><div>${verTxt(st.ver)}</div>
+        <span>更新</span><div>${updTxt(u)}${st.autoCheck ? '' : ' <span class="lan">（自动检查已关闭）</span>'}</div>
+        <span>运行</span><div>已运行 ${fmtUp(st.uptime)} · 进程 ${st.workers} 个 · Node ${esc(st.node)} · ${st.ffmpeg ? 'ffmpeg ✓' : '无 ffmpeg'}${st.canRestart ? '' : ' · <span class="warn">没有看守进程，不能自动重启</span>'}</div>
+        <span>缓存</span><div>转码 ${fmtSize(st.caches.transcode)} · 封面图片 ${fmtSize(st.caches.covers)}${st.caches.tmp ? ' · 更新临时文件 ' + fmtSize(st.caches.tmp) : ''}</div>
+      </div>
+      <div class="actions">
+        <button class="small" id="admCheck" ${run ? 'disabled' : ''}>检查更新</button>
+        <button class="btn ${u && u.available ? 'red' : 'more'}" id="admUpdate" ${run ? 'disabled' : ''}>更新并重启</button>
+        <button class="small" id="admRestart" ${run || !st.canRestart ? 'disabled' : ''}>重启服务</button>
+        <span class="grow"></span>
+        <button class="small" id="admOut">退出管理员</button>
+      </div>
+      <details class="admmore"><summary>更多：清理缓存 / 换令牌</summary>
+        <div class="actions"><button class="small" data-adc="transcode" ${run ? 'disabled' : ''}>清理转码缓存</button><button class="small" data-adc="covers" ${run || !st.canRestart ? 'disabled' : ''} title="清理后会自动重启">清理封面图片缓存（会重启）</button>
+          <button class="small" data-adr="access" ${run || !st.canRestart ? 'disabled' : ''}>换访问令牌</button><button class="small" data-adr="admin" ${run || !st.canRestart ? 'disabled' : ''}>换管理员令牌</button></div>
+        <p class="hint">换访问令牌后所有浏览器要重新输入；换管理员令牌后需要用新的重新登录。</p></details>
+      ${j ? `<pre class="admlog ${j.status}">${jobTxt(j)}${busy ? '\n' + esc(busy) : ''}</pre>` : busy ? `<pre class="admlog">${esc(busy)}</pre>` : ''}${last}`;
+    $('#admOut', box).onclick = async () => { delete localStorage.adminToken; await admApi('POST', 'logout', {}).catch(() => {}); st = { authed: false }; paint(); };
+    $('#admCheck', box).onclick = async () => {
+      busy = '正在检查更新…'; paint(); checkErr = '';
+      try { const r = await admApi('POST', 'check', { force: true }); checkErr = r.checkError || ''; await load(); if (!checkErr) toast(st.update?.available ? '有新版本' : '已是最新'); } catch (e) { checkErr = e.message; }
+      busy = ''; paint();
+    };
+    const runJob = async (path, body, label) => {
+      let r;
+      try { r = await admApi('POST', path, body); } catch (e) { return toast(e.message); }
+      watch(label, r);
+    };
+    $('#admUpdate', box).onclick = () => { if (confirm(u && !u.available && !u.unknown ? '已经是最新版本，仍要执行更新并重启吗？' : '更新到最新版本并重启服务？重启期间页面会短暂断开。')) runJob('update', {}, '更新'); };
+    $('#admRestart', box).onclick = () => { if (confirm('重启服务？重启期间页面会短暂断开。')) runJob('restart', {}, '重启'); };
+    $$('[data-adc]', box).forEach(b => b.onclick = () => { if (confirm(b.dataset.adc === 'covers' ? '清理封面和图片缓存，并重启服务？（封面会按需重新生成）' : '清理转码缓存？正在转码的会停掉，下次播放时重新转。')) runJob('clear', { what: b.dataset.adc }, '清理'); });
+    $$('[data-adr]', box).forEach(b => b.onclick = async () => {
+      const acc = b.dataset.adr === 'access';
+      if (!confirm(acc ? '换一个新的访问令牌并重启？所有浏览器都要重新输入新令牌。' : '换一个新的管理员令牌并重启？之后要用新令牌重新登录。')) return;
+      let r;
+      try { r = await admApi('POST', 'rotate', { which: b.dataset.adr }); } catch (e) { return toast(e.message); }
+      if (!acc) localStorage.adminToken = r.token;   // 换的是管理员令牌: 浏览器记住新的, 重启后自动重新登录
+      prompt(`新${acc ? '访问' : '管理员'}令牌（已写入 .env；复制保存好）`, r.token);
+      watch('换令牌', r);
+    });
+  };
+  // 任务进度: 每秒看一次; 服务重启时请求会失败, 等到启动时间 (boot) 变了就刷新页面, 用上新代码。
+  const watch = (label, r) => {
+    const boot0 = st.boot; let n = 0, down = false;
+    st.job = r.job; busy = ''; paint();
+    clearInterval(admPoll);
+    admPoll = setInterval(async () => {
+      if (!alive()) return clearInterval(admPoll);
+      n++;
+      try {
+        const x = await admApi('GET', 'status');
+        if (!x.authed) { clearInterval(admPoll); st = x; return paint(); }
+        if (x.boot !== boot0) { clearInterval(admPoll); toast(label + '完成，服务已重启'); setTimeout(() => location.reload(), 400); return; }
+        st = x; paint();
+        const j = x.job;
+        if (j && (j.status === 'done' || j.status === 'error')) { clearInterval(admPoll); if (j.status === 'done') toast(label + '完成'); else toast(j.error || label + '失败'); }
+      } catch { if (!down) { down = true; busy = '服务重启中，等待重新连接…'; paint(); } }
+      if (n > 150) { clearInterval(admPoll); busy = '等了很久服务还没回来，看看启动窗口 / 日志，或手动刷新页面。'; paint(); }
+    }, 1000);
+  };
+  try { await load(); } catch (e) { st = { authed: false }; }
+  // 浏览器记住了管理员令牌: Cookie 丢了 / 服务换了 Cookie 时自动静默登录 (令牌被换掉了才会丢掉记忆, 重新输入)
+  if (!st.authed && localStorage.adminToken) {
+    try { await admApi('POST', 'login', { token: localStorage.adminToken }); await load(); }
+    catch (e) { if (/不对/.test(e.message)) delete localStorage.adminToken; }
+  }
+  paint();
+  // 自动检查由服务端在启动时和每小时做 (有缓存); 这里打开时如果还没有结果, 顺手查一次
+  if (st.authed && !st.update && st.autoCheck && !(st.job && st.job.status === 'running')) {
+    try { await admApi('POST', 'check', {}); await load(); paint(); } catch {}
+  }
+}
 function installSection() {
   if (isStandalone()) return '';
   const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -2928,6 +3094,7 @@ async function renderSettings() {
       <div class="actions"><span class="lan">卡片大小</span><button class="small" data-csz="-">−</button><button class="small" data-csz="0" data-cs="val">${Math.round(cardScale() * 100)}%</button><button class="small" data-csz="+">+</button><span class="lan">也可以按 ⌘/Ctrl 加 + / − / 0，触控板双指捏合也行；放大到 135% 以上封面会换成高清图。</span></div></section>
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
+    <section id="adminSec"><h2>管理员</h2><p class="lan">加载中…</p></section>
     ${locked ? `<section class="locklote"><h2>源设置已锁定</h2><p class="hint">当前安全级别是「${LEVELS[safety.level]}」。点播源、直播源、少儿 / 成人分类、导入和本地媒体文件夹只能在「全部」下修改，免得误改成人分类。想改的话，先在上面把安全级别切到「全部」${safety.hasPin ? '（需要家长 PIN）' : ''}。</p></section>` : ''}
     <div id="srcWrap" ${locked ? 'hidden' : ''}>
     <section><h2>点播源</h2><p class="hint">苹果CMS 接口（<code>…/api.php/provide/vod</code>，返回 JSON）。需要 spider jar / 解析的 type 3 源浏览器跑不了，导入时会自动跳过。</p>
@@ -3476,6 +3643,7 @@ async function renderSettings() {
       await loadSites(); toast(`导入 ${j.imported.sites} 个点播源（自动分类：成人 ${j.imported.adult || 0}、少儿 ${j.imported.kids || 0}）、${j.imported.lives} 个直播源${j.imported.skippedEmpty ? `（跳过 ${j.imported.skippedEmpty} 个 0 部内容的）` : ''}`); renderSettings();
     } catch (err) { toast('导入失败：' + err.message); $('#imp').disabled = false; $('#imp').textContent = '导入'; }
   };
+  initAdmin();
   localSettings(localP).catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
 }
 
