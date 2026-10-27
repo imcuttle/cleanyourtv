@@ -253,7 +253,7 @@ function ready(s, d) {
 }
 
 // ---------- playback ----------
-const bufCfg = role => role === 0 ? { maxBufferLength: 30, maxMaxBufferLength: 60 } : { maxBufferLength: 4, maxMaxBufferLength: 6 };
+const bufCfg = role => role === 0 ? { maxBufferLength: 90, maxMaxBufferLength: 180 } : { maxBufferLength: 4, maxMaxBufferLength: 6 };
 // 已经划过去的 (上一部) 不占任何资源: 停掉下载、解码和定时器, 只留封面和进度; 划回来时从原位置接着放。
 function release(s) {
   clearTimeout(s.dog);

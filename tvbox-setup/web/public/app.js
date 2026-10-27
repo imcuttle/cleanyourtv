@@ -1123,7 +1123,7 @@ function card(it, opts = {}) {
     : isJav(it) ? `<span class="db" hidden data-javfb data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`
     : it.site === 'local' ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
   return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}${pv}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}${opts.removable ? `<button class="rm" data-rm="${opts.removable}" title="${opts.removable === 'fav' ? '取消收藏' : '从观看历史删除'}" aria-label="删除">✕</button>` : ''}
-    <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${it.remarks ? `<span class="badge">${esc(it.remarks)}</span>` : ''}${qChip(vodQ(it))}${rate}${opts.dup > 1 ? `<span class="dup" title="${esc(opts.dupTitle || '')}">${opts.dup} 源</span>` : ''}
+    <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${qChip(vodQ(it))}${rate}${opts.dup > 1 ? `<span class="dup" title="${esc(opts.dupTitle || '')}">${opts.dup} 源</span>` : ''}
       ${pct ? `<div class="prog" style="width:${pct}%"></div>` : ''}</div>
     <div class="name">${esc(it.name)}</div>${opts.sub ? `<div class="sub">${esc(opts.sub)}</div>` : ''}</a>`;
 }
@@ -2469,7 +2469,7 @@ function load(url, startAt, viaProxy, isLocal, rebuild = false, native = false) 
   if (window.Hls && Hls.isSupported() && !direct && !native) {
     // 缓冲只留近处: 向前最多 30 秒 / 30MB, 向后只留 30 秒。码率高的源 (2~3Mbps) 如果让它一路缓冲下去, 几分钟后音频
     // SourceBuffer 先满, 浏览器被迫丢旧数据, 音频出现缺口, 之后就是一段「电流声」; 刷新后缓冲清空又正常。
-    hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60, maxBufferSize: 30 * 1000 * 1000, backBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 8, ...(url.startsWith('/media/h/') || rebuild ? { startPosition: startAt || 0 } : {}) });
+    hls = new Hls({ maxBufferLength: 120, maxMaxBufferLength: 240, maxBufferSize: 150 * 1000 * 1000, backBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 8, ...(url.startsWith('/media/h/') || rebuild ? { startPosition: startAt || 0 } : {}) });
     hls.on(Hls.Events.MANIFEST_PARSED, seek);
     // 每跨一个断点静音挡一下, 蹦的一声就听不到了
     // 有的源每二十来秒一个断点 (#EXT-X-DISCONTINUITY), 浏览器里音频时间轴每跨一次就比画面多落后一点点 (实测约 0.15 秒 / 100 秒),
@@ -3514,7 +3514,7 @@ function stopLocalPreview(immediate) {
 // intent and gets no hover effect: a running preview folds away and none starts until the pointer is back on the plain cover.
 // (mouseover bubbles, so one listener on document sees every card and the detail poster; moving from a button back onto the
 // cover fires it again, which is what restarts the preview.)
-const LPV_ACTION = 'button, a[href]:not(.card), .rm, .badge, .db, .q, input, select, textarea, [role=button]';
+const LPV_ACTION = 'button, a[href]:not(.card), .rm, .db, .q, input, select, textarea, [role=button]';
 const lpvTarget = t => t instanceof Element && t.closest('#view .card[data-pv], .sheet .top .poster[data-pv]');
 document.addEventListener('mouseover', e => {
   const t = e.target instanceof Element ? e.target : null; if (!t) return;

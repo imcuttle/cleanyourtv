@@ -118,8 +118,7 @@ nav a:hover { color: #b3b3b3; }
 .card .img.noimg { animation: none; background: linear-gradient(160deg, #2a2a2e, #1b1b1e); }
 .card .img.noimg .ph { display: flex; position: absolute; inset: 0; align-items: center; justify-content: center; padding: 10px; text-align: center; font-size: 14px; font-weight: 600; line-height: 1.3; color: #ffffffb0; overflow: hidden; word-break: break-all; }
 @keyframes shimmer { to { background-position: -150% 0; } }
-.card .badge, .card .db, .card .prog { z-index: 1; }
-.card .badge { position: absolute; top: 6px; left: 6px; background: var(--red); font-size: 11px; font-weight: 700; padding: 1px 5px; border-radius: 2px; max-width: 85%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .db, .card .prog { z-index: 1; }
 .card .name { font-size: 13px; color: #ddd; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card .sub { font-size: 11px; color: var(--muted); }
 .card .db { position: absolute; right: 6px; bottom: 6px; background: #00b51d; color: #fff; font-size: 11px; font-weight: 800; padding: 1px 5px; border-radius: 3px; box-shadow: 0 1px 4px #0008; }
@@ -452,13 +451,12 @@ a.ch { color: inherit; }
 
 /* 清晰度 chips: card (bottom-left), detail (next to the tags) and line tabs */
 .q { font-size: 10px; font-weight: 800; letter-spacing: .3px; padding: 1px 5px; border-radius: 3px; background: #ffffff26; color: #fff; white-space: nowrap; line-height: 1.5; }
-.card .img .q { position: absolute; left: 6px; bottom: 8px; z-index: 1; background: #000b; backdrop-filter: blur(4px); }
+.card .img .q { position: absolute; left: 6px; top: 6px; z-index: 1; box-shadow: 0 1px 4px #0008; }
 .q.q4k { background: linear-gradient(90deg, #c9a24b, #f3d77a); color: #2a1d00; }
 .q.q1080 { background: #46d369; color: #00240c; }
 .q.q720 { background: #3d8bfd; color: #fff; }
 .q.qsd { background: #6b6b6b; color: #fff; }
 .q.qcam { background: #f5a623; color: #2a1800; }
-.card .img .q.q4k, .card .img .q.q1080, .card .img .q.q720, .card .img .q.qsd, .card .img .q.qcam { opacity: .95; }
 .q.big { font-size: 12px; padding: 2px 8px; }
 .q.sm { margin-left: 4px; font-size: 9px; padding: 0 4px; vertical-align: 1px; }
 
