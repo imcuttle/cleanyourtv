@@ -124,7 +124,7 @@ nav a:hover { color: #b3b3b3; }
 .card .sub { font-size: 11px; color: var(--muted); }
 .card .db { position: absolute; right: 6px; bottom: 6px; background: #00b51d; color: #fff; font-size: 11px; font-weight: 800; padding: 1px 5px; border-radius: 3px; box-shadow: 0 1px 4px #0008; }
 .card .jav { position: absolute; right: 6px; bottom: 6px; background: #e0489b; color: #fff; font-size: 11px; font-weight: 800; padding: 1px 5px; border-radius: 3px; box-shadow: 0 1px 4px #0008; z-index: 1; }
-.dbtag { display: inline-block; background: #00b51d; color: #fff; font-size: 12px; font-weight: 700; padding: 1px 7px; border-radius: 3px; margin-right: 10px; }
+.dbtag { display: inline-block; background: #00b51d; color: #fff; font-size: 12px; font-weight: 700; padding: 1px 7px; border-radius: 3px; }
 a.dbtag:hover { filter: brightness(1.15); }
 .card .prog { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--red); }
 
