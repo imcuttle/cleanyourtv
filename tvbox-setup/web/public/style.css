@@ -1676,3 +1676,12 @@ html.touchui .plist.srcs .pitems button { min-height: 58px; }
 .hs .net, .plist.srcs .net { width: 74px; }
 .hs .net .nt, .plist.srcs .net .nt { width: 48px; }
 .hs .net small, .plist.srcs .pitems .net small { letter-spacing: -.1px; }
+
+/* ===== 兜底横屏：手机竖着拿、横屏视频、拿不到真横屏时，播放器自己顺时针转 90° 铺满屏幕 (app.js 的 syncRot) ===== */
+#player.rot { inset: auto; top: 0; left: var(--rw); width: var(--rh); height: var(--rw); transform-origin: 0 0; transform: rotate(90deg); overscroll-behavior: contain; }
+#player.rot .pbar { padding: 10px max(18px, env(safe-area-inset-bottom)) 6px max(18px, env(safe-area-inset-top)); }
+html.touchui #player.rot .ctrl { padding: 30px max(24px, env(safe-area-inset-bottom)) 6px max(24px, env(safe-area-inset-top)); }
+html #player.rot .plist { height: min(72%, 300px); max-height: none; }
+html #player.rot .plist.srcs { height: auto; max-height: 78%; }
+html #player.rot .psyspanel { max-height: calc(100% - 90px); }
+html.touchui #player.rot .pcenter button[data-c=play] { width: 64px; height: 64px; }

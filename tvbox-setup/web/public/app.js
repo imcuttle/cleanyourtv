@@ -2581,7 +2581,7 @@ function closePlayer() {
   video.pause(); video.removeAttribute('src'); video.load();
   if (ms) { try { ms.metadata = null; ms.playbackState = 'none'; } catch {} }
   if (pipOn) { pipOn = false; player.classList.remove('pip'); document.exitPictureInPicture?.().catch(() => {}); }
-  player.hidden = true; togglePlist(false); sysClose(); clearTimeout(stuckT); msg(''); setLock(false); setBright(1); if (pcover) pcover.hidden = true;
+  setRot(false); player.hidden = true; togglePlist(false); sysClose(); clearTimeout(stuckT); msg(''); setLock(false); setBright(1); if (pcover) pcover.hidden = true;
   if (!$('#modal')) document.body.style.overflow = '';
   $('#modal')?.refresh?.();
   cur = null;
@@ -2730,6 +2730,27 @@ const fsEl = () => document.fullscreenElement || document.webkitFullscreenElemen
 const phoneLike = () => !fineCursor && Math.min(screen.width, screen.height) <= 820;
 const lockLandscape = () => { try { return screen.orientation?.lock ? screen.orientation.lock('landscape').then(() => true, () => false) : Promise.resolve(false); } catch { return Promise.resolve(false); } };
 const unlockOrient = () => { try { screen.orientation?.unlock?.(); } catch {} };
+// ---- 兜底：拿不到真横屏时，把播放器自己转 90° ----
+// iPhone 没有元素全屏接口 (只能走系统播放器，那里没有我们的控制条，也不保证转屏)，安卓上方向锁也可能被拒。
+// 这时手机竖着拿 + 横屏视频：把 #player 顺时针转 90° 铺满屏幕 (画面横过来、控制条还是我们自己的)；
+// 手机本来就横着拿 (innerWidth > innerHeight) 不用转，旋转状态随屏幕方向自动开关。点全屏按钮 / 关闭播放器 / 退出全屏都会恢复。
+// 转了之后触点坐标要换算：屏幕 (x, y) → 播放器内 (y, 屏宽 - x)，见 rotP / rotR。
+let rotOn = false;
+const portraitNow = () => innerHeight > innerWidth;
+function syncRot() {
+  const on = rotOn && portraitNow() && !player.hidden;
+  player.classList.toggle('rot', on);
+  if (on) { player.style.setProperty('--rw', innerWidth + 'px'); player.style.setProperty('--rh', innerHeight + 'px'); }
+}
+const setRot = on => { rotOn = on; syncRot(); };
+addEventListener('resize', syncRot); addEventListener('orientationchange', () => setTimeout(syncRot, 120));
+const rotP = e => player.classList.contains('rot') ? { x: e.clientY, y: innerWidth - e.clientX } : { x: e.clientX, y: e.clientY };
+const rotR = el => {
+  const r = el.getBoundingClientRect();
+  if (!player.classList.contains('rot')) return r;
+  const W = innerWidth;
+  return { left: r.top, right: r.bottom, top: W - r.right, bottom: W - r.left, width: r.height, height: r.width };
+};
 // land: 视频还没出尺寸时 (刚从沉浸点「全屏观看」进来) 由调用方告诉我们它是不是横屏的
 function enterFs(land) {
   const isLand = video.videoWidth ? video.videoWidth > video.videoHeight : land === true;
@@ -2737,16 +2758,18 @@ function enterFs(land) {
   const rq = player.requestFullscreen || player.webkitRequestFullscreen;
   if (rq) {
     let p; try { p = rq.call(player); } catch { p = null; }
-    return Promise.resolve(p).then(() => { if (want) return lockLandscape(); }, () => {});
+    return Promise.resolve(p).then(async () => { if (want && !(await lockLandscape()) && portraitNow()) setRot(true); }, () => { if (want) setRot(true); });
   }
+  if (want && portraitNow()) { setRot(true); return Promise.resolve(); }   // iPhone：没有元素全屏，自己转
   try { video.webkitEnterFullscreen?.(); } catch {}
   return Promise.resolve();
 }
 const toggleFs = () => {
+  if (rotOn) return setRot(false);
   if (fsEl()) return (document.exitFullscreen || document.webkitExitFullscreen).call(document);
   return enterFs();
 };
-const onFsChange = () => { if (!fsEl()) unlockOrient(); else if (phoneLike() && video.videoWidth) (video.videoWidth > video.videoHeight ? lockLandscape() : unlockOrient()); };
+const onFsChange = () => { if (!fsEl()) { unlockOrient(); setRot(false); } else if (phoneLike() && video.videoWidth) (video.videoWidth > video.videoHeight ? lockLandscape() : unlockOrient()); };
 document.addEventListener('fullscreenchange', onFsChange);
 document.addEventListener('webkitfullscreenchange', onFsChange);
 video.addEventListener('loadedmetadata', () => { if (fsEl() && phoneLike()) (video.videoWidth > video.videoHeight ? lockLandscape() : unlockOrient()); });   // 全屏里换集 / 换源
@@ -2870,11 +2893,11 @@ if (fineCursor) {
 }
 
 // Timeline: hover → time + frame, press/drag → seek.
-const tlFrac = e => { const r = tl.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
+const tlFrac = e => { const r = rotR(tl); return Math.min(1, Math.max(0, (rotP(e).x - r.left) / r.width)); };
 function hoverAt(e) { showAt(tlFrac(e)); }
 function showAt(f) {
   if (!isVodTime()) return;
-  const t = f * vdur(video), r = tl.getBoundingClientRect();
+  const t = f * vdur(video), r = rotR(tl);
   tl.style.setProperty('--h', f * 100 + '%');
   tip.hidden = false;
   $('span', tip).textContent = fmtT(t);
@@ -2928,14 +2951,14 @@ if (!fineCursor) {
   const EDGE = 26;
   video.addEventListener('pointerdown', e => {
     if (player.classList.contains('locked') || !$('.plist').hidden) return;
-    const r = video.getBoundingClientRect();
-    if (e.clientX - r.left < EDGE || r.right - e.clientX < EDGE || r.bottom - e.clientY < 80) return;
-    g = { id: e.pointerId, x: e.clientX, y: e.clientY, r, axis: '', left: e.clientX - r.left < r.width / 2, t0: video.currentTime, b0: bright, v0: video.volume, target: 0 };
+    const r = rotR(video), P = rotP(e);
+    if (P.x - r.left < EDGE || r.right - P.x < EDGE || r.bottom - P.y < 80) return;
+    g = { id: e.pointerId, x: P.x, y: P.y, r, axis: '', left: P.x - r.left < r.width / 2, t0: video.currentTime, b0: bright, v0: video.volume, target: 0 };
     video.setPointerCapture(e.pointerId);
   });
   video.addEventListener('pointermove', e => {
     if (!g || e.pointerId !== g.id) return;
-    const dx = e.clientX - g.x, dy = e.clientY - g.y;
+    const P = rotP(e), dx = P.x - g.x, dy = P.y - g.y;
     if (!g.axis && Math.max(Math.abs(dx), Math.abs(dy)) > 10) g.axis = Math.abs(dx) > Math.abs(dy) ? (isVodTime() ? 'x' : 'none') : 'y';
     if (g.axis === 'x') {
       const d = vdur(video), span = Math.min(Math.max(d * .35, 60), 600);
@@ -2963,7 +2986,7 @@ if (!fineCursor) {
   video.addEventListener('click', e => {
     if (player.classList.contains('locked')) return showLockBtn();
     if (!$('.plist').hidden) return;
-    const r = video.getBoundingClientRect(), f = (e.clientX - r.left) / r.width, now = performance.now();
+    const r = rotR(video), f = (rotP(e).x - r.left) / r.width, now = performance.now();
     if (now - lastTap.t < 300 && Math.abs(f - lastTap.f) < .25) {
       clearTimeout(tapTimer); lastTap.t = 0;
       if (f < .38) skip(-10); else if (f > .62) skip(10); else togglePlay();
