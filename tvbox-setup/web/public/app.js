@@ -2517,23 +2517,36 @@ video.addEventListener('timeupdate', () => {
 let ask = null;
 const skipOn = () => localStorage.autoSkip !== '0';
 function paintSkip() { const b = $('[data-act=skipt]'); if (!b) return; b.classList.toggle('on', skipOn()); setL('skipt', skipOn() ? '自动跳过' : '不跳过'); }
+// 开关关着时一个请求都不发、定时器全撤; 中途打开时才补问, 已经拿到的结果 (ask 里) 留着复用, 不重复问。
+// ad: 片源拼进 m3u8 的广告, 不需要选集门槛; fp: 音频指纹 (片头 / 片尾), 要 3 集以上才有「相邻一集」可比。
 function skipInit() {
-  clearTimeout(ask?.timer);
+  skipStop();
   const e = cur.eps[cur.ep], n = cur.eps[cur.ep + 1] || cur.eps[cur.ep - 1];
-  const ok = cur.kind === 'vod' && !cur.d.local && n && cur.eps.length >= 3 && /^https?:/.test(e.url) && /^https?:/.test(n.url);
+  const ok = cur.kind === 'vod' && !cur.d.local && /^https?:/.test(e.url);
   $('[data-act=skipt]').hidden = !ok;
-  ask = ok ? { tok: Math.random(), head: [], tail: [], mid: [], done: new Set(), tries: 0, timer: 0 } : null;
-  if (ok) { paintSkip(); const tok = ask.tok; adFetch(tok, e.url); ask.timer = setTimeout(() => skipFetch(tok, e.url, n.url), 8000); }   // 先让正片稳稳播起来, 再去问
+  ask = ok ? { tok: Math.random(), u: e.url, n: cur.eps.length >= 3 && n && /^https?:/.test(n.url) ? n.url : '', head: [], tail: [], mid: [], done: new Set(), adGot: false, adBusy: false, adTries: 0, adT: 0, fpGot: false, tries: 0, timer: 0, t0: Date.now() } : null;
+  if (ok) { paintSkip(); skipKick(); }
 }
-// 片源自己拼进 m3u8 的广告 (另一个目录下的短块): 服务端只读播放列表就能认出来, 立刻问, 不用等音频指纹
-function adFetch(tok, u) {
-  api('adsegs', { u }, null).then(r => { if (ask && ask.tok === tok) ask.mid = r?.ads || []; }).catch(() => {});
+function skipStop() { if (ask) { clearTimeout(ask.timer); clearTimeout(ask.adT); ask.timer = ask.adT = 0; } }
+function skipKick() {
+  if (!ask || !skipOn()) return;
+  const A = ask, tok = A.tok;
+  if (!A.adGot && !A.adBusy) {
+    A.adBusy = true;
+    api('adsegs', { u: A.u }, null).then(r => { if (ask?.tok === tok) { A.mid = r?.ads || []; A.adGot = !r?.err; } }, () => {})
+      .finally(() => { A.adBusy = false; if (ask?.tok === tok && !A.adGot && ++A.adTries < 3 && !A.adT) A.adT = setTimeout(() => { A.adT = 0; skipKick(); }, 5000); });
+  }
+  if (A.n && !A.fpGot && !A.timer && A.tries < 40) A.timer = setTimeout(() => skipFetch(tok), Math.max(0, 8000 - (Date.now() - A.t0)));   // 先让正片稳稳播起来, 再去问
 }
-function skipFetch(tok, u, n) {
-  api('skipmarks', { u, n }, null).then(r => {
-    if (!ask || ask.tok !== tok) return;
-    if (r.status === 'ready') { ask.head = r.head || []; ask.tail = r.tail || []; }
-    if (r.status === 'pending' && ++ask.tries < 40) ask.timer = setTimeout(() => skipFetch(tok, u, n), 15000);
+function skipFetch(tok) {
+  const A = ask; if (!A || A.tok !== tok) return;
+  A.timer = 0;
+  if (!skipOn()) return;
+  api('skipmarks', { u: A.u, n: A.n }, null).then(r => {
+    if (ask?.tok !== tok) return;
+    if (r.status === 'ready') { A.head = r.head || []; A.tail = r.tail || []; A.fpGot = true; }
+    else if (r.status === 'none') A.fpGot = true;     // 算不了 (太短 / 没音轨 / 排队满): 不再追问
+    else if (r.status === 'pending' && ++A.tries < 40 && skipOn()) A.timer = setTimeout(() => skipFetch(tok), 15000);
   }).catch(() => {});
 }
 video.addEventListener('timeupdate', () => {
@@ -2581,7 +2594,7 @@ function togglePlist(open = $('.plist').hidden) {
   }
 }
 function closePlayer() {
-  clearTimeout(ask?.timer); ask = null;
+  skipStop(); ask = null;
   if (hls) { hls.destroy(); hls = null; }
   pvReset(); playingSrc = null;
   video.pause(); video.removeAttribute('src'); video.load();
@@ -2618,7 +2631,7 @@ player.addEventListener('click', e => {
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); paintStar(liveFavs.has(c.url)); return; }
   if (act === 'more') { sysClose(); const m = $('.pmore'); m.hidden = !m.hidden; e.target.closest('[data-act]').setAttribute('aria-expanded', !m.hidden); return; }
   if (act === 'rate') return cycleRate();
-  if (act === 'skipt') { localStorage.autoSkip = skipOn() ? '0' : '1'; paintSkip(); return toast(skipOn() ? '已开启自动跳过片头片尾' : '已关闭自动跳过'); }
+  if (act === 'skipt') { localStorage.autoSkip = skipOn() ? '0' : '1'; paintSkip(); if (skipOn()) skipKick(); else skipStop(); return toast(skipOn() ? '已开启自动跳过片头片尾和广告' : '已关闭自动跳过'); }
   if (act === 'fs') return toggleFs();
   if (act === 'cast') return sysToggle();
   if (act === 'lock') return setLock(true);

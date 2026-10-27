@@ -855,15 +855,18 @@ async function probeStream(u) {
 }
 
 // ---- /api/adsegs?u=: 片源自己插进 m3u8 的广告 ----
-// 有的源把贴片广告直接拼进播放列表：广告分片和正片分片之间隔着 #EXT-X-DISCONTINUITY，而且广告放在另一个目录 / 域名下 (每集都是同一条)。
-// 按 DISCONTINUITY 切块，正片块占绝大部分时长、在同一个目录；目录不同的短块就是广告，返回它们在整段里的 [开始, 结束] 秒。
+// 有的源把贴片广告直接拼进播放列表：广告分片和正片分片之间隔着 #EXT-X-DISCONTINUITY。两种形态:
+//   A. 广告放在另一个目录 / 域名下 (魔都、樱花、量子等)  B. 广告和正片同目录，但是夹在两大段正片之间的一小块 (非凡、电影天堂等)
+// 按 DISCONTINUITY 切块，返回广告块在整段里的 [开始, 结束] 秒。
 // 只读播放列表文本，不下载任何媒体。结果缓存 30 分钟。
-const adCache = new Map();
-async function adSegments(u) {
+const adCache = new Map(), adBusy = new Map();
+// 同一条地址同时来多个请求只读一次播放列表
+const adSegments = u => adBusy.get(u) || (p => (adBusy.set(u, p), p.finally(() => adBusy.delete(u))))(adSegmentsRaw(u));
+async function adSegmentsRaw(u) {
   if (!/^https?:\/\//i.test(u)) return { ads: [] };
   const hit = adCache.get(u);
   if (hit && Date.now() - hit.at < 1800e3) return hit.v;
-  const sig = AbortSignal.timeout(8000);
+  const sig = AbortSignal.timeout(12000);
   const text = async url => { const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: sig }); if (r.status >= 400) throw new Error('HTTP ' + r.status); return { body: (await r.text()).slice(0, 2e6), url: r.url }; };
   let v = { ads: [] };
   try {
@@ -892,8 +895,11 @@ async function adSegments(u) {
       const [main, mainDur] = [...per.entries()].sort((a, b) => b[1] - a[1])[0] || ['', 0];
       if (mainDur >= total * .7) {
         let t = 0; const ads = [];
-        for (const b of blocks) {
-          if (b.segs.length && b.dur <= 120 && !b.dirs.has(main)) {
+        // 同目录的广告 (非凡 / 电影天堂 / 量子等): 夹在两大段正片中间的一小块 (≤45 秒, 两边的块都至少 120 秒且是它的 4 倍以上);
+        // 每 20 秒一个断点的源块块都短, 邻居不够长, 不会被误判
+        const sameDir = i => { const b = blocks[i], nb = [blocks[i - 1], blocks[i + 1]].filter(Boolean); return b.dur <= 45 && nb.length && nb.every(x => x.dur >= Math.max(120, 4 * b.dur)); };
+        for (const [i, b] of blocks.entries()) {
+          if (b.segs.length && ((b.dur <= 120 && !b.dirs.has(main)) || sameDir(i))) {
             const last = ads.at(-1);
             if (last && Math.abs(last[1] - t) < .5) last[1] = t + b.dur; else ads.push([t, t + b.dur]);
           }
@@ -902,7 +908,7 @@ async function adSegments(u) {
         if (ads.reduce((a, x) => a + x[1] - x[0], 0) <= total * .25) v = { ads: ads.map(x => [Math.round(x[0] * 10) / 10, Math.round(x[1] * 10) / 10]) };
       }
     }
-  } catch { return { ads: [] }; }   // 取不到就当没有，不缓存，下次还能再试
+  } catch { return { ads: [], err: 1 }; }   // 取不到: 不缓存，带 err 让客户端过几秒再试
   adCache.set(u, { at: Date.now(), v });
   if (adCache.size > 300) adCache.delete(adCache.keys().next().value);
   return v;
