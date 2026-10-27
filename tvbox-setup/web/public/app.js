@@ -392,7 +392,8 @@ async function copyText(t) {
 async function shareNow(hash, title = '') {
   const url = shareUrl(hash);
   // 桌面浏览器的系统分享面板不稳 (点了会卡死甚至整个浏览器退出)：只在触屏设备上用，桌面直接复制链接
-  if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+  // 电脑 Chrome 的「模拟移动设备」也是触屏 UA，同样会卡：真机的 maxTouchPoints 是 5 以上，模拟器只有 1，据此排除
+  if (navigator.share && matchMedia('(pointer: coarse)').matches && navigator.maxTouchPoints > 1) {
     try {
       await navigator.share({ ...(title ? { title, text: title } : {}), url });
       return;
