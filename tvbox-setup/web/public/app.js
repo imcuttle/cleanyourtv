@@ -2480,7 +2480,7 @@ function load(url, startAt, viaProxy, isLocal, rebuild = false, native = false) 
     // 卡顿 (缓冲见底 / 跳过空洞 / 分片加载失败) 之后, 浏览器里的音频时间轴会错位, 一直「电流声」, 拖进度条也没用, 刷新才好。
     // 和上面断点累积是同一个病根: 卡顿一过 (恢复播放 2 秒后) 同样悄悄重建一次, 回到当前位置接着放。
     hls.on(Hls.Events.FRAG_CHANGED, () => {
-      if (me.dirty && me === hls && Date.now() - me.dirty > 1500 && !video.paused && !video.seeking && !isLocal && cur?.kind === 'vod' && Date.now() - lastRebuild > 30e3) {
+      if (me.dirty && me === hls && Date.now() - me.dirty > 1500 && !video.paused && !video.seeking && !isLocal && cur?.kind === 'vod' && Date.now() - lastRebuild > 60e3) {
         lastRebuild = Date.now();
         return load(url, video.currentTime + 0.15, viaProxy, isLocal, true);
       }
@@ -2523,6 +2523,24 @@ video.addEventListener('playing', () => {
   if (ms > 300) { stalls.push(Date.now()); stalls = stalls.filter(t => Date.now() - t < 90e3); }
   if (ms > 800 || stalls.length >= 3) { hls.dirty = Date.now(); stalls = []; }
 });
+// 播着播着死在原地 (声音和画面一起僵住, 刷新才好): 实测 (魔都 JOJO 在 113.5 秒) 是这个源的一段音频缺了, 音频缓冲到 113.5、视频已缓冲到 117.1,
+// 浏览器的可播放区间就停在音频空洞前; hls.js 只微调 3 次就放弃, hls 自己闲在 IDLE 也不会再去取。拖进度条拖回去也一样会再卡在这里。
+// 判定: 暂停之外的「时间几乎不动 + hls 没在加载 + 数据不够播」超过 4 秒。先看音频 / 视频缓冲谁先断:
+//   差 1 秒以上 → 跳过空洞 (到较长那条缓冲的末尾), 丢掉的只是那一小段缺声音的画面; 否则 → 在当前位置悄悄重建播放链路。
+setInterval(() => {
+  const st = hls?.streamController?.state;
+  if (!hls || !cur || cur.kind !== 'vod' || player.hidden || video.paused || video.ended || !lastLoad || lastLoad.isLocal || st !== 'IDLE' || video.readyState >= 3) { wdAt = 0; return; }
+  const t = video.currentTime;
+  if (!wdAt || Math.abs(t - wdT) > 0.6) { wdAt = Date.now(); wdT = t; return; }   // 0.6: hls.js 的微调每次挪 0.1 秒, 不算在动
+  const d = vdur(video);
+  if (Date.now() - wdAt < 4000 || (d > 0 && t >= d - 1)) return;
+  wdAt = 0;
+  const sb = hls.bufferController?.sourceBuffer || {}, endOf = k => { const b = sb[k]?.buffered; let e = 0; for (let i = 0; b && i < b.length; i++) if (b.start(i) <= t + 0.6 && b.end(i) > e) e = b.end(i); return e; };
+  const ae = endOf('audio'), ve = endOf('video'), far = Math.max(ae, ve);
+  if (ae && ve && Math.abs(ae - ve) > 1) { hls.errs?.push([Math.round(t), 'avGapJump', 0]); video.currentTime = far + 0.3; return; }
+  if (Date.now() - lastRebuild > 10e3) { lastRebuild = Date.now(); load(lastLoad.url, t, lastLoad.viaProxy, lastLoad.isLocal, true); }
+}, 1000);
+let wdAt = 0, wdT = 0;
 // 排查用: 控制台里运行 avDiag(), 听到电流声时看一眼 音频 / 视频 的缓冲区是否对得上、有没有空洞、hls 报过什么
 window.avDiag = () => { const sb = hls?.bufferController?.sourceBuffer || {}, r = b => b ? [...Array(b.length).keys()].map(i => [+b.start(i).toFixed(2), +b.end(i).toFixed(2)]) : null;
   return { t: +video.currentTime.toFixed(2), rate: video.playbackRate, audio: r(sb.audio?.buffered), video: r(sb.video?.buffered), errors: hls?.errs, dirty: !!hls?.dirty, lastRebuild: lastRebuild && Math.round((Date.now() - lastRebuild) / 1000) + 's ago' }; };
