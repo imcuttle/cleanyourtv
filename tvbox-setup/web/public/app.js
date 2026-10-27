@@ -2511,7 +2511,7 @@ video.addEventListener('timeupdate', () => {
 });
 // ---------- 自动跳过片头 / 片尾 / 每集重复的广告 ----------
 // 服务端拿相邻两集的音频做指纹, 找出两集里一模一样的片段 (片头曲、片尾曲、每集都插的同一条广告), 算好后缓存。
-// 这里只管问结果、播放到那一段时自动跳过 (每一段只跳一次, 跳完想回看不会再拦)。只有点播多集、普通播放器用; 沉浸看片不用。
+// 选集少于 3 集不做。这里只管问结果、播放到那一段时自动跳过 (每一段只跳一次, 跳完想回看不会再拦)。只有点播多集、普通播放器用; 沉浸看片不用。
 let ask = null;
 const skipOn = () => localStorage.autoSkip !== '0';
 function paintSkip() { const b = $('[data-act=skipt]'); if (!b) return; b.classList.toggle('on', skipOn()); setL('skipt', skipOn() ? '自动跳过' : '不跳过'); }
@@ -2520,20 +2520,20 @@ function skipInit() {
   const e = cur.eps[cur.ep], n = cur.eps[cur.ep + 1] || cur.eps[cur.ep - 1];
   const ok = cur.kind === 'vod' && !cur.d.local && n && cur.eps.length >= 3 && /^https?:/.test(e.url) && /^https?:/.test(n.url);
   $('[data-act=skipt]').hidden = !ok;
-  ask = ok ? { tok: Math.random(), head: [], tail: [], mid: [], done: new Set(), tries: 0, timer: 0 } : null;
+  ask = ok ? { tok: Math.random(), head: [], tail: [], done: new Set(), tries: 0, timer: 0 } : null;
   if (ok) { paintSkip(); const tok = ask.tok; ask.timer = setTimeout(() => skipFetch(tok, e.url, n.url), 8000); }   // 先让正片稳稳播起来, 再去问
 }
 function skipFetch(tok, u, n) {
   api('skipmarks', { u, n }, null).then(r => {
     if (!ask || ask.tok !== tok) return;
-    if (r.status === 'ready') { ask.head = r.head || []; ask.tail = r.tail || []; ask.mid = r.mid || []; }
+    if (r.status === 'ready') { ask.head = r.head || []; ask.tail = r.tail || []; }
     if (r.status === 'pending' && ++ask.tries < 40) ask.timer = setTimeout(() => skipFetch(tok, u, n), 15000);
   }).catch(() => {});
 }
 video.addEventListener('timeupdate', () => {
-  if (!ask || !skipOn() || (!ask.head.length && !ask.tail.length && !ask.mid.length) || scrubbing || video.seeking) return;
+  if (!ask || !skipOn() || (!ask.head.length && !ask.tail.length) || scrubbing || video.seeking) return;
   const t = video.currentTime, d = vdur(video);
-  for (const [name, list] of [['片头', ask.head], ['广告', ask.mid], ['片尾', ask.tail]]) for (const r of list) {
+  for (const [name, list] of [['片头', ask.head], ['片尾', ask.tail]]) for (const r of list) {
     const id = name + r[0];
     if (ask.done.has(id) || t < r[0] - 0.3 || t >= r[1] - 2) continue;
     ask.done.add(id);

@@ -11,7 +11,6 @@ const { spawn } = require('child_process');
 const SR = 8000, N = 2048, HOP = 512, SEC = HOP / SR;      // 一帧 256ms，步长 64ms (步长小才不怕两集的帧没对齐)
 const BANDS = 33, HEAD_WIN = 480, TAIL_WIN = 360;
 const MIN_RUN = 10, GAP = 12, MAX_DIST = 9, MIN_RMS = 40;
-const FULL_MAX = 6000, MID_LAG = Math.round(90 / SEC), MID_MIN = 8, MID_MAX = 150;   // 整集比对: 最长 100 分钟; 片中广告在两集里的位置差不超过 90 秒, 长 8~150 秒
 
 // ---------- 指纹 ----------
 const win = new Float64Array(N).map((_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1)));
@@ -76,10 +75,9 @@ function toRanges(runs) {
   return keep.map(r => ({ a: [r.i0 * SEC, (r.i1 + 1) * SEC + (N - HOP) / SR], b: [(r.i0 - r.lag) * SEC, (r.i1 - r.lag + 1) * SEC + (N - HOP) / SR] }));
 }
 // 在两段指纹里找重复的片段 → [{ a:[s,e], b:[s,e] }] (秒，相对各自窗口起点)。每条偏移线都扫: 适合几分钟的窗口
-// maxLag: 只扫 ±maxLag 帧内的偏移 (整集比对用: 广告在两集里的位置相近, 不用把 n² 全扫一遍)
-async function common(A, B, minRun = MIN_RUN, maxLag = Infinity) {
+async function common(A, B, minRun = MIN_RUN) {
   const runs = [];
-  for (let lag = Math.max(-(B.fp.length - 1), -maxLag); lag < A.fp.length && lag <= maxLag; lag++) {
+  for (let lag = -(B.fp.length - 1); lag < A.fp.length; lag++) {
     if ((lag & 15) === 0) await tick();
     scanLag(A, B, lag, runs, minRun);
   }
@@ -112,55 +110,33 @@ module.exports = function ({ ffmpeg, ua, file }) {
     const p = spawn(ffmpeg, [...base, '-loglevel', 'error', ...(ss > 0 ? ['-ss', String(Math.floor(ss))] : []), '-t', String(t), '-i', u, '-vn', '-sn', '-ac', '1', '-ar', String(SR), '-f', 's16le', '-'],
       { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     try { os.setPriority(p.pid, 15); } catch {}   // 后台活, 让位给正常播放 / 请求
-    const chunks = []; const to = setTimeout(() => p.kill('SIGKILL'), t > 1000 ? 900000 : 240000);
+    const chunks = []; const to = setTimeout(() => p.kill('SIGKILL'), 240000);
     p.stdout.on('data', d => chunks.push(d));
     p.on('close', () => { clearTimeout(to); const b = Buffer.concat(chunks); b.length > SR * 2 * 30 ? ok(b) : bad(new Error('no audio')); });
     p.on('error', e => { clearTimeout(to); bad(e); });
   });
 
-  // 一对相邻两集 → 各自的片头 / 片尾 / 片中广告区间。整集音频下载一次，片头 / 片尾 / 片中都从同一份指纹里切。
-  const sub = (F, f0, f1) => ({ fp: F.fp.subarray(f0, f1), ok: F.ok.subarray(f0, f1) });
-  const overlap = (x, list) => list.some(y => x[0] < y[1] && y[0] < x[1]);
+  // 一对相邻两集 → 各自的片头 / 片尾区间
   async function pair(u, v) {
     const [du, dv] = await Promise.all([duration(u), duration(v)]);
     if (du < 300 || dv < 300) return null;                 // 太短 (预告 / 短片) 不处理
     const hw = Math.min(HEAD_WIN, du * .4, dv * .4), tw = Math.min(TAIL_WIN, du * .3, dv * .3);
-    const out = { u: { dur: du, head: [], tail: [], mid: [] }, v: { dur: dv, head: [], tail: [], mid: [] } };
+    const out = { u: { dur: du, head: [], tail: [] }, v: { dur: dv, head: [], tail: [] } };
     const round = a => a.map(x => [Math.round(x[0] * 10) / 10, Math.round(x[1] * 10) / 10]);
-    const done = () => { for (const k of ['u', 'v']) for (const f of ['head', 'tail', 'mid']) out[k][f] = round(out[k][f]); };
-    const full = du <= FULL_MAX && dv <= FULL_MAX;
-    let FU, FV, hu, hv, tu, tv, su, sv;
-    if (full) {
-      FU = await fingerprint(await pcm(u, 0, du + 30)); FV = await fingerprint(await pcm(v, 0, dv + 30));
-      const hf = Math.floor(hw / SEC);
-      hu = sub(FU, 0, hf); hv = sub(FV, 0, hf);
-      const fu = Math.max(0, Math.floor((du - tw) / SEC)), fv = Math.max(0, Math.floor((dv - tw) / SEC));
-      tu = sub(FU, fu, FU.fp.length); tv = sub(FV, fv, FV.fp.length); su = fu * SEC; sv = fv * SEC;
-    } else {
-      const [pu, pv] = await Promise.all([pcm(u, 0, hw), pcm(v, 0, hw)]);
-      hu = await fingerprint(pu); hv = await fingerprint(pv);
-      su = du - tw; sv = dv - tw;
-      const [qu, qv] = await Promise.all([pcm(u, su, tw), pcm(v, sv, tw)]);
-      tu = await fingerprint(qu); tv = await fingerprint(qv);
-    }
-    for (const r of await common(hu, hv)) {
+    const done = () => { for (const k of ['u', 'v']) for (const f of ['head', 'tail']) out[k][f] = round(out[k][f]); };
+    const [hu, hv] = await Promise.all([pcm(u, 0, hw), pcm(v, 0, hw)]);
+    for (const r of await common(await fingerprint(hu), await fingerprint(hv))) {
       if (r.a[0] > hw - 5 || r.a[1] - r.a[0] > 300) continue;
       out.u.head.push(r.a); out.v.head.push(r.b);
     }
-    for (const r of await common(tu, tv)) {
+    const su = du - tw, sv = dv - tw;
+    const [tu, tv] = await Promise.all([pcm(u, su, tw), pcm(v, sv, tw)]);
+    for (const r of await common(await fingerprint(tu), await fingerprint(tv))) {
       if (r.a[1] - r.a[0] > 300) continue;
       const a = [su + r.a[0], su + r.a[1]], b = [sv + r.b[0], sv + r.b[1]];
       if (du - a[1] < 20) a[1] = du;                          // 贴着结尾: 直接跳到片尾 → 触发下一集
       if (dv - b[1] < 20) b[1] = dv;
       out.u.tail.push(a); out.v.tail.push(b);
-    }
-    if (full) {                                             // 片中广告: 两集里位置相近、一模一样的一段
-      for (const r of await common(FU, FV, MID_MIN, MID_LAG)) {
-        const len = r.a[1] - r.a[0];
-        if (len < MID_MIN || len > MID_MAX) continue;
-        if (overlap(r.a, [...out.u.head, ...out.u.tail]) || overlap(r.b, [...out.v.head, ...out.v.tail])) continue;
-        out.u.mid.push(r.a); out.v.mid.push(r.b);
-      }
     }
     done();
     return out;
@@ -172,7 +148,7 @@ module.exports = function ({ ffmpeg, ua, file }) {
     running = true;
     const { u, n, k } = queue.shift(), nk = key(n);
     pair(u, n).then(r => {
-      if (r) { put(k, { dur: r.u.dur, head: r.u.head, tail: r.u.tail, mid: r.u.mid }); put(nk, { dur: r.v.dur, head: r.v.head, tail: r.v.tail, mid: r.v.mid }); }
+      if (r) { put(k, { dur: r.u.dur, head: r.u.head, tail: r.u.tail }); put(nk, { dur: r.v.dur, head: r.v.head, tail: r.v.tail }); }
       else put(k, { none: 1, at: Date.now() });                 // 太短 / 没音轨: 一周内不再试
     }).catch(() => { retry.set(k, Date.now()); }).finally(() => { busy.delete(k); running = false; pump(); });
   }
@@ -183,7 +159,7 @@ module.exports = function ({ ffmpeg, ua, file }) {
     if (!ffmpeg || !/^https?:\/\//.test(u) || !/^https?:\/\//.test(n || '')) return { status: 'none' };
     const k = key(u), hit = get(k);
     if (hit?.none && Date.now() - hit.at < 7 * 86400e3) return { status: 'none' };
-    if (hit && !hit.none && hit.mid) return { status: 'ready', head: hit.head, tail: hit.tail, mid: hit.mid, dur: hit.dur };   // 没有 mid 字段的是旧缓存 (还没找过片中广告), 重算
+    if (hit && !hit.none) return { status: 'ready', head: hit.head, tail: hit.tail, dur: hit.dur };
     if (busy.has(k)) return { status: 'pending' };
     if (Date.now() - (retry.get(k) || 0) < 600e3) return { status: 'none' };
     if (queue.length >= 8) return { status: 'none' };             // 排队太多就先不接新的
