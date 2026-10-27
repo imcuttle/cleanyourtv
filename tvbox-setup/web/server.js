@@ -854,6 +854,60 @@ async function probeStream(u) {
   return run;
 }
 
+// ---- /api/adsegs?u=: 片源自己插进 m3u8 的广告 ----
+// 有的源把贴片广告直接拼进播放列表：广告分片和正片分片之间隔着 #EXT-X-DISCONTINUITY，而且广告放在另一个目录 / 域名下 (每集都是同一条)。
+// 按 DISCONTINUITY 切块，正片块占绝大部分时长、在同一个目录；目录不同的短块就是广告，返回它们在整段里的 [开始, 结束] 秒。
+// 只读播放列表文本，不下载任何媒体。结果缓存 30 分钟。
+const adCache = new Map();
+async function adSegments(u) {
+  if (!/^https?:\/\//i.test(u)) return { ads: [] };
+  const hit = adCache.get(u);
+  if (hit && Date.now() - hit.at < 1800e3) return hit.v;
+  const sig = AbortSignal.timeout(8000);
+  const text = async url => { const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: sig }); if (r.status >= 400) throw new Error('HTTP ' + r.status); return { body: (await r.text()).slice(0, 2e6), url: r.url }; };
+  let v = { ads: [] };
+  try {
+    let { body, url } = await text(u);
+    for (let hop = 0; hop < 2 && /#EXT-X-STREAM-INF/.test(body); hop++) {
+      const lines = body.split(/\r?\n/).map(l => l.trim()), i = lines.findIndex(l => l.startsWith('#EXT-X-STREAM-INF'));
+      const next = lines.slice(i + 1).find(l => l && !l.startsWith('#'));
+      if (!next) break;
+      ({ body, url } = await text(new URL(next, url).toString()));
+    }
+    const blocks = [{ segs: [] }]; let dur = 0, pending = 0;
+    const lines = body.split(/\r?\n/).map(l => l.trim());
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if (l === '#EXT-X-DISCONTINUITY') { if (blocks.at(-1).segs.length) blocks.push({ segs: [] }); continue; }
+      const m = /^#EXTINF:([\d.]+)/.exec(l);
+      if (m) pending = +m[1];
+      else if (pending && l && !l.startsWith('#')) {
+        const seg = new URL(l, url); seg.search = ''; seg.hash = '';
+        blocks.at(-1).segs.push({ d: pending, dir: seg.origin + seg.pathname.replace(/[^/]*$/, '') }); pending = 0;
+      }
+    }
+    if (blocks.length > 1) {
+      const per = new Map(); let total = 0;
+      for (const b of blocks) { b.dur = b.segs.reduce((a, s) => a + s.d, 0); total += b.dur; b.dirs = new Set(b.segs.map(s => s.dir)); for (const s of b.segs) per.set(s.dir, (per.get(s.dir) || 0) + s.d); }
+      const [main, mainDur] = [...per.entries()].sort((a, b) => b[1] - a[1])[0] || ['', 0];
+      if (mainDur >= total * .7) {
+        let t = 0; const ads = [];
+        for (const b of blocks) {
+          if (b.segs.length && b.dur <= 120 && !b.dirs.has(main)) {
+            const last = ads.at(-1);
+            if (last && Math.abs(last[1] - t) < .5) last[1] = t + b.dur; else ads.push([t, t + b.dur]);
+          }
+          t += b.dur;
+        }
+        if (ads.reduce((a, x) => a + x[1] - x[0], 0) <= total * .25) v = { ads: ads.map(x => [Math.round(x[0] * 10) / 10, Math.round(x[1] * 10) / 10]) };
+      }
+    }
+  } catch { return { ads: [] }; }   // 取不到就当没有，不缓存，下次还能再试
+  adCache.set(u, { at: Date.now(), v });
+  if (adCache.size > 300) adCache.delete(adCache.keys().next().value);
+  return v;
+}
+
 // ---- /api/speed?u=: 这条片源的网络通不通、快不快 (播放页「切换源」里每个源一条) ----
 // 取播放列表 (m3u8 → 主列表就挑第一条码流) → 下第一个分片的前 256KB，量「首包时间」和「下载速度」；mp4 直链直接读开头 256KB。
 // 6 秒内没结果算不通。结果缓存 45 秒，同一地址同时来多个请求只测一次。
@@ -3173,6 +3227,7 @@ async function api(route, q, res, req) {
   if (route === 'speed') return send(res, 200, await speedOf(q.get('u') || '', q.get('fresh') === '1'));
   // 自动识别片头 / 片尾 / 每集重复的广告: 立刻返回，没算完是 pending，客户端过一会儿再问
   if (route === 'skipmarks') return send(res, 200, await rpc('skipmarks', { u: q.get('u') || '', n: q.get('n') || '' }, 5000).catch(() => ({ status: 'none' })));
+  if (route === 'adsegs') return send(res, 200, await adSegments(q.get('u') || ''));
   if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
   if (route === 'local/vod') {
     const host = /^([\w-]+\.)*[\w-]+(:\d+)?$|^\[[\da-f:]+\](:\d+)?$/i.test(req.headers.host || '') ? req.headers.host : `${lanIps()[0] || '127.0.0.1'}:${PORT}`;

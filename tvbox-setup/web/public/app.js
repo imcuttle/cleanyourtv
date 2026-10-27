@@ -2522,8 +2522,12 @@ function skipInit() {
   const e = cur.eps[cur.ep], n = cur.eps[cur.ep + 1] || cur.eps[cur.ep - 1];
   const ok = cur.kind === 'vod' && !cur.d.local && n && cur.eps.length >= 3 && /^https?:/.test(e.url) && /^https?:/.test(n.url);
   $('[data-act=skipt]').hidden = !ok;
-  ask = ok ? { tok: Math.random(), head: [], tail: [], done: new Set(), tries: 0, timer: 0 } : null;
-  if (ok) { paintSkip(); const tok = ask.tok; ask.timer = setTimeout(() => skipFetch(tok, e.url, n.url), 8000); }   // 先让正片稳稳播起来, 再去问
+  ask = ok ? { tok: Math.random(), head: [], tail: [], mid: [], done: new Set(), tries: 0, timer: 0 } : null;
+  if (ok) { paintSkip(); const tok = ask.tok; adFetch(tok, e.url); ask.timer = setTimeout(() => skipFetch(tok, e.url, n.url), 8000); }   // 先让正片稳稳播起来, 再去问
+}
+// 片源自己拼进 m3u8 的广告 (另一个目录下的短块): 服务端只读播放列表就能认出来, 立刻问, 不用等音频指纹
+function adFetch(tok, u) {
+  api('adsegs', { u }, null).then(r => { if (ask && ask.tok === tok) ask.mid = r?.ads || []; }).catch(() => {});
 }
 function skipFetch(tok, u, n) {
   api('skipmarks', { u, n }, null).then(r => {
@@ -2533,13 +2537,13 @@ function skipFetch(tok, u, n) {
   }).catch(() => {});
 }
 video.addEventListener('timeupdate', () => {
-  if (!ask || !skipOn() || (!ask.head.length && !ask.tail.length) || scrubbing || video.seeking) return;
+  if (!ask || !skipOn() || (!ask.head.length && !ask.tail.length && !ask.mid.length) || scrubbing || video.seeking) return;
   const t = video.currentTime, d = vdur(video);
-  for (const [name, list] of [['片头', ask.head], ['片尾', ask.tail]]) for (const r of list) {
+  for (const [name, list] of [['片头', ask.head], ['广告', ask.mid], ['片尾', ask.tail]]) for (const r of list) {
     const id = name + r[0];
     if (ask.done.has(id) || t < r[0] - 0.3 || t >= r[1] - 2) continue;
     ask.done.add(id);
-    video.currentTime = r[1] >= d - 1 ? d : r[1];
+    duckFlash(); video.currentTime = r[1] >= d - 1 ? d : r[1];   // 跳的瞬间先静音一小会儿, 不要「啪」一声
     return toast('已跳过' + name);
   }
 });
