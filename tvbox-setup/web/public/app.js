@@ -2435,6 +2435,7 @@ function hlsRecover(h, data) {
   return false;
 }
 let loadMuteT = 0, flashT = 0, lastRebuild = 0;
+const STALL_ERR = /^(bufferStalledError|bufferSeekOverHole|bufferNudgeOnStall|bufferAppendError|fragLoadError|fragLoadTimeOut|fragParsingError)$/;
 const REBUILD_CC = 6;   // 跨过多少个断点后重建一次 (断点二十来秒一个, 约 2 分钟); 没有断点的源永远不会触发
 // 跨过 #EXT-X-DISCONTINUITY (不少采集源每二十来秒就断一次): 音频解码器重开, 会蹦一下「电流声」。
 // 和拖动时一样: 先静音一小会儿再恢复, 不动音量, 也不改动用户的静音设置。
@@ -2476,6 +2477,14 @@ function load(url, startAt, viaProxy, isLocal, rebuild = false, native = false) 
     // 在断点处 (本来就是不连续的位置) 静音、销毁并重建播放链路, 回到当前位置接着放, 把偏差清零。
     let cc = null, crossed = 0;
     const me = hls;
+    // 卡顿 (缓冲见底 / 跳过空洞 / 分片加载失败) 之后, 浏览器里的音频时间轴会错位, 一直「电流声」, 拖进度条也没用, 刷新才好。
+    // 和上面断点累积是同一个病根: 卡顿一过 (恢复播放 2 秒后) 同样悄悄重建一次, 回到当前位置接着放。
+    hls.on(Hls.Events.FRAG_CHANGED, () => {
+      if (me.dirty && me === hls && Date.now() - me.dirty > 1500 && !video.paused && !video.seeking && !isLocal && cur?.kind === 'vod' && Date.now() - lastRebuild > 30e3) {
+        lastRebuild = Date.now();
+        return load(url, video.currentTime + 0.15, viaProxy, isLocal, true);
+      }
+    });
     hls.on(Hls.Events.FRAG_CHANGED, (_, d) => {
       const c = d.frag?.cc;
       if (cc !== null && c !== undefined && c !== cc) {
@@ -2489,7 +2498,11 @@ function load(url, startAt, viaProxy, isLocal, rebuild = false, native = false) 
       }
       cc = c ?? cc;
     });
-    hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal && !hlsRecover(hls, data)) retry(data.details); });
+    hls.on(Hls.Events.ERROR, (_, data) => {
+      (me.errs || (me.errs = [])).push([Math.round(video.currentTime), data.details, data.fatal ? 1 : 0]); if (me.errs.length > 30) me.errs.shift();
+      if (!data.fatal && STALL_ERR.test(data.details || '')) me.dirty = Date.now();
+      if (data.fatal && !hlsRecover(hls, data)) retry(data.details);
+    });
     hls.loadSource(src); hls.attachMedia(video);
   } else {
     video.src = src;
@@ -2501,7 +2514,18 @@ video.addEventListener('playing', () => { clearTimeout(stuckT); msg(''); });
 video.addEventListener('timeupdate', () => { if (video.currentTime > 0 && video.readyState >= 2) hideCover(); });
 video.addEventListener('playing', hideCover);
 video.addEventListener('error', hideCover);
-video.addEventListener('waiting', () => { if (!msgAct) msg('缓冲中…'); });
+// 卡顿的判定: 一次缓冲超过 0.8 秒, 或者 90 秒内缓冲了 3 次 (网络差的源是一连串的小卡顿, 单次都不长)
+let waitAt = 0, stalls = [];
+video.addEventListener('waiting', () => { waitAt = waitAt || Date.now(); if (!msgAct) msg('缓冲中…'); });
+video.addEventListener('playing', () => {
+  const ms = waitAt ? Date.now() - waitAt : 0; waitAt = 0;
+  if (!hls || Date.now() - lastRebuild < 15e3) return;
+  if (ms > 300) { stalls.push(Date.now()); stalls = stalls.filter(t => Date.now() - t < 90e3); }
+  if (ms > 800 || stalls.length >= 3) { hls.dirty = Date.now(); stalls = []; }
+});
+// 排查用: 控制台里运行 avDiag(), 听到电流声时看一眼 音频 / 视频 的缓冲区是否对得上、有没有空洞、hls 报过什么
+window.avDiag = () => { const sb = hls?.bufferController?.sourceBuffer || {}, r = b => b ? [...Array(b.length).keys()].map(i => [+b.start(i).toFixed(2), +b.end(i).toFixed(2)]) : null;
+  return { t: +video.currentTime.toFixed(2), rate: video.playbackRate, audio: r(sb.audio?.buffered), video: r(sb.video?.buffered), errors: hls?.errs, dirty: !!hls?.dirty, lastRebuild: lastRebuild && Math.round((Date.now() - lastRebuild) / 1000) + 's ago' }; };
 video.addEventListener('ended', () => { if (cur && cur.ep < cur.eps.length - 1) step(1); });
 let lastSave = 0;
 video.addEventListener('timeupdate', () => {
