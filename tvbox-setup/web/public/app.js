@@ -391,7 +391,8 @@ async function copyText(t) {
 // navigator.share 必须在用户手势里同步调用：shareUrl 是同步的，调用前不能 await 任何东西，否则 iOS Safari 会拒绝。
 async function shareNow(hash, title = '') {
   const url = shareUrl(hash);
-  if (navigator.share) {
+  // 桌面浏览器的系统分享面板不稳 (点了会卡死甚至整个浏览器退出)：只在触屏设备上用，桌面直接复制链接
+  if (navigator.share && matchMedia('(pointer: coarse)').matches) {
     try {
       await navigator.share({ ...(title ? { title, text: title } : {}), url });
       return;
