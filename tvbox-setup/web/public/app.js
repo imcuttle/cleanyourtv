@@ -410,16 +410,19 @@ const fmtEta = s => !s ? '' : s < 60 ? `剩 ${s} 秒` : s < 3600 ? `剩 ${Math.c
 const ACTIVE = ['queued', 'downloading'];
 
 // ---------- history (继续观看) ----------
+// 观看历史 / 进度属于当前账号 (UD, 见 acct.js)：访客存在本机，登录后按账号隔离并同步到服务端。
 const hist = {
-  all: () => JSON.parse(localStorage.history || '[]'),
+  all: () => UD.json('history', []),
   get: (site, id) => hist.all().find(h => h.site === site && h.id === id),
   put(entry) {
     const list = hist.all().filter(h => !(h.site === entry.site && h.id === entry.id));
-    list.unshift({ ...entry, at: Date.now() });
-    localStorage.history = JSON.stringify(list.slice(0, 40));
+    const e = { ...entry, at: Date.now() };
+    list.unshift(e);
+    UD.set('history', JSON.stringify(list.slice(0, 40)));
+    ACCT.op({ t: 'hist.put', e });
   },
-  del(site, id) { localStorage.history = JSON.stringify(hist.all().filter(h => !(h.site === site && h.id === id))); },
-  clear() { localStorage.history = '[]'; },
+  del(site, id) { UD.set('history', JSON.stringify(hist.all().filter(h => !(h.site === site && h.id === id)))); ACCT.op({ t: 'hist.del', site, id }); },
+  clear() { UD.set('history', '[]'); ACCT.op({ t: 'hist.clear' }); },
   // The local source lists only its own history; 成人 titles follow showEntry (see below).
   visible: (h, site = state.site) => (site === 'local' ? h.site === 'local' : true) && showEntry(h, site),
   list: () => hist.all().filter(h => hist.visible(h)),
@@ -436,25 +439,29 @@ const showEntry = (e, site = state.site) => state.level === 'all' ? !entryAdult(
 
 // ---------- favorites (hidden in 儿童 mode) ----------
 const favs = {
-  all: () => JSON.parse(localStorage.favs || '[]'),
+  all: () => UD.json('favs', []),
   has: (site, id) => favs.all().some(f => f.site === site && f.id === id),
   toggle(d) {
     if (favs.has(d.site, d.id)) { favs.del(d.site, d.id); return false; }
     const { site, siteName, id, name, pic, remarks, year, type, quality } = d;
-    localStorage.favs = JSON.stringify([{ site, siteName, id, name, pic, remarks, year, type, quality, ...(d.adult ? { adult: 1 } : {}), at: Date.now() }, ...favs.all()].slice(0, 500));
+    const e = { site, siteName, id, name, pic, remarks, year, type, quality, ...(d.adult ? { adult: 1 } : {}), at: Date.now() };
+    UD.set('favs', JSON.stringify([e, ...favs.all()].slice(0, 500)));
+    ACCT.op({ t: 'fav.put', e });
     return true;
   },
   list: () => favs.all().filter(f => showEntry(f)),
-  del(site, id) { localStorage.favs = JSON.stringify(favs.all().filter(f => !(f.site === site && f.id === id))); },
-  clear() { localStorage.favs = '[]'; },
+  del(site, id) { UD.set('favs', JSON.stringify(favs.all().filter(f => !(f.site === site && f.id === id)))); ACCT.op({ t: 'fav.del', site, id }); },
+  clear() { UD.set('favs', '[]'); ACCT.op({ t: 'fav.clear' }); },
 };
 const kidsMode = () => state.level === 'kids';
 const liveFavs = {
-  all: () => JSON.parse(localStorage.liveFavs || '[]'),
+  all: () => UD.json('liveFavs', []),
   has: url => liveFavs.all().some(f => f.url === url),
   toggle(c) {
     const on = !liveFavs.has(c.url);
-    localStorage.liveFavs = JSON.stringify(on ? [{ name: c.name, url: c.url, logo: c.logo || '' }, ...liveFavs.all()] : liveFavs.all().filter(f => f.url !== c.url));
+    const e = { name: c.name, url: c.url, logo: c.logo || '', at: Date.now() };
+    UD.set('liveFavs', JSON.stringify(on ? [e, ...liveFavs.all()] : liveFavs.all().filter(f => f.url !== c.url)));
+    ACCT.op(on ? { t: 'lfav.put', e } : { t: 'lfav.del', url: c.url });
     return on;
   },
 };
@@ -586,8 +593,11 @@ const groupHealth = g => {
 };
 const isBusy = s => s.group ? !!groupHealth(s)?.busy : healthBusy.has(s.api);
 const isDead = s => { if (s.group) { const g = groupHealth(s); return !!g && !g.busy && g.all && !g.ok; } const h = siteHealth.get(s.api); return !!h && !h.ok && !healthBusy.has(s.api); };
-const healthCell = (s, busy) => busy ? '<b class="hs">测速中…</b>' : s.group ? (g => !g || !g.all ? `<b class="hs">聚合 ${s.group}</b>` : `<b class="hs ${g.ok ? (g.okN === g.n ? 'ok' : '') : 'bad'}" title="成员里能连上的">${g.okN}/${g.n} 可用</b>`)(groupHealth(s)) : !s.api || s.local ? ''
-  : !siteHealth.get(s.api) ? '<b class="hs">…</b>' : siteHealth.get(s.api).ok ? `<b class="hs ok">${siteHealth.get(s.api).ms}ms</b>` : '<b class="hs bad">不通</b>';
+const healthCell = (s, busy) => busy ? `<b class="hs">${netBusy}</b>`
+  : s.group ? (g => !g || !g.all ? `<b class="hs"><span class="net"><span class="nt"><small>聚合 ${s.group}</small></span></span></b>` : `<b class="hs">${netBox(!g.ok ? 0 : g.okN === g.n ? 4 : 2, `${g.okN}/${g.n} 可用`, '成员里能连上的')}</b>`)(groupHealth(s))
+  : !s.api || s.local ? ''
+  : !siteHealth.get(s.api) ? '<b class="hs"><span class="net"><span class="nt"><small>…</small></span></span></b>'
+  : siteHealth.get(s.api).ok ? `<b class="hs">${netBox(netLvMs(siteHealth.get(s.api).ms), siteHealth.get(s.api).ms + ' ms')}</b>` : `<b class="hs">${netBox(0, '连不上')}</b>`;
 let menuQ = '', menuTab = 'vis';   // menuTab: 'vis' = 可见的点播源, 'hid' = 在设置里标为隐藏的
 const menuTabs = (n, h, tab, attr) => h ? `<div class="mtabs"><button type="button" ${attr}="vis" class="${tab === 'vis' ? 'on' : ''}">可见 ${n}</button><button type="button" ${attr}="hid" class="${tab === 'hid' ? 'on' : ''}">隐藏 ${h}</button></div>` : '';
 function filterMenu() {
@@ -800,10 +810,10 @@ $('#scopeMenu').onclick = e => {
 document.addEventListener('click', e => { if (!e.target.closest('#searchForm')) closeScope(); });
 addEventListener('keydown', e => { if (e.key === 'Escape') closeScope(); });
 const recents = {
-  all: () => { try { return JSON.parse(localStorage.recentSearches || '[]').filter(x => typeof x === 'string'); } catch { return []; } },
-  add(q) { localStorage.recentSearches = JSON.stringify([q, ...this.all().filter(x => x !== q)].slice(0, 12)); },
-  del(q) { localStorage.recentSearches = JSON.stringify(this.all().filter(x => x !== q)); },
-  clear() { localStorage.removeItem('recentSearches'); },
+  all: () => { try { return JSON.parse(UD.get('recentSearches') || '[]').filter(x => typeof x === 'string'); } catch { return []; } },
+  add(q) { UD.set('recentSearches', JSON.stringify([q, ...this.all().filter(x => x !== q)].slice(0, 12))); },
+  del(q) { UD.set('recentSearches', JSON.stringify(this.all().filter(x => x !== q))); },
+  clear() { UD.del('recentSearches'); },
 };
 const runSearch = q => { q = q.trim(); if (!q) return; recents.add(q); closeScope(); closeSov(); if (typeof closeHist === 'function') closeHist(); $('#q').value = q; location.hash = searchHash(q); };
 $('#searchForm').onsubmit = e => { e.preventDefault(); runSearch($('#q').value); };
@@ -1062,7 +1072,7 @@ async function route(opts = {}) {
   }
   try {
     if (page === 'live') return await renderLive();
-    if (page === 'settings') return await renderSettings();
+    if (page === 'settings') { settingsGoto = a || ''; return await renderSettings(); }
     if (page === 'downloads') return await renderDownloads();
     if (page === 'charts') return await renderCharts();
     if (!state.sites.length) return renderNoSites();
@@ -2149,7 +2159,7 @@ addEventListener('popstate', () => {
 });
 
 // ---------- player ----------
-const player = $('#player'), video = $('#video');
+const player = $('#player'), video = $('#video'), sysPanel = $('.psyspanel');
 let hls, cur = null, idleTimer;
 // 画中画: the small window keeps playing while the full-screen player steps aside and the page underneath
 // comes back. "Back to tab" brings the player back; closing the small window stops playback.
@@ -2235,8 +2245,7 @@ function openPlayer(startAt) {
   if (!playerOpen() || !history.state?.player) { player.hidden = false; history.pushState({ player: 1 }, ''); document.body.style.overflow = 'hidden'; }
   $('.ptitle').textContent = cur.kind === 'live' ? e.name : (cur.eps.length > 1 ? `${cur.title} · ${e.name}` : cur.title);
   const live = cur.kind === 'live';
-  setL('prev', live ? '上一台' : '上一集'); setL('next', live ? '下一台' : '下一集'); setL('list', live ? '频道' : '选集');
-  $('[data-act=prev]').hidden = cur.ep <= 0;
+  setL('next', live ? '下一台' : '下一集'); setL('list', live ? '频道' : '选集');
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
   syncFs();
@@ -2302,39 +2311,107 @@ function paintMsg() {
   const el = $('.pmsg'); if (!el) return;
   if (!msgAct || !srcAlts.length || !cur || cur.kind !== 'vod') { el.textContent = msgTxt; return; }
   el.innerHTML = `<span>${esc(msgTxt)}</span><button type="button" class="sw">切换源</button>`;
-  // 只有两个源时直接换过去, 三个以上才弹列表
-  $('.sw', el).onclick = e => { e.stopPropagation(); srcAlts.length === 1 ? switchSrc(srcAlts[0].site, srcAlts[0].id) : openSrcSheet(); };
+  // 一律打开列表：每个源旁边有网络测速，选哪个一目了然
+  $('.sw', el).onclick = e => { e.stopPropagation(); openSrcSheet(); };
 }
-// 切换源的上拉面板 (和选集同一个 .plist): 当前源 + 其他同名源
+// 切换源的上拉面板 (和选集同一个 .plist): 当前源 + 其他同名源，每个源同时测一下网络 (服务端取第一个分片，量首包时间和下载速度)。
+// 一行一个源：左边源名，右边信号格 + 一个词 (畅通 / 良好 / 一般 / 较慢 / 不通) + 毫秒数；测完最快的打「最快」，当前源不通就提示换。
+const NET_TXT = ['不通', '较慢', '一般', '良好', '畅通'];
+function netLevel(r) {
+  if (!r || !r.ok) return 0;
+  const ms = r.ms || 0, kb = r.kbps || 0;
+  if (ms <= 1000 && kb >= 4000) return 4;
+  if (ms <= 2000 && kb >= 2000) return 3;
+  if (ms <= 4000 && kb >= 800) return 2;
+  return 1;
+}
+// 测速结果统一画法 (播放页切换源 / 点播源菜单 / 直播源菜单)：左边信号格，右边上面一个状态词、下面一行小字 (毫秒数 …)
+const netLvMs = ms => ms <= 1000 ? 4 : ms <= 2000 ? 3 : ms <= 4000 ? 2 : 1;
+const netBox = (lv, sub, tip = '', cls = '') => `<span class="net lv${lv} ${cls}"${tip ? ` title="${esc(tip)}"` : ''}>${netBars(lv)}<span class="nt"><em>${NET_TXT[lv]}</em><small>${esc(sub)}</small></span></span>`;
+const netBusy = '<span class="net busy"><svg class="bars" viewBox="0 0 20 16" aria-hidden="true">' + [0, 1, 2, 3].map(i => `<rect x="${i * 5.3}" y="${12 - i * 4}" width="3.6" height="${4 + i * 4}" rx="1"/>`).join('') + '</svg><span class="nt"><small>测速中</small></span></span>';
+const netBars = lv => `<svg class="bars" viewBox="0 0 20 16" aria-hidden="true">${[0, 1, 2, 3].map(i => `<rect x="${i * 5.3}" y="${12 - i * 4}" width="3.6" height="${4 + i * 4}" rx="1" class="${i < lv ? 'on' : ''}"/>`).join('')}</svg>`;
+const netCell = n => !n ? '' : n.busy ? `<span class="net busy">${netBars(0)}<span class="nt"><small>测速中</small></span></span>`
+  : n.skip ? `<span class="net skip"><span class="nt"><small>${esc(n.skip)}</small></span></span>`
+  : `<span class="net lv${n.lv}" title="${esc(n.tip || '')}">${netBars(n.lv)}<span class="nt"><em>${NET_TXT[n.lv]}</em><small>${n.lv ? n.ms + ' ms' : esc(n.err || '')}</small></span></span>`;
+let srcRun = null;
 async function openSrcSheet() {
   if (!cur || cur.kind !== 'vod') return;
-  const d = cur.d;
+  const d = cur.d, epNow = cur.ep;
   if (!srcAlts.length) srcAlts = await findAlts(d);
   if (!srcAlts.length) return toast('没有找到同名的其他源');
+  srcRun?.ctl.abort();
+  const run = srcRun = { ctl: new AbortController(), touched: false };
   const box = $('.plist');
-  const rows = [{ site: d.site, siteName: d.siteName, remarks: d.remarks, cur: 1 }, ...srcAlts];
-  box.classList.remove('live'); box.classList.add('srcs'); box.dataset.mode = 'src';
-  box.innerHTML = `<div class="phead"><i class="grab"></i><b>切换源</b><span>${rows.length} 个源</span><button class="icon sm" data-pclose title="关闭">✕</button></div>
-    <div class="pitems">${rows.map((a, i) => `<button data-i="${i}" class="${a.cur ? 'on' : ''}"><span>${esc(a.siteName)}</span><small>${esc(a.remarks || '')}</small></button>`).join('')}</div>`;
-  $('[data-pclose]', box).onclick = () => togglePlist(false);
-  $$('.pitems button', box).forEach(b => b.onclick = () => {
-    const a = rows[+b.dataset.i];
-    if (a.cur) return togglePlist(false);
-    switchSrc(a.site, a.id);
-  });
+  const rows = [{ site: d.site, id: d.id, siteName: d.siteName, remarks: d.remarks, cur: 1, url: cur.eps[epNow]?.url || '' }, ...srcAlts.map(a => ({ ...a }))];
+  const alive = () => srcRun === run && !box.hidden && box.dataset.mode === 'src';
+  const slotOf = r => $$('.pitems button', box)[rows.indexOf(r)];
+  const draw = () => {
+    box.classList.remove('live'); box.classList.add('srcs'); box.dataset.mode = 'src';
+    box.innerHTML = `<div class="phead"><i class="grab"></i><b>切换源</b><span>${rows.length} 个源</span><span class="mre" data-retest role="button" tabindex="0" title="重新测速">重测</span></div>
+      <div class="srctip" hidden></div>
+      <div class="pitems">${rows.map((a, i) => `<button data-i="${i}" class="${a.cur ? 'on' : ''}"><span class="sn"><b>${esc(a.siteName)}</b>${a.cur ? '<u>当前</u>' : ''}<s class="best" hidden>最快</s>${a.remarks ? `<small>${esc(a.remarks)}</small>` : ''}</span><span class="netslot">${netCell(a.net)}</span></button>`).join('')}</div>`;
+    $('[data-retest]', box).onclick = () => { rows.forEach(r => { r.net = { busy: 1 }; r.best = false; }); draw(); testAll(true); };
+    box.onpointerdown = () => { run.touched = true; };
+    $$('.pitems button', box).forEach(b => b.onclick = () => {
+      const a = rows[+b.dataset.i];
+      if (a.cur) return togglePlist(false);
+      run.ctl.abort(); switchSrc(a.site, a.id);
+    });
+  };
+  const apply = (r, res) => {
+    r.net = res.skip ? { skip: res.skip } : res.ok ? { lv: netLevel(res), ms: res.ms, tip: `首包 ${res.ms} ms · 下载约 ${((res.kbps || 0) / 1000).toFixed(1)} Mbps` } : { lv: 0, err: res.error || '连不上', tip: res.error || '连不上' };
+    if (!alive()) return;
+    const cell = slotOf(r)?.querySelector('.netslot'); if (cell) cell.innerHTML = netCell(r.net);
+  };
+  const finish = () => {
+    if (!alive()) return;
+    const ok = rows.filter(r => r.net && r.net.lv > 0);
+    const best = ok.length > 1 ? ok.slice().sort((x, y) => y.net.lv - x.net.lv || x.net.ms - y.net.ms)[0] : null;
+    rows.forEach(r => { r.best = r === best; });
+    // 没动过列表就按网络好坏重排 (当前源始终在最上面)；动过就别让行跳来跳去
+    if (!run.touched) { const head = rows.shift(); rows.sort((x, y) => (y.net?.lv || 0) - (x.net?.lv || 0) || (x.net?.ms || 1e9) - (y.net?.ms || 1e9)); rows.unshift(head); draw(); }
+    $$('.pitems button', box).forEach((b, i) => { $('.best', b).hidden = !rows[i].best; });
+    const me = rows.find(r => r.cur), tip = $('.srctip', box);
+    if (me && me.net && me.net.lv === 0 && best && best.net.lv >= 3) {
+      tip.hidden = false;
+      tip.innerHTML = `<span>当前源连不上，「${esc(best.siteName)}」${NET_TXT[best.net.lv]}</span><button type="button">换过去</button>`;
+      $('button', tip).onclick = () => { run.ctl.abort(); switchSrc(best.site, best.id); };
+    }
+  };
+  async function testOne(r, fresh) {
+    try {
+      let url = r.url;
+      if (!url) {
+        const dd = await api('detail', { site: r.site, id: r.id }, run.ctl.signal), ln = dd?.lines?.[0];
+        url = ln?.episodes?.[Math.min(epNow, (ln.episodes.length || 1) - 1)]?.url || ''; r.url = url;
+      }
+      if (!url) return apply(r, { ok: false, error: '没有资源' });
+      if (!/^https?:\/\//i.test(url)) return apply(r, { skip: '本地文件' });
+      apply(r, await api('speed', { u: url, ...(fresh ? { fresh: 1 } : {}) }, run.ctl.signal));
+    } catch (e) { if (!isAbort(e)) apply(r, { ok: false, error: '连不上' }); }
+  }
+  async function testAll(fresh) {
+    const queue = rows.slice();
+    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => { while (queue.length && alive()) await testOne(queue.shift(), fresh); }));
+    finish();
+  }
+  rows.forEach(r => { r.net = { busy: 1 }; });
+  draw();
   togglePlist(true);
+  testAll(false);
 }
-// 换到另一个源播放: 选集 / 线路跟着新片源走, 顶栏的「当前源」不动
+// 换到另一个源播放: 选集 / 线路跟着新片源走, 顶栏的「当前源」不动；进度接着看 (超过 5 秒才带)
 async function switchSrc(site, id) {
   togglePlist(false);
-  const ep = cur?.ep || 0;
-  const t = toast('正在切换到另一个源…', true);
+  const ep = cur?.ep || 0, t = video.currentTime || 0;
+  const tt = toast('正在切换到另一个源…', true);
   try {
     const d = await api('detail', { site, id });
-    t.remove();
+    tt.remove();
     if (!d || !d.lines?.length) return toast('这个源也放不了，再换一个试试');
-    play(d, 0, Math.min(ep, Math.max(0, d.lines[0].episodes.length - 1)));
-  } catch (e) { t.remove(); toast(e.message); }
+    const e = Math.min(ep, Math.max(0, d.lines[0].episodes.length - 1));
+    if (t > 5 && e === ep) playAt(d, 0, e, Math.max(0, t - 2)); else play(d, 0, e);
+  } catch (err) { tt.remove(); toast(err.message); }
 }
 // 成人源 only: until the first frame is on screen the card's cover is shown (blurred backdrop + the sharp picture), not a black screen.
 // Hidden again by the first 'playing' / 'loadeddata' frame, and for live channels / local files without a cover.
@@ -2365,7 +2442,9 @@ function duckFlash(ms = 600) {
   flashT = setTimeout(() => { if (video._duck) video._unduck?.(); }, ms);
 }
 // rebuild: 播放中悄悄重建 (见 FRAG_CHANGED 里的说明): 不弹「加载中」、不盖封面, 倍速保留
-function load(url, startAt, viaProxy, isLocal, rebuild = false) {
+let lastLoad = null;
+function load(url, startAt, viaProxy, isLocal, rebuild = false, native = false) {
+  lastLoad = { url, viaProxy, isLocal };
   const keepRate = rebuild ? video.playbackRate : 0;
   // 换源 / 换线路 / 重新加载: 先把旧解码器彻底断开并静音, 新画面接上的瞬间就不会有「电流声」; 有画面后恢复原来的静音状态
   video._duck = 1; video.muted = true;
@@ -2384,7 +2463,7 @@ function load(url, startAt, viaProxy, isLocal, rebuild = false) {
   fixDuration(video, url.startsWith('/media/h/') ? url : '');
   const seek = () => { if (startAt) video.currentTime = startAt; if (keepRate) video.playbackRate = keepRate; video.play().catch(() => msg('点一下播放')); };
   const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集或换个源试试', true); };
-  if (window.Hls && Hls.isSupported() && !direct) {
+  if (window.Hls && Hls.isSupported() && !direct && !native) {
     // 缓冲只留近处: 向前最多 30 秒 / 30MB, 向后只留 30 秒。码率高的源 (2~3Mbps) 如果让它一路缓冲下去, 几分钟后音频
     // SourceBuffer 先满, 浏览器被迫丢旧数据, 音频出现缺口, 之后就是一段「电流声」; 刷新后缓冲清空又正常。
     hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60, maxBufferSize: 30 * 1000 * 1000, backBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 8, ...(url.startsWith('/media/h/') || rebuild ? { startPosition: startAt || 0 } : {}) });
@@ -2484,9 +2563,11 @@ function renderPlist() {
 }
 function togglePlist(open = $('.plist').hidden) {
   const box = $('.plist');
+  if (open) sysClose();
   box.hidden = !open;
   $('[data-act=list]').classList.toggle('on', open && box.dataset.mode !== 'src');
   player.classList.toggle('plopen', open);
+  player.classList.toggle('srcopen', open && box.dataset.mode === 'src');
   if (open) {
     const list = $('.pitems', box), on = $('.pitems .on', box);   // 不用 scrollIntoView (会连播放器容器一起滚走)
     if (list && on) list.scrollTop = on.offsetTop - list.offsetTop - (list.clientHeight - on.offsetHeight) / 2;
@@ -2500,7 +2581,7 @@ function closePlayer() {
   video.pause(); video.removeAttribute('src'); video.load();
   if (ms) { try { ms.metadata = null; ms.playbackState = 'none'; } catch {} }
   if (pipOn) { pipOn = false; player.classList.remove('pip'); document.exitPictureInPicture?.().catch(() => {}); }
-  player.hidden = true; togglePlist(false); clearTimeout(stuckT); msg(''); setLock(false); setBright(1); if (pcover) pcover.hidden = true;
+  player.hidden = true; togglePlist(false); sysClose(); clearTimeout(stuckT); msg(''); setLock(false); setBright(1); if (pcover) pcover.hidden = true;
   if (!$('#modal')) document.body.style.overflow = '';
   $('#modal')?.refresh?.();
   cur = null;
@@ -2508,10 +2589,9 @@ function closePlayer() {
 player.addEventListener('click', e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'close') history.back();
+  if (act === 'next') step(1);
   if (act === 'pip') togglePip();
   if (act === 'src') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSrcSheet(); }
-  if (act === 'next') step(1);
-  if (act === 'prev') step(-1);
   if (act === 'list') { if ($('.plist').dataset.mode === 'src') { renderPlist(); return togglePlist(true); } return togglePlist(); }
   if (act === 'ext') { video.pause(); return openLocal(cur.eps[cur.ep].url, 'play'); }
   if (act === 'share') {
@@ -2530,15 +2610,17 @@ player.addEventListener('click', e => {
     return enqueue(cur.d, cur.line, [cur.ep]).then(paintVodActs, err => toast(err.message));
   }
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); paintStar(liveFavs.has(c.url)); return; }
-  if (act === 'more') { const m = $('.pmore'); m.hidden = !m.hidden; e.target.closest('[data-act]').setAttribute('aria-expanded', !m.hidden); return; }
+  if (act === 'more') { sysClose(); const m = $('.pmore'); m.hidden = !m.hidden; e.target.closest('[data-act]').setAttribute('aria-expanded', !m.hidden); return; }
   if (act === 'rate') return cycleRate();
   if (act === 'skipt') { localStorage.autoSkip = skipOn() ? '0' : '1'; paintSkip(); return toast(skipOn() ? '已开启自动跳过片头片尾' : '已关闭自动跳过'); }
   if (act === 'fs') return toggleFs();
+  if (act === 'cast') return sysToggle();
   if (act === 'lock') return setLock(true);
   if (!$('.pmore').hidden && !e.target.closest('.pmore, [data-act=more]')) { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); }
+  if (!sysPanel.hidden && !e.target.closest('.psyspanel, .psys')) sysClose();
   if (!$('.plist').hidden && !e.target.closest('.plist, .pbar, .pacts')) togglePlist(false);
 });
-function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && !scrubbing && !gesturing && !(fineCursor && ctrl.matches(':hover')) && player.classList.add('idle'), fineCursor ? 3000 : 4000); }
+function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && sysPanel.hidden && !scrubbing && !gesturing && !(fineCursor && ctrl.matches(':hover')) && player.classList.add('idle'), fineCursor ? 3000 : 4000); }
 // touch: a tap on the picture shows / hides the controls (see below); only touches on the controls themselves keep them up
 player.addEventListener('touchstart', e => { if (e.target.closest('.ctrl, .pbar, .pcenter, .plist')) poke(); }, { passive: true });
 
@@ -2568,10 +2650,18 @@ if (!fineCursor) {
 }
 else {
   pacts.insertBefore($('[data-act=share]'), $('[data-act=more]')); pacts.insertBefore($('[data-act=skipt]'), $('[data-act=more]'));
-  $('[data-c=rate]').before($('[data-act=prev]'), $('[data-act=next]'), $('[data-act=list]'));   // 大屏: 上一集 / 下一集 / 选集在播放器下面, 倍速左边
-}   // desktop: no 更多, share stays in the top bar
+  $('[data-c=rate]').before($('[data-act=next]'), $('[data-act=list]'));   // 大屏: 选集在播放器下面, 倍速左边
+  // 窗口窄 (≤760px，比如缩小的浏览器窗口)：下载 / 分享 / 自动跳过 收进「更多」，顶栏只留 收藏 和 更多；变宽再放回去
+  const narrow = matchMedia('(max-width: 760px)'), tail = ['dl', 'share', 'skipt'].map(a => $(`[data-act=${a}]`)), home = [$('[data-act=ext]'), $('[data-act=more]'), $('[data-act=more]')];
+  const layoutNarrow = () => {
+    const more = $('.pmore');
+    tail.forEach((b, i) => narrow.matches ? more.insertBefore(b, $('[data-act=rate]', more)) : pacts.insertBefore(b, home[i]));
+    syncMore?.();
+  };
+  setTimeout(() => { layoutNarrow(); narrow.addEventListener('change', layoutNarrow); });   // syncMore 在下面才定义，等本段跑完再排
+}   // 大屏：分享留在顶栏；右上角「更多」里放切换源 (有别的源时才出现)
 // 「更多」里一个能点的都没有 (本地文件、浏览器没有小窗…) 就不显示这个按钮
-const syncMore = () => { if (!fineCursor) $('[data-act=more]').hidden = ![...$('.pmore').children].some(b => !b.hidden); };
+const syncMore = () => { $('[data-act=more]').hidden = ![...$('.pmore').children].some(b => !b.hidden && !(fineCursor && b.dataset.act === 'rate')); };   // 大屏的倍速在控制条里，「更多」里只剩切换源
 const syncFs = () => { const h = hideFs(); $('[data-act=fs]').hidden = h; $('[data-c=fs]').hidden = h; };
 $('[data-c=pip]').hidden = !pipSupported();
 syncFs();
@@ -2632,12 +2722,132 @@ for (const ev of ['timeupdate', 'durationchange', 'progress', 'play', 'pause', '
 }
 duckOnSeek(video, () => localStorage.playerMuted === '1');
 const togglePlay = () => (video.paused ? video.play().catch(() => {}) : video.pause());
-// iPhone can only fullscreen the <video> itself (its native player then takes over); everything else fullscreens the player.
+// ---------- 全屏 + 手机上横屏视频自动横屏 ----------
+// 点全屏：手机 / 小平板上的横屏视频，进全屏后把屏幕方向锁成横向（视频是竖屏的就不锁，保持竖着看）；退出全屏、换成竖屏视频时解锁。
+// iPhone 只能让 <video> 自己全屏（系统播放器接管，横屏视频系统会自动转横屏）；其它浏览器全屏整个播放器，自带的控制条都在。
+// 方向锁定只在全屏里有效（浏览器的限制），不支持的浏览器（如 iOS Safari）就保持系统默认，不报错。
+const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+const phoneLike = () => !fineCursor && Math.min(screen.width, screen.height) <= 820;
+const lockLandscape = () => { try { return screen.orientation?.lock ? screen.orientation.lock('landscape').then(() => true, () => false) : Promise.resolve(false); } catch { return Promise.resolve(false); } };
+const unlockOrient = () => { try { screen.orientation?.unlock?.(); } catch {} };
+// land: 视频还没出尺寸时 (刚从沉浸点「全屏观看」进来) 由调用方告诉我们它是不是横屏的
+function enterFs(land) {
+  const isLand = video.videoWidth ? video.videoWidth > video.videoHeight : land === true;
+  const want = phoneLike() && isLand;
+  const rq = player.requestFullscreen || player.webkitRequestFullscreen;
+  if (rq) {
+    let p; try { p = rq.call(player); } catch { p = null; }
+    return Promise.resolve(p).then(() => { if (want) return lockLandscape(); }, () => {});
+  }
+  try { video.webkitEnterFullscreen?.(); } catch {}
+  return Promise.resolve();
+}
 const toggleFs = () => {
-  if (document.fullscreenElement || document.webkitFullscreenElement) return (document.exitFullscreen || document.webkitExitFullscreen).call(document);
-  if (player.requestFullscreen) return player.requestFullscreen().catch(() => {});
-  video.webkitEnterFullscreen?.();
+  if (fsEl()) return (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  return enterFs();
 };
+const onFsChange = () => { if (!fsEl()) unlockOrient(); else if (phoneLike() && video.videoWidth) (video.videoWidth > video.videoHeight ? lockLandscape() : unlockOrient()); };
+document.addEventListener('fullscreenchange', onFsChange);
+document.addEventListener('webkitfullscreenchange', onFsChange);
+video.addEventListener('loadedmetadata', () => { if (fsEl() && phoneLike()) (video.videoWidth > video.videoHeight ? lockLandscape() : unlockOrient()); });   // 全屏里换集 / 换源
+// ---------- 系统连接：蓝牙 / 投屏（播放页右上角，类似 iOS 控制中心里的那两个图标）----------
+// 网页能碰到的系统能力有限，能用的都接上，不能用的给出路：
+//  · 投屏：Safari / iOS 走 AirPlay（弹系统的设备选择器）；Chrome / Edge 走 Remote Playback。浏览器用 MSE 在播（hls.js）时 Chrome 投不了，
+//    这时给「复制播放地址 / 复制本页链接」和各系统自带的投屏入口。Safari 在 hls.js 播放时会先切回系统原生播放再弹选择器（AirPlay 只认原生）。
+//  · 蓝牙：网页不能直接连蓝牙耳机，耳机的连接由系统管。能做的是：选择音频输出设备（蓝牙耳机 / 音箱在系统里连上后会出现在这里，
+//    Chrome / Edge 桌面和部分安卓浏览器支持），以及用 Web Bluetooth 扫描附近的蓝牙设备；都不支持的浏览器给系统蓝牙入口的说明。
+const canAirplay = typeof video.webkitShowPlaybackTargetPicker === 'function';
+const canRemote = !!(video.remote && typeof video.remote.prompt === 'function');
+const canSink = typeof video.setSinkId === 'function';
+const canPickOut = !!(navigator.mediaDevices && navigator.mediaDevices.selectAudioOutput);
+const canBle = !!navigator.bluetooth;
+const isAndroid = /Android/i.test(navigator.userAgent), isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const sys = { open: '', castOn: false, castMsg: '', out: '', ble: '' };
+try { const o = JSON.parse(localStorage.playerSink || 'null'); if (o && canSink) { sys.out = o.label || ''; video.setSinkId(o.id).catch(() => { sys.out = ''; localStorage.removeItem('playerSink'); sysPaint(); }); } } catch {}
+function sysPaint() {
+  const on = sys.castOn || !!(sys.out || sys.ble), b = $('[data-act=cast]');
+  b.classList.toggle('on', on);
+  b.title = sys.castOn ? '正在投屏' : sys.out || sys.ble ? '播放到：' + (sys.out || sys.ble) : '播放到…（投屏 / 蓝牙）';
+}
+if (canAirplay) video.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', () => { sys.castOn = !!video.webkitCurrentPlaybackTargetIsWireless; sysPaint(); });
+if (canRemote) for (const ev of ['connect', 'connecting', 'disconnect']) video.remote.addEventListener(ev, () => { sys.castOn = video.remote.state === 'connected'; sysPaint(); });
+const streamUrl = () => { const u = cur?.eps?.[cur.ep]?.url || ''; try { return new URL(u, location.href).href; } catch { return u; } };
+const pageLink = () => {
+  const e = cur?.eps?.[cur.ep]; if (!e) return location.href;
+  return shareUrl(cur.kind === 'live' ? `#/tv/${encodeURIComponent(localStorage.live || '')}/${encodeURIComponent(e.url)}/${encodeURIComponent(e.name || '')}` : cur.d ? playHref(cur.d.site, cur.d.id, cur.line, cur.ep) : '#/');
+};
+function sysClose() {
+  sys.open = ''; sysPanel.hidden = true; player.classList.remove('sysopen');
+  $('[data-act=cast]').classList.remove('open');
+}
+// 一个面板：上面是「这台设备 / 蓝牙耳机」(音频输出)，下面是「电视 / 投屏」。和 iOS 的 AirPlay 列表一样，设备都在一处选。
+async function sysOpen() {
+  sys.open = 'cast'; poke();
+  $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); if (!$('.plist').hidden) togglePlist(false);   // 一次只开一个浮层
+  $('[data-act=cast]').classList.add('open');
+  let outs = [];
+  if (canSink && navigator.mediaDevices?.enumerateDevices) { try { outs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audiooutput'); } catch {} }
+  if (sys.open !== 'cast') return;
+  const outId = (() => { try { return JSON.parse(localStorage.playerSink || 'null')?.id || ''; } catch { return ''; } })();
+  const named = outs.filter(d => d.deviceId && d.deviceId !== 'communications');
+  const tips = isIOS ? '控制中心 → 屏幕镜像' : isAndroid ? '下拉通知栏 → 投屏' : 'Mac 控制中心 → 屏幕镜像 · Windows Win + K';
+  const tick = '<span class="sp-ck">✓</span>';
+  const btNote = !canPickOut && !canBle && !named.length ? `<p class="sp-note">蓝牙请在系统设置里连接，连上后声音自动从它出来。</p>` : '';
+  sysPanel.innerHTML = `<div class="sp-h"><b>播放到</b><button class="icon sm" data-sp="x" aria-label="关闭">✕</button></div>
+    <div class="sp-list">
+      <button data-sink="" data-label="" class="${sys.out ? '' : 'on'}"><b>${isIOS || isAndroid ? '这台手机' : '这台电脑'}</b>${sys.out ? '' : tick}</button>
+      ${named.filter(d => d.deviceId !== 'default').map((d, i) => `<button data-sink="${esc(d.deviceId)}" data-label="${esc(d.label || '')}" class="${outId === d.deviceId ? 'on' : ''}"><b>${esc(d.label || '输出设备 ' + (i + 1))}</b>${outId === d.deviceId ? tick : ''}</button>`).join('')}
+      ${canPickOut ? '<button data-sp="pick"><b>蓝牙 / 其他音频设备…</b></button>' : ''}
+      ${canBle ? `<button data-sp="ble"><b>${sys.ble ? '蓝牙：' + esc(sys.ble) : '扫描蓝牙设备…'}</b></button>` : ''}
+      ${isAndroid ? '<a class="sp-a" href="intent:#Intent;action=android.settings.BLUETOOTH_SETTINGS;end"><b>系统蓝牙设置</b></a>' : ''}
+    </div>${btNote}
+    <div class="sp-sec">电视</div>
+    <div class="sp-list"><button data-sp="copy-url"><b>复制播放地址</b></button><button data-sp="copy-page"><b>复制本页链接</b></button></div>
+    <p class="sp-note">${esc(sys.castMsg || '浏览器不能直接投屏')} · ${esc(tips)}</p>`;
+  sysPanel.hidden = false; player.classList.add('sysopen');
+}
+async function setSink(id, label) {
+  try { await video.setSinkId(id); } catch (e) { return toast('这个设备用不了：' + (e.message || e.name)); }
+  sys.out = id && id !== 'default' ? label || '已选择的设备' : '';
+  if (sys.out) localStorage.playerSink = JSON.stringify({ id, label: sys.out }); else localStorage.removeItem('playerSink');
+  sysPaint(); toast(sys.out ? '声音已切到：' + sys.out : '已改回这台设备输出'); sysOpen();
+}
+async function doCast() {
+  sys.castMsg = '';
+  // AirPlay 只认系统原生播放：hls.js (MSE) 在播就先切成原生 HLS (同一次点击里)，再弹选择器
+  if (canAirplay) {
+    if (hls && lastLoad && video.canPlayType('application/vnd.apple.mpegurl')) load(lastLoad.url, video.currentTime, lastLoad.viaProxy, lastLoad.isLocal, true, true);
+    try { video.webkitShowPlaybackTargetPicker(); return; } catch {}
+  }
+  if (canRemote && !hls) {
+    try { await video.remote.prompt(); return; }
+    catch (e) {
+      if (e.name === 'NotAllowedError') return;   // 用户把选择器关了
+      sys.castMsg = e.name === 'NotFoundError' ? '没找到可投屏的设备（需在同一 Wi-Fi）' : '';
+    }
+  } else if (canRemote && hls) sys.castMsg = '网页内解码播放，浏览器无法直接投';
+  sysOpen();
+}
+function sysToggle() {
+  if (sys.open) return sysClose();
+  doCast();
+}
+sysPanel.addEventListener('click', async e => {
+  const b = e.target.closest('[data-sp], [data-sink]'); if (!b) return;
+  const k = b.dataset.sp;
+  if (k === 'x') return sysClose();
+  if (b.dataset.sink != null) return setSink(b.dataset.sink, b.dataset.label);
+  if (k === 'pick') { try { const d = await navigator.mediaDevices.selectAudioOutput(); await setSink(d.deviceId, d.label); } catch (err) { if (err.name !== 'NotAllowedError') toast('没选成：' + (err.message || err.name)); } return; }
+  if (k === 'ble') {
+    try { const d = await navigator.bluetooth.requestDevice({ acceptAllDevices: true }); sys.ble = d.name || '蓝牙设备'; sysPaint(); toast('已选择蓝牙设备：' + sys.ble); sysOpen(); d.addEventListener?.('gattserverdisconnected', () => { sys.ble = ''; sysPaint(); }); }
+    catch (err) { if (err.name !== 'NotFoundError') toast('蓝牙没连上：' + (err.message || err.name)); }
+    return;
+  }
+  if (k === 'copy-url') return copyText(streamUrl()).then(() => toast('播放地址已复制'), () => toast('复制失败'));
+  if (k === 'copy-page') return copyText(pageLink()).then(() => toast('链接已复制'), () => toast('复制失败'));
+});
+navigator.mediaDevices?.addEventListener?.('devicechange', () => { if (sys.open) sysOpen(); });
+
 const RATES = [1, 1.25, 1.5, 2, 0.75];
 const cycleRate = () => { video.playbackRate = RATES[(RATES.indexOf(video.playbackRate) + 1) % RATES.length]; };
 video.addEventListener('ratechange', () => { const t = video.playbackRate + 'x'; $('[data-c=rate]').textContent = t; setL('rate', t); $('[data-act=rate]').title = '倍速 ' + t; });
@@ -2829,6 +3039,7 @@ addEventListener('keydown', e => {
     || (e.metaKey && !e.altKey && !e.ctrlKey && (e.key === '[' || e.key === ']')) ) {
     if (!e.target.matches?.('input, textarea')) { e.preventDefault(); return go(e.key === 'ArrowLeft' || e.key === '[' ? -1 : 1); }
   }
+  if (e.key === 'Escape' && !player.hidden && !sysPanel.hidden) { e.preventDefault(); return sysClose(); }
   if (e.key === 'Escape' && !player.hidden && !$('.plist').hidden) { e.preventDefault(); return togglePlist(false); }
   if (e.target.matches?.('input, textarea')) return;
   if (e.key === 'Escape' && (playerOpen() || $('#modal'))) history.back();
@@ -2878,9 +3089,14 @@ const lmVisible = () => { const q = lm.q.toLowerCase(); return state.lives.filte
 // Status text of a row: running → 测速中, waiting in the queue → 排队中, else the last result.
 function lmStatus(k) {
   const h = liveHealth.get(liveUrlOf(k));
-  if (h === 'busy') return { cls: '', text: '测速中…' };
-  if (lmQ.includes(k)) return { cls: '', text: '排队中' };
-  return h ? { cls: h.ok ? 'ok' : 'bad', text: h.text } : null;
+  if (h === 'busy') return { html: netBusy };
+  if (lmQ.includes(k)) return { html: '<span class="net"><span class="nt"><small>排队中</small></span></span>' };
+  if (!h) return null;
+  if (!h.ok) return { html: netBox(0, '连不上', h.text) };
+  // 列表打开快慢 + 抽样频道的通畅率：通畅率低的不能算畅通
+  let lv = netLvMs(h.ms || 0);
+  if (h.ratio < .4) lv = 1; else if (h.ratio < .75) lv = Math.min(lv, 2);
+  return { html: netBox(lv, (h.ms || 0) + ' ms', h.text) };
 }
 function lmRender() {
   const box = $('#llist'); if (!box) return;
@@ -2892,7 +3108,7 @@ function lmRender() {
   box.innerHTML = rows.map(l => {
     const s = lmStatus(l.key), h = liveHealth.get(liveUrlOf(l.key));
     return `<div class="lpr ${l.key === cur ? 'on' : ''} ${h && h !== 'busy' && !h.ok ? 'dead' : ''} " data-k="${esc(l.key)}">
-      <span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${s ? `<b class="hs ${s.cls}">${esc(s.text)}</b>` : ''}
+      <span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${s ? `<b class="hs">${s.html}</b>` : ''}
       ${state.level === 'all' ? `<em class="x" data-del="${esc(l.key)}" title="删除这个直播源">×</em>` : ''}</div>`;
   }).join('') || '<div class="lan" style="padding:10px">没有匹配的直播源</div>';
   $('#lmCount').textContent = lm.q ? `${rows.length} / ${state.lives.length}` : state.lives.length;
@@ -2920,7 +3136,7 @@ async function lmPingOne(k) {
     j = await api('checklive', { url, name }, AbortSignal.timeout(25e3)).catch(e => ({ ok: false, error: e.message }));
     if (j.ok) break;
   }
-  liveHealth.set(url, { ok: !!j.ok, text: j.channels ? `${j.channels}台 · ${j.alive}/${j.sampled}` : '不通', at: Date.now() });
+  liveHealth.set(url, { ok: !!j.ok, text: j.channels ? `${j.channels}台 · ${j.alive}/${j.sampled}` : '不通', ms: j.ms || 0, ratio: j.sampled ? j.alive / j.sampled : 0, at: Date.now() });
 }
 // Rows scrolled into view are pinged (3 at a time, newest first), results are kept 5 min. A row that scrolls away
 // before its turn leaves the queue, so what the user is looking at is always what gets tested next.
@@ -2956,9 +3172,8 @@ function lmMark(k) {
   const s = lmStatus(k), h = liveHealth.get(liveUrlOf(k));
   let hs = $('.hs', row);
   if (!s) { hs?.remove(); return; }
-  if (!hs) { hs = document.createElement('b'); row.insertBefore(hs, $('em.x', row)); }
-  hs.className = 'hs ' + s.cls;
-  hs.textContent = s.text;
+  if (!hs) { hs = document.createElement('b'); hs.className = 'hs'; row.insertBefore(hs, $('em.x', row)); }
+  hs.innerHTML = s.html;
   row.classList.toggle('dead', !!h && h !== 'busy' && !h.ok);
 }
 function lmWatch() {
@@ -2991,7 +3206,6 @@ async function renderLive() {
           <div class="lm-top"><input id="lmq" class="find" type="search" placeholder="搜直播源" autocomplete="off"></div>
           <div class="mhead lm-head"><span>直播源 · <span id="lmCount"></span></span><span class="mre" data-re="1" title="重新测速当前可见的直播源">重测</span></div>
           <div class="lm-list" id="llist"></div>
-          <div class="lm-foot"><a href="#/settings" class="lan"><u>在设置里管理</u></a></div>
         </div></div>
       <input id="chq" class="find" type="search" placeholder="搜频道"></div>
       <div id="liveBody"></div></div>`;
@@ -3444,6 +3658,7 @@ function installSection() {
 }
 
 const testCache = new Map();
+let settingsGoto = '';   // #/settings/account：打开设置页后滚到「账号管理」
 async function renderSettings() {
   settingsDirty = false;
   const localP = get('/api/local'); // sent together with the rest, so it never queues behind speed tests
@@ -3505,6 +3720,7 @@ async function renderSettings() {
   view.innerHTML = `<div class="page set"><h1>设置</h1>
     <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。</p>
       <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button></div></section>
+    <section id="acctSec"><h2>账号管理</h2><p class="lan">加载中…</p></section>
     ${installSection()}
     <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。${safety.hasPin ? '已设家长 PIN。' : '设了 PIN 后，别人想从儿童 / 标准切到更宽松的级别就必须输入 PIN。'}</p>
       <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}">${v}</button>`).join('')}</div>
@@ -4131,6 +4347,7 @@ async function renderSettings() {
       await loadSites(); toast(`导入 ${j.imported.sites} 个点播源（自动分类：成人 ${j.imported.adult || 0}、少儿 ${j.imported.kids || 0}）、${j.imported.lives} 个直播源${j.imported.skippedEmpty ? `（跳过 ${j.imported.skippedEmpty} 个 0 部内容的）` : ''}`); renderSettings();
     } catch (err) { toast('导入失败：' + err.message); $('#imp').disabled = false; $('#imp').textContent = '导入'; }
   };
+  ACCT.mountSettings($('#acctSec')).then(() => { if (settingsGoto === 'account') { settingsGoto = ''; $('#acctSec')?.scrollIntoView({ block: 'start' }); } });
   initAdmin();
   localSettings(localP).catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
 }
@@ -4520,7 +4737,7 @@ if (PV) {
     } catch (e) { add.disabled = false; toast(e.message); }
   };
 }
-loadSites('swr').then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
+loadSites('swr').then(() => ACCT.ready).then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
 
 applyCardMode(); applyCardScale();
 
@@ -4537,7 +4754,8 @@ setInterval(() => { if (cur?.kind === 'vod' && !player.hidden && state.downloads
     const kids = document.documentElement.classList.contains('kidslevel');
     const rows = [['downloads', '下载'], ['settings', '设置']]; if (!kids) rows.unshift(['favorites', '收藏']);
     menu = document.createElement('div'); menu.className = 'minemenu'; menu.setAttribute('role', 'menu');
-    menu.innerHTML = rows.map(([k, t]) => `<a href="#/${k}" role="menuitem" class="${location.hash.startsWith('#/' + k) ? 'on' : ''}">${ICONS[k]}<span>${t}</span></a>`).join('');
+    menu.innerHTML = rows.map(([k, t]) => `<a href="#/${k}" role="menuitem" class="${location.hash.startsWith('#/' + k) ? 'on' : ''}">${ICONS[k]}<span>${t}</span></a>`).join('')
+      + (ACCT.me || localStorage.tvbox_acct_on ? `<a href="#/settings/account" role="menuitem">${tab.querySelector('svg').outerHTML}<span>账号：${esc(ACCT.me ? ACCT.me.name : '访客')}</span></a>` : '');
     document.body.append(menu); tab.setAttribute('aria-expanded', 'true');
     menu.addEventListener('click', () => setTimeout(close, 0));
   });

@@ -87,11 +87,31 @@ the page side every read belongs to the current view — switching pages aborts 
 so slow sources don't hold the browser's six connections. Cards are real links: ⌘/Ctrl-click opens a
 title or channel in a new tab.
 
-The launchers use the system Node.js 18+ if there is one, otherwise download a portable
+**Accounts (SQLite).** Settings → 账号管理 (or the avatar at the top right): register with a user name + password, stay signed in on
+several accounts per device and switch with one tap (the page reloads on the new account). 观看历史 / 播放进度, 收藏, 直播收藏, the 沉浸
+recommendation profile and recent searches belong to the account and are invisible to the others; sign in on another device and they
+follow. Without an account the browser stays a 访客 exactly as before (data only in that browser); registering can carry the guest data
+over. Passwords are scrypt-hashed, sessions are random tokens (stored hashed, one year rolling), logins are rate-limited; changing a
+password signs the other devices out. Data is in `web/data/users.sqlite` (WAL, only the leader worker touches it; `node:sqlite`, no
+dependency) and changes are batched from a persistent outbox, so offline / closing the tab loses nothing. `TVBOX_ALLOW_REGISTER=0`
+closes registration. Needs **Node 22.13+** (`node:sqlite`); on older Node the feature switches itself off and the page behaves as a
+guest. API: `/api/acct/{status,register,login,logout,me,sync,ops,import,clear,password,delete}` (session in `X-Session`).
+
+**Player.** Full screen on a phone locks landscape for landscape videos (Android / Chrome: Fullscreen + Screen Orientation lock; iPhone
+hands the video to the system player, which rotates by itself) and unlocks again on exit; the 沉浸 page's 全屏观看 button does it in
+the same tap. Top right: one AirPlay-style 播放到 icon like iOS (on Safari/iOS it opens the system AirPlay picker, which lists TVs and Bluetooth headphones
+together; elsewhere a single panel with 声音输出 — output device picker, Web Bluetooth scan, or how to connect in the system — and
+电视 / 投屏 — Remote Playback on Chrome / Edge, otherwise copy the stream address / page
+link). 更多 on a big screen holds 切换源; the 切换源 sheet tests every same-title source at once (`/api/speed?u=`: first byte + a
+256 KB slice of the first segment) and shows signal bars, 畅通 / 良好 / 一般 / 较慢 / 不通 and the milliseconds, marks the fastest,
+sorts the rest by network quality and keeps your position when you switch. In 沉浸 a swipe from the left / right screen edge outside
+the bottom progress-bar zone is left to the system (back / close).
+
+The launchers use the system Node.js (18+; 22.13+ if you want accounts — they prefer a Node that has `node:sqlite`) if there is one, otherwise download a portable
 Node into `web/.tools/` (npmmirror first, nodejs.org as fallback). Nothing is installed
 system-wide. On Windows, allow the firewall prompt for 专用网络 or other devices can't reach it.
 
-State lives in `web/data/` (git-ignored): `sources.json`, `safety.json`, `lives/` (live lists
+State lives in `web/data/` (git-ignored): `sources.json`, `safety.json`, `users.sqlite`, `lives/` (live lists
 edited as text), `downloads/`, `thumbs/`. Delete the folder to start over; the defaults come
 from `config/vod-apps.json`.
 

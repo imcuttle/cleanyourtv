@@ -854,6 +854,56 @@ async function probeStream(u) {
   return run;
 }
 
+// ---- /api/speed?u=: 这条片源的网络通不通、快不快 (播放页「切换源」里每个源一条) ----
+// 取播放列表 (m3u8 → 主列表就挑第一条码流) → 下第一个分片的前 256KB，量「首包时间」和「下载速度」；mp4 直链直接读开头 256KB。
+// 6 秒内没结果算不通。结果缓存 45 秒，同一地址同时来多个请求只测一次。
+const speedCache = new Map(), speedBusy = new Map();
+async function speedTest(u) {
+  if (!/^https?:\/\//i.test(u)) return { ok: false, error: '地址不对' };
+  const t0 = Date.now(), sig = AbortSignal.timeout(6000);
+  const get = url => fetch(url, { headers: { 'User-Agent': UA, ...(/\.m3u8(\?|$)/i.test(url) ? {} : { Range: 'bytes=0-262143' }) }, redirect: 'follow', signal: sig });   // 列表整份取 (被 Range 截断会丢行)，媒体只取开头
+  try {
+    let r = await get(u);
+    const first = Date.now() - t0;                                   // 播放列表 / 文件的响应时间
+    if (r.status >= 400) { r.body?.cancel().catch(() => {}); return { ok: false, ms: first, error: 'HTTP ' + r.status }; }
+    let type = r.headers.get('content-type') || '', isList = /mpegurl/i.test(type) || /\.m3u8(\?|$)/i.test(r.url);
+    let base = r.url, hops = 0;
+    while (isList && hops++ < 3) {
+      const text = (await r.text()).slice(0, 524288);
+      const lines = text.split(/\r?\n/).map(l => l.trim());
+      let next = '';
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith('#EXT-X-STREAM-INF')) { next = lines.slice(i + 1).find(l => l && !l.startsWith('#')) || ''; break; }
+      }
+      if (!next) next = lines.find(l => l && !l.startsWith('#')) || '';
+      if (!next) return { ok: false, ms: first, error: '列表是空的' };
+      const url = new URL(next, base).toString();
+      r = await get(url);
+      if (r.status >= 400) { r.body?.cancel().catch(() => {}); return { ok: false, ms: first, error: 'HTTP ' + r.status }; }
+      base = r.url; type = r.headers.get('content-type') || '';
+      isList = /mpegurl/i.test(type) || /\.m3u8(\?|$)/i.test(r.url);
+    }
+    // 读媒体数据：最多 256KB / 最多读到超时
+    const t1 = Date.now(); let got = 0, firstByte = 0;
+    const rd = r.body?.getReader();
+    if (rd) {
+      try { while (got < 262144) { const { done, value } = await rd.read(); if (done) break; if (!firstByte) firstByte = Date.now() - t0; got += value.length; } }
+      finally { rd.cancel().catch(() => {}); }
+    }
+    const took = Math.max(1, Date.now() - t1);
+    if (!got) return { ok: false, ms: first, error: '没有数据' };
+    return { ok: true, ms: firstByte || first, first, kbps: Math.round(got * 8 / took), bytes: got };   // kbps = 千比特/秒
+  } catch (e) { return { ok: false, error: e.name === 'TimeoutError' || e.name === 'AbortError' ? '超时' : '连不上' }; }
+}
+function speedOf(u, fresh) {
+  const hit = fresh ? null : speedCache.get(u);
+  if (hit && Date.now() - hit.at < 45e3) return Promise.resolve(hit.v);
+  if (speedBusy.has(u)) return speedBusy.get(u);
+  const p = speedTest(u).then(v => { speedCache.set(u, { at: Date.now(), v }); if (speedCache.size > 300) speedCache.delete(speedCache.keys().next().value); return v; }).finally(() => speedBusy.delete(u));
+  speedBusy.set(u, p);
+  return p;
+}
+
 // 成人判定：本地源看文件夹标记；整站标成人的源全算；混合源按分类名（伦理/写真/无码…）识别。
 function adultOf(site, d) {
   if (site.local) return localIndex().catById.get(str(d.type_id))?.adult ? 1 : 0;
@@ -2992,6 +3042,12 @@ async function api(route, q, res, req) {
     return res.end();
   }
 
+  // ---- 账号：用户名 + 密码，历史 / 收藏 / 偏好按账号隔离 (users.js)。会话令牌在 X-Session 头里 ----
+  if (route === 'acct' || route.startsWith('acct/')) {
+    const sub = route.slice(5), body = write ? await readBody(req, 4e6) : {};
+    return leader('acct', { sub, method: req.method, body, session: str(req.headers['x-session']), ip: req.socket.remoteAddress || '', ua: str(req.headers['user-agent']) });
+  }
+
   // ---- 管理员 ----
   if (route.startsWith('admin/')) {
     const sub = route.slice(6), ip = req.socket.remoteAddress || '';
@@ -3114,6 +3170,7 @@ async function api(route, q, res, req) {
     return send(res, 200, { ok: true });
   }
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
+  if (route === 'speed') return send(res, 200, await speedOf(q.get('u') || '', q.get('fresh') === '1'));
   // 自动识别片头 / 片尾 / 每集重复的广告: 立刻返回，没算完是 pending，客户端过一会儿再问
   if (route === 'skipmarks') return send(res, 200, await rpc('skipmarks', { u: q.get('u') || '', n: q.get('n') || '' }, 5000).catch(() => ({ status: 'none' })));
   if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
@@ -3327,6 +3384,13 @@ async function api(route, q, res, req) {
   }
   send(res, 404, { error: 'unknown api' });
 }
+
+// ======================= 账号 (SQLite，只在 leader 里读写) =======================
+let usersDb = null;
+rpcHandlers.acct = args => {
+  usersDb = usersDb || require('./users')({ file: path.join(DATA, 'users.sqlite'), allowRegister: process.env.TVBOX_ALLOW_REGISTER !== '0' });
+  return usersDb.handle(args);
+};
 
 // ======================= leader-side handlers =======================
 const LEVEL_RANK = { kids: 0, standard: 1, all: 2 };

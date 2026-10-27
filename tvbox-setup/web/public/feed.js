@@ -3,7 +3,7 @@
 // tap pauses, double-tap likes, long-press plays at 2x. Three <video> slides (previous / current / next) are kept
 // alive so a swipe lands on a picture that is already buffered, and the next few titles' details are fetched ahead
 // (only titles that turned out playable ever enter the feed). Likes, skips and watch time feed a small taste profile
-// that steers the 推荐 stream (kept in localStorage.feedProf, per browser).
+// that steers the 推荐 stream (kept per account via UD, see acct.js).
 (() => {
 const ic = (d, extra = '') => `<svg viewBox="0 0 24 24" aria-hidden="true" ${extra}>${d}</svg>`;
 const I = {
@@ -58,7 +58,7 @@ const slidesBox = q('.fd-slides'), prog = q('.fd-prog'), tipEl = q('.fd-tip'), r
 // Flat map tag → score. Tags: t:类型 a:地区 y:年代 p:演员. Likes / long watches raise, quick skips / 不想看 lower.
 const JUNK = /解说|资讯|新闻|预告|花絮|写真|福利/;
 const sat = v => 4 * Math.tanh(v / 4);
-const loadJson = (k, d) => { try { return JSON.parse(localStorage[k] || ''); } catch { return d; } };
+const loadJson = (k, d) => UD.json(k, d);   // 推荐偏好 / 已看 / 喜欢 属于当前账号 (UD, 见 acct.js)
 let P = null, evt = 0, saveT = 0;
 const tagsOf = (it, d) => {
   const tags = [];
@@ -82,16 +82,16 @@ function bump(it, d, w) {
   const p = profile();
   for (const [k, m] of tagsOf(it, d)) p[k] = Math.max(-8, Math.min(14, (p[k] || 0) + w * m));
   if (++evt % 25 === 0) for (const k of Object.keys(p)) { p[k] *= .9; if (Math.abs(p[k]) < .2) delete p[k]; }
-  clearTimeout(saveT); saveT = setTimeout(() => { localStorage.feedProf = JSON.stringify(p); }, 800);
+  clearTimeout(saveT); saveT = setTimeout(() => { UD.set('feedProf', JSON.stringify(p)); }, 800);
 }
 const scoreOf = it => tagsOf(it).reduce((s, [k, m]) => s + sat(profile()[k] || 0) * m, 0);
 
 const seen = new Set(loadJson('feedSeen', []));
 const keyOf = it => it.site + '|' + it.id;
 const nameOf = it => normName(it.name) + '|' + (it.year || '');   // the same title on another source is still the same title
-const markSeen = it => { seen.add(keyOf(it)); if (seen.size > 900) [...seen].slice(0, 100).forEach(k => seen.delete(k)); localStorage.feedSeen = JSON.stringify([...seen]); };
+const markSeen = it => { seen.add(keyOf(it)); if (seen.size > 900) [...seen].slice(0, 100).forEach(k => seen.delete(k)); UD.set('feedSeen', JSON.stringify([...seen])); };
 const likes = new Set(loadJson('feedLikes', []));
-const saveLikes = () => { localStorage.feedLikes = JSON.stringify([...likes].slice(-500)); };
+const saveLikes = () => { UD.set('feedLikes', JSON.stringify([...likes].slice(-500))); };
 
 // ---------- state ----------
 const F = { recN: 0, names: new Set(), gen: 0, mode: 'rec', extra: null, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
@@ -502,7 +502,7 @@ async function recMore(gen) {
   take(takeRandom(plain.filter(it => !out.includes(it)))); take(takeBest(rest()));
   take(takeRandom(plain.filter(it => !out.includes(it)))); take(fav.length ? takeRandom(fav) : takeRandom(rest()));
   fav.forEach(it => { if (!out.includes(it) && Math.random() < .5) F.pool.splice(F.pool.indexOf(it), 1); });   // unused actor titles do not pile up
-  if (!out.length && seen.size) { seen.clear(); localStorage.feedSeen = '[]'; }   // everything seen: start over
+  if (!out.length && seen.size) { seen.clear(); UD.set('feedSeen', '[]'); }   // everything seen: start over
   return out;
 }
 const poolAdd = list => {
@@ -648,7 +648,7 @@ menuEl.addEventListener('click', e => {
   const b = e.target.closest('[data-m]'); if (!b) return;
   const k = b.dataset.m;
   menuEl.hidden = true;
-  if (k === 'reset') { P = {}; evt = 0; localStorage.feedProf = '{}'; seen.clear(); localStorage.feedSeen = '[]'; likes.clear(); saveLikes(); syncRail(); return toast('推荐偏好已重置'); }
+  if (k === 'reset') { P = {}; evt = 0; UD.set('feedProf', '{}'); seen.clear(); UD.set('feedSeen', '[]'); likes.clear(); saveLikes(); syncRail(); return toast('推荐偏好已重置'); }
   if (k !== F.mode) startMode(k);
 });
 
@@ -707,9 +707,12 @@ function act(a) {
   if (!s?.it) return;
   if (a === 'full') {   // 「全屏观看」: 接着当前进度切到普通 (非沉浸) 播放器
     if (!s.d || !s.eps.length) return;
-    const t = s.video.currentTime || 0;
+    const t = s.video.currentTime || 0, land = s.video.videoWidth > s.video.videoHeight;
     s.video.pause(); saveHist(s);
-    return playAt(s.d, s.line, s.ep, t);
+    playAt(s.d, s.line, s.ep, t);
+    // 手机上的横屏视频：就在这次点击里进全屏并转成横屏（浏览器只在用户手势里放行全屏 / 方向锁定）
+    if (land && phoneLike()) enterFs(true);
+    return;
   }
   if (a === 'like') return doLike(!likes.has(keyOf(s.it)));
   if (a === 'fav') { if (!s.d || kidsMode()) return; const on = favs.toggle(s.d); if (on) bump(s.it, s.d, 2); toast(on ? '已收藏' : '已取消收藏'); return syncRail(); }
@@ -724,12 +727,16 @@ root.addEventListener('click', e => {
 });
 
 // ---------- gestures ----------
-// iOS (13.4+) 的主屏幕应用: 手指从屏幕左 / 右边缘起手的横向滑动会被系统当作「返回 / 前进」。
-// 在边缘的 touchstart 里 preventDefault 能把它拦下来 (必须 passive:false)。只在沉浸模式里、且没有弹层时拦。
+// 屏幕左 / 右边缘起手的横向滑动是系统的「返回 / 关闭」手势（iOS 的边缘返回、安卓的手势导航）。
+// 除了底部（进度条一带，那里要横向拖动快进，起手点贴着边缘时会被系统误当成返回），其它位置一律不拦：边缘滑动照常交给系统去关闭 / 返回沉浸页。
+// 底部这一带在 iOS 主屏幕应用里，边缘的 touchstart 里 preventDefault 能把系统的返回拦下来 (必须 passive:false)。
+const EDGE = 24, LOW = 120;
+const inLow = (y, el) => y > root.getBoundingClientRect().bottom - LOW || !!el?.closest?.('.fd-prog');
 root.addEventListener('touchstart', e => {
   if (root.hidden || $('#modal') || !player.hidden) return;
   const t = e.touches[0]; if (!t || e.target.closest('button, input, .fd-sheet, .fd-menu')) return;   // 按钮要保留点击
-  if (t.clientX <= 24 || t.clientX >= innerWidth - 24) { if (e.cancelable) e.preventDefault(); }
+  if (!inLow(t.clientY, e.target)) return;                                                           // 非底部：交给系统
+  if (t.clientX <= EDGE || t.clientX >= innerWidth - EDGE) { if (e.cancelable) e.preventDefault(); }
 }, { passive: false });
 let g = null, lastTap = { t: 0, x: 0, y: 0 }, tapTimer = 0;
 const H = () => root.clientHeight, W = () => root.clientWidth;
@@ -742,6 +749,8 @@ root.addEventListener('pointerdown', e => {
   if (scrub) return;
   // nothing starts in the home-bar / screen-edge zones: iOS owns swipes there
   if (e.pointerType === 'touch' && e.clientY > innerHeight - 24) return;
+  // 左 / 右边缘 (底部那一带除外) 起手的滑动归系统：返回 / 关闭沉浸页，这里不起任何手势，也不把它当成快进
+  if (e.pointerType === 'touch' && (e.clientX <= EDGE || e.clientX >= innerWidth - EDGE) && !inLow(e.clientY)) return;
   if (!menuEl.hidden || !sheetEl.hidden) { closeOverlays(); return; }
   if (g) return;
   const s = cur();
@@ -797,14 +806,14 @@ function endGesture(e, cancelled) {
     heartAt(x.x, x.y); doLike(true);
   } else { lastTap = { t: now, x: x.x, y: x.y }; tapTimer = setTimeout(togglePause, 280); }
 }
-root.addEventListener('pointerup', e => { armGuard(); endGesture(e, false); });
-root.addEventListener('pointercancel', e => { armGuard(); endGesture(e, true); });
+root.addEventListener('pointerup', e => { if (g && g.low) armGuard(); endGesture(e, false); });
+root.addEventListener('pointercancel', e => { if (g && g.low) armGuard(); endGesture(e, true); });
 
 // progress bar: drag to seek
 // iPhone 主屏幕应用: 手指在进度条 / 屏幕上横向拖到边缘时, 系统可能把它当作「边缘返回」手势并触发 popstate。
 // 拖动进行中、或刚结束 0.8 秒内收到的 popstate 一律视为误触: 补回历史记录, 留在沉浸模式。
 let guardUntil = 0;
-const touching = () => !!(scrub || g) || performance.now() < guardUntil;
+const touching = () => !!(scrub || (g && g.low)) || performance.now() < guardUntil;   // 只有底部那一带的拖动才防误触返回；其它位置的系统返回照常生效
 const armGuard = () => { guardUntil = performance.now() + 800; };
 let scrub = null;
 // 拖动时画面跟着实时跳转: 节流 (上一次 seek 没完成就不再发), 手指抬起时再精确落到最终位置
@@ -922,7 +931,7 @@ function hideFeed() {
   cancelAnimationFrame(raf);
   flushProfile();
 }
-const flushProfile = () => { if (P) localStorage.feedProf = JSON.stringify(P); };
+const flushProfile = () => { if (P) UD.set('feedProf', JSON.stringify(P)); };
 addEventListener('popstate', () => {
   if (root.hidden) return;
   if (touching() && !$('#modal') && player.hidden) { history.pushState({ feed: 1 }, ''); return; }   // 拖动时误触发的系统返回

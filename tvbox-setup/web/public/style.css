@@ -620,7 +620,7 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 
 /* ---------- 沉浸式看片 (feed.js) ---------- */
 .feedgo { background: var(--red) !important; border-color: var(--red) !important; color: #fff !important; font-weight: 700; }
-#feed { position: fixed; inset: 0; z-index: 28; background: #000; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; overscroll-behavior: none; -webkit-touch-callout: none; }
+#feed { position: fixed; inset: 0; z-index: 28; background: #000; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; overscroll-behavior-y: none; -webkit-touch-callout: none; }
 #feed[hidden] { display: none; }
 #feed button { font: inherit; color: #fff; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .fd-slides { position: absolute; inset: 0; }
@@ -1411,3 +1411,268 @@ html.cs-big .card .img img { image-rendering: auto; }
   .srow.lrow .ops { grid-column: 2 / -1; justify-content: flex-start; flex-wrap: wrap; }
   .srow.lrow .ops > .status { margin-left: auto; }
 }
+
+/* ===================== 账号 ===================== */
+.av { display: inline-grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 50%; background: hsl(var(--h, 0) 52% 40%); color: #fff; font-size: 13px; font-weight: 700; line-height: 1; }
+.av.lg { width: 52px; height: 52px; font-size: 22px; }
+.av.guest { background: #3a3a3a; } .av.guest svg { width: 62%; height: 62%; fill: #cfcfcf; }
+.acctbtn { width: 36px; height: 36px; padding: 0; border-radius: 50%; border: 1px solid #ffffff2e; background: #ffffff1f; display: grid; place-items: center; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); transition: border-color .15s, background .15s; }
+.acctbtn .av { width: 26px; height: 26px; font-size: 12px; }
+.acctbtn:hover, .acctbtn.open { border-color: #ffffff77; background: #ffffff33; }
+.acctmenu { min-width: 250px; }
+.menu.acctmenu button > span.av, .menu.acctmenu button > span.acct-plus { flex: none; width: 26px; height: 26px; font-size: 12px; }
+.menu.acctmenu button > span.acct-plus { height: auto; }
+.menu.acctmenu button > span:nth-child(2) { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acctmenu .acct-sep { height: 1px; background: #ffffff14; margin: 6px 4px; }
+.acctmenu .acct-plus { flex: none; width: 26px; text-align: center; font-size: 20px; line-height: 1; color: #bbb; }
+@media (max-width: 760px) { .acctbtn { width: 34px; height: 34px; flex: none; } }
+
+.acct-now { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 14px; background: #ffffff0d; border-radius: 10px; }
+.acct-now .nm, .acct-row .nm { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 2px; }
+.acct-now .nm b { font-size: 17px; } .acct-row .nm b { font-size: 14px; }
+.acct-now small, .acct-row small { color: var(--muted); font-size: 12px; }
+.acct-stats { display: flex; gap: 20px; }
+.acct-stats span { display: flex; flex-direction: column; align-items: center; font-size: 12px; color: var(--muted); }
+.acct-stats b { font-size: 20px; color: #fff; font-variant-numeric: tabular-nums; }
+.acct-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.acct-row { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 8px; background: #ffffff08; border: 1px solid transparent; }
+.acct-row.cur { border-color: #ffffff33; background: #ffffff12; }
+.acct-tag { flex: none; font-size: 12px; color: #46d369; border: 1px solid #46d36966; border-radius: 4px; padding: 1px 7px; }
+.acct-box { margin-top: 16px; }
+.acct-form, .acct-sub { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.acct-form input:not([type=checkbox]), .acct-sub input { flex: 1 1 170px; min-width: 0; background: #0009; border: 1px solid #ffffff40; color: #fff; padding: 0 12px; height: 36px; border-radius: 6px; font: inherit; font-size: 14px; outline: none; transition: border-color .15s; }
+.acct-form input:focus, .acct-sub input:focus { border-color: #fff; }
+.acct-imp { flex: 1 0 100%; font-size: 13px; }
+.acct-msg { font-size: 13px; color: #ff6b6d; } .acct-msg.ok { color: var(--muted); }
+.acct-warn { flex: 1 0 100%; font-size: 13px; color: #f5a623; }
+.small.primary { background: var(--red); border-color: var(--red); color: #fff; font-weight: 700; padding: 8px 18px; font-size: 13px; }
+.small.primary:hover { background: #f6121d; }
+.small.danger { color: #ff6b6d; border-color: #ff6b6d55; } .small.danger:hover { background: #ff4d4f26; }
+.small.ghost { background: none; }
+.small:disabled { opacity: .55; }
+
+/* ===================== 播放页：右上角蓝牙 / 投屏 ===================== */
+.psys { display: flex; align-items: center; gap: 2px; flex: none; }
+#player .psys .icon { position: relative; width: 40px; height: 40px; margin: 0; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: none; color: #fff; }
+#player .psys .icon:hover, #player .psys .icon.open { background: #ffffff33; }
+.psys .icon svg { width: 22px; height: 22px; display: block; }
+.psys .icon .dot { display: none; position: absolute; right: 7px; top: 7px; width: 8px; height: 8px; border-radius: 50%; background: #46d369; box-shadow: 0 0 0 2px #000a; }
+.psys .icon.on { color: #4da3ff; } .psys .icon.on .dot { display: block; }
+.psyspanel { position: absolute; z-index: 8; top: calc(58px + env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); width: min(340px, calc(100vw - 24px)); max-height: calc(100% - 140px); overflow-y: auto;
+  padding: 8px; background: #1c1c1cf5; border: 1px solid #ffffff1f; border-radius: 14px; box-shadow: 0 16px 44px #000d; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); animation: pop .14s ease-out; }
+.psyspanel[hidden] { display: none; }
+.sp-h { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 6px 8px; } .sp-h b { font-size: 15px; }
+#player .psyspanel .icon { width: 30px; height: 30px; margin: 0; background: #ffffff1a; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; color: #fff; }
+.sp-now { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 6px; border-radius: 10px; background: #ffffff0f; font-size: 13px; color: var(--muted); }
+.sp-now i { width: 8px; height: 8px; border-radius: 50%; background: #666; flex: none; } .sp-now i.on { background: #46d369; }
+.sp-now b { margin-left: auto; color: #fff; font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-note { margin: 2px 8px 8px; color: #bbb; font-size: 13px; line-height: 1.5; }
+.sp-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.sp-list button, .sp-a { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left; padding: 10px 12px; border: 0; border-radius: 10px; background: #ffffff0f; color: #fff; font: inherit; text-decoration: none; }
+.sp-list button:hover, .sp-a:hover { background: #ffffff1f; }
+.sp-list button.on { background: #0a84ff40; }
+.sp-list b { font-size: 14px; font-weight: 600; } .sp-list small { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.4; }
+.sp-tips { padding: 8px 10px 6px; color: var(--muted); font-size: 12px; line-height: 1.6; } .sp-tips b { color: #ddd; margin-right: 8px; font-weight: 600; }
+html.touchui .psyspanel { top: calc(54px + env(safe-area-inset-top)); }
+#player.locked .psys { opacity: 0; pointer-events: none; }
+
+/* 大屏：右上角「更多」(里面是切换源) */
+html:not(.touchui) .pacts .morebtn { display: inline-flex; }
+html:not(.touchui) .pmore { bottom: auto; top: calc(100% + 8px); flex-direction: column; min-width: 150px; padding: 6px; gap: 2px; }
+html:not(.touchui) .pmore .pill { width: 100%; height: 40px; border-radius: 8px; justify-content: flex-start; padding: 0 12px; gap: 10px; }
+html:not(.touchui) .pmore .pill .l { display: inline; font-size: 14px; }
+html:not(.touchui) .pmore .pill svg { width: 20px; height: 20px; }
+html:not(.touchui) .pmore [data-act=rate], html:not(.touchui) .pmore [data-act=pip] { display: none; }
+
+/* 切换源：一行一个源，右边信号格 + 一个词 + 毫秒数 */
+.plist.srcs .pitems { display: flex; flex-direction: column; gap: 2px; }
+.plist.srcs .pitems button { display: flex; align-items: center; justify-content: flex-start; gap: 10px; width: 100%; min-height: 54px; padding: 6px 12px; background: none; text-align: left; border-radius: 10px; position: relative; }
+.plist.srcs .pitems button:hover { background: #ffffff14; }
+.plist.srcs .pitems button.on { background: #ffffff1a; font-weight: 400; }
+.plist.srcs .pitems button.on::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 3px; border-radius: 2px; background: var(--red); }
+.plist.srcs .sn { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; overflow: visible; white-space: normal; }
+.plist.srcs .sn b { font-size: 15px; font-weight: 600; color: #fff; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plist.srcs .sn u { text-decoration: none; font-size: 11px; color: #fff; background: var(--red); border-radius: 3px; padding: 0 5px; }
+.plist.srcs .sn small { flex: 1 0 100%; margin: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plist.srcs .netslot { flex: none; overflow: visible; }
+.net { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; color: var(--muted); }
+.net em { font-style: normal; font-weight: 700; font-size: 13px; }
+.plist.srcs .pitems .net small { margin: 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+.net .bars { width: 22px; height: 18px; flex: none; }
+.net .bars rect { fill: #ffffff2e; }
+.net.lv4 { color: #46d369; } .net.lv3 { color: #8bd94a; } .net.lv2 { color: #f5a623; } .net.lv1 { color: #ff8a4c; } .net.lv0 { color: #ff6b6d; }
+.net.lv1 .bars rect.on, .net.lv2 .bars rect.on, .net.lv3 .bars rect.on, .net.lv4 .bars rect.on, .net.lv0 .bars rect.on { fill: currentColor; }
+.net.busy .bars rect { animation: netbusy 1s ease-in-out infinite; } .net.busy .bars rect:nth-child(2) { animation-delay: .12s; } .net.busy .bars rect:nth-child(3) { animation-delay: .24s; } .net.busy .bars rect:nth-child(4) { animation-delay: .36s; }
+@keyframes netbusy { 0%, 100% { fill: #ffffff26; } 40% { fill: #ffffff99; } }
+.net.lv0 .bars rect { fill: #ff6b6d55; }
+.net.skip { color: var(--muted); }
+.plist.srcs .best { flex: none; text-decoration: none; font-size: 11px; font-weight: 700; color: #000; background: #46d369; border-radius: 4px; padding: 1px 6px; }
+.srctip { flex: none; display: flex; align-items: center; gap: 10px; margin: 8px 12px 0; padding: 8px 12px; border-radius: 10px; background: #f5a62324; color: #ffd28a; font-size: 13px; }
+.srctip span { flex: 1; min-width: 0; } .srctip button { flex: none; border: 0; border-radius: 6px; padding: 5px 12px; background: #fff; color: #000; font-weight: 700; font-size: 13px; }
+.srctip[hidden] { display: none; }
+html.touchui .plist.srcs .pitems button { min-height: 58px; }
+
+/* 播放到…：一个图标 (和 iOS AirPlay 一样)，面板里分「声音输出」「电视 / 投屏」两段 */
+.psys .icon .dot { right: 8px; top: 8px; }
+.psys .icon svg { overflow: visible; }
+.psys .icon svg i { display: none; }
+.sp-sec { padding: 8px 10px 4px; color: var(--muted); font-size: 12px; letter-spacing: .5px; }
+.sp-list button { position: relative; }
+.sp-list button.on { padding-right: 34px; }
+.sp-ck { position: absolute; right: 12px; top: 50%; margin-top: -9px; color: #4da3ff; font-weight: 700; }
+
+/* 切换源面板：头部按钮不要底色并和标题垂直居中、右边与列表右缘对齐；每行右侧的测速列按列对齐 */
+.plist.srcs .phead { align-items: center; gap: 4px; padding: 10px 12px 10px 16px; }
+.plist.srcs .phead b { margin-right: 8px; line-height: 30px; }
+.plist.srcs .phead span { line-height: 30px; }
+#player .plist.srcs .phead .icon { width: 32px; height: 32px; margin: 0; padding: 0; display: grid; place-items: center; background: none; border: 0; border-radius: 50%; color: #ddd; flex: none; }
+#player .plist.srcs .phead .icon:hover { background: none; color: #fff; }
+.plist.srcs .phead .icon svg { display: block; }
+.plist.srcs .pitems button.on { background: none; }
+.plist.srcs .pitems { padding-left: 12px; padding-right: 12px; }
+.plist.srcs .net { gap: 8px; }
+.plist.srcs .pitems .net em { color: inherit; width: auto; min-width: 2.4em; text-align: left; }
+.plist.srcs .pitems .net small { min-width: 58px; text-align: right; }
+.plist.srcs .sn .best { align-self: center; }
+
+/* 播放到…面板精简：单行按钮、去掉说明小字 */
+.psyspanel { width: min(300px, calc(100vw - 24px)); padding: 6px; }
+.psyspanel .sp-list { gap: 2px; margin-bottom: 4px; }
+.psyspanel .sp-list button, .psyspanel .sp-a { flex-direction: row; align-items: center; padding: 0 12px; min-height: 40px; background: none; border-radius: 8px; }
+.psyspanel .sp-list button:hover, .psyspanel .sp-a:hover { background: #ffffff14; }
+.psyspanel .sp-list button.on { background: none; }
+.psyspanel .sp-list b { font-size: 14px; font-weight: 500; }
+.psyspanel .sp-sec { padding: 6px 12px 2px; border-top: 1px solid #ffffff14; margin-top: 4px; }
+.psyspanel .sp-note { margin: 2px 12px 6px; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.psyspanel .sp-h { padding: 2px 4px 4px 12px; }
+.psyspanel .sp-h .icon { background: none !important; }
+
+/* 账号菜单：选中项不画红条 (它会把头像和名字往右挤，和没选中的对不齐)，只用「当前」标记；每行同样的左边距 */
+.menu.acctmenu button { padding: 8px 10px; gap: 12px; }
+.menu.acctmenu button.on::before { display: none; }
+.menu.acctmenu button.on { background: #ffffff10; }
+@media (max-width: 760px) {
+  /* 小屏：底部上拉面板，和点播源菜单一致 */
+  .menu.acctmenu { position: fixed; left: 0; right: 0; top: auto; bottom: 0; width: auto; min-width: 0; max-width: none; max-height: 70vh; z-index: 41;
+    border-radius: 16px 16px 0 0; padding: 14px 12px calc(12px + var(--sb)); box-shadow: 0 -12px 40px #000c; background: #181818f7; animation: sheetUp .2s ease-out; }
+  .menu.acctmenu::before { content: ""; display: block; width: 38px; height: 4px; margin: -4px auto 8px; border-radius: 2px; background: #ffffff40; }
+  .menu.acctmenu button { min-height: 52px; font-size: 16px; padding: 8px 12px; }
+}
+
+/* ===== 点播源菜单 / 播放页切换源：统一的交互样式 ===== */
+/* 选中项的红条改成绝对定位：不再占位，选中和没选中的名字、数值横向严格对齐 */
+.menu button { position: relative; }
+.menu button.on::before { position: absolute; left: 0; top: 50%; margin: -7px 0 0 !important; }
+.menu.acctmenu button.on::before, .menu .mseg button.on::before { display: none; }
+
+/* 播放页「切换源」：头部和点播源菜单一样 —— 标题、数量、右边一个文字「重测」，没有图标按钮 */
+.plist.srcs .phead { gap: 8px; padding: 14px 16px 10px; }
+.plist.srcs .phead b { margin: 0; line-height: 20px; }
+.plist.srcs .phead span { line-height: 20px; margin-right: 0; }
+.plist.srcs .phead span.mre { margin-left: auto; padding: 4px 2px; color: #ddd; font-size: 13px; cursor: pointer; white-space: nowrap; user-select: none; -webkit-user-select: none; }
+.plist.srcs .phead span.mre:hover { color: #fff; } .plist.srcs .phead span.mre:active { opacity: .6; }
+/* 每行：名字 (+ 当前 / 最快 / 备注) 在一行里，右边测速一列；都不折行，放不下的备注用省略号 */
+.plist.srcs .pitems button { gap: 12px; padding: 6px 16px; min-height: 52px; }
+.plist.srcs .sn { flex: 1 1 0; min-width: 0; display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; }
+.plist.srcs .sn b { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plist.srcs .sn u, .plist.srcs .sn .best { flex: none; white-space: nowrap; }
+.plist.srcs .sn small { flex: 1 1 0; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plist.srcs .netslot { flex: none; }
+.plist.srcs .net { flex-wrap: nowrap; white-space: nowrap; }
+.plist.srcs .pitems .net small { flex: none; min-width: 56px; text-align: right; }
+.plist.srcs .net em { flex: none; min-width: 2.6em; }
+.plist.srcs .pitems button.on::before { left: 4px; top: 14px; bottom: 14px; margin: 0 !important; height: auto; }
+
+/* 小窗口 (≤760px，不管是不是触屏)：和点播源菜单一样，从底部上拉，上面盖一层暗色，点暗处收起 */
+@media (max-width: 760px) {
+  html .plist { left: 0; right: 0; top: auto; bottom: 0; width: auto; height: min(64vh, 560px); border-radius: 16px 16px 0 0; border-width: 1px 0 0; z-index: 7; padding-bottom: var(--sb); animation: sheetUp .2s ease-out; }
+  html .plist[hidden] { display: none; }
+  html .plist .phead { position: relative; padding-top: 22px; }
+  html .plist .phead .grab { position: absolute; left: 50%; top: 8px; width: 38px; height: 4px; margin-left: -19px; border-radius: 2px; background: #ffffff40; }
+  html .plist.srcs { height: auto; max-height: min(70vh, 560px); }
+  #player.srcopen::after { content: ""; position: absolute; inset: 0; z-index: 6; background: #0009; animation: scrimIn .2s ease-out; }
+  html .plist.srcs .pitems button { min-height: 56px; }
+}
+/* 大屏：右侧浮层，面板高度跟着行数走 */
+@media (min-width: 761px) { .plist.srcs { bottom: auto; width: min(420px, calc(100vw - 28px)); max-height: calc(100% - 170px); } }
+
+/* 测速列：信号格在左，状态词和毫秒数上下两行叠在右边，整列更窄 */
+.plist.srcs .net { gap: 8px; align-items: center; }
+.plist.srcs .net .nt { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; min-width: 3.4em; line-height: 1.2; }
+.plist.srcs .pitems .net em { min-width: 0; font-size: 13px; line-height: 1.2; }
+.plist.srcs .pitems .net small { min-width: 0; text-align: left; font-size: 11px; line-height: 1.2; opacity: .85; }
+.plist.srcs .net .bars { width: 20px; height: 16px; }
+.plist.srcs .pitems button { gap: 10px; }
+
+/* 账号菜单里的「当前」：红色主题色 */
+.menu.acctmenu button i { color: #fff; background: var(--red); border: 0; border-radius: 4px; padding: 1px 7px; font-size: 12px; font-weight: 600; line-height: 1.5; }
+
+/* 点播源 / 直播源菜单里的测速：和播放页切换源同一种画法 (信号格 + 状态词 / 毫秒数上下两行) */
+.menu .hs, .lpr .hs { margin-left: auto; flex: none; font-weight: 400; color: inherit; }
+.menu button[data-k] { min-height: 46px; } .lpr { height: 46px; }
+.hs .net { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; color: var(--muted); }
+.hs .net .bars { width: 20px; height: 16px; flex: none; }
+.hs .net .bars rect { fill: #ffffff2e; }
+.hs .net .nt { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; min-width: 3.4em; line-height: 1.2; }
+.hs .net em { font-style: normal; font-weight: 700; font-size: 13px; line-height: 1.2; min-width: 0; margin: 0; padding: 0; width: auto; }
+.hs .net small { font-size: 11px; line-height: 1.2; font-weight: 400; color: var(--muted); opacity: .9; margin: 0; }
+.hs .net.lv1 .bars rect.on, .hs .net.lv2 .bars rect.on, .hs .net.lv3 .bars rect.on, .hs .net.lv4 .bars rect.on { fill: currentColor; }
+.hs .net.lv0 .bars rect { fill: #ff6b6d55; }
+.hs .net.busy .bars rect { animation: netbusy 1s ease-in-out infinite; } .hs .net.busy .bars rect:nth-child(2) { animation-delay: .12s; } .hs .net.busy .bars rect:nth-child(3) { animation-delay: .24s; } .hs .net.busy .bars rect:nth-child(4) { animation-delay: .36s; }
+.menu button.dead .nm, .lpr.dead .nm { opacity: .45; }
+.menu .hs + em.x, .lpr .hs + em.x { margin-left: 6px; }
+@media (max-width: 760px) { .menu button[data-k] { min-height: 52px; } .lpr { height: 54px; } }
+.menu button.dead .hs span, .lpr.dead .hs span { opacity: 1; }
+.hs .net.lv4 { color: #46d369; } .hs .net.lv3 { color: #8bd94a; } .hs .net.lv2 { color: #f5a623; } .hs .net.lv1 { color: #ff8a4c; } .hs .net.lv0 { color: #ff6b6d; }
+.hs .net small { color: var(--muted); }
+/* 直播源菜单选中项：和点播源菜单一样，左边一条红杠，不用 box-shadow (圆角处会弯) */
+.lpr { position: relative; }
+.lpr.on { box-shadow: none; }
+.lpr.on::before { content: ""; position: absolute; left: 0; top: 50%; height: 14px; margin-top: -7px; width: 3px; border-radius: 2px; background: var(--red); }
+
+/* 测速状态列：宽度固定 (信号格 20 + 间距 8 + 文字 56)，不管是「畅通」「连不上」还是「测速中」，每行的信号格和文字都落在同一列 */
+.hs .net, .plist.srcs .net { width: 84px; flex: none; justify-content: flex-start; gap: 8px; }
+.hs .net .nt, .plist.srcs .net .nt { width: 56px; min-width: 0; flex: none; overflow: hidden; }
+.hs .net em, .hs .net small, .plist.srcs .net em, .plist.srcs .net small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 没有信号格的状态 (排队中 / …) 文字也从同一位置起 */
+.hs .net:not(:has(.bars)) .nt, .plist.srcs .net:not(:has(.bars)) .nt { margin-left: 28px; }
+/* × 删除键占固定宽度，有没有都不影响测速列的位置 */
+.menu button[data-k] em.x, .lpr em.x { flex: none; width: 28px; margin-left: 4px; padding: 0; text-align: center; }
+
+/* 连接状态再靠右：× 收窄并贴边，状态列紧挨着它；整行右侧留白减小 */
+.menu button[data-k], .lpr { padding-right: 6px; }
+.menu button[data-k] em.x, .lpr em.x { width: 22px; margin-left: 2px; font-size: 15px; }
+.menu button[data-k] .hs, .lpr .hs { margin-left: auto; }
+.menu button[data-k] i + .hs { margin-left: 8px; }
+.menu button[data-k]:not(:has(em.x)), .lpr:not(:has(em.x)) { padding-right: 12px; }
+
+/* 再紧凑：文字区 48px (「9530 ms」刚好放下)，列宽 76px；× 18px 贴边 */
+.hs .net, .plist.srcs .net { width: 76px; }
+.hs .net .nt, .plist.srcs .net .nt { width: 48px; }
+.hs .net:not(:has(.bars)) .nt, .plist.srcs .net:not(:has(.bars)) .nt { margin-left: 28px; }
+.menu button[data-k], .lpr { padding-right: 4px; }
+.menu button[data-k] em.x, .lpr em.x { width: 18px; margin-left: 0; }
+.plist.srcs .pitems button { padding-right: 12px; }
+
+/* 直播源列表的 × 一直显示 (和点播源菜单一样)：不再只在鼠标悬停时出现，触屏上也有 */
+.lpr em.x { opacity: 1 !important; display: inline-block !important; line-height: 1.3; color: #888; }
+.lpr em.x:hover, .lpr em.x:active { background: #ff4d4f33; color: #ff6b6d; }
+@media (hover: none) { .lpr em.x { display: inline-block !important; } }
+
+/* 直播源列表：连接状态和 × 之间只留 2px (flex gap 8px 抵掉 6px)，× 贴右边，状态列跟着靠右，和点播源菜单一致 */
+.lpr { gap: 8px; padding-right: 2px; }
+.lpr em.x { margin-left: -6px; }
+.lm-list { scrollbar-gutter: auto; }
+.lpr { padding-right: 0; }
+.lpr em.x { margin-left: -4px; margin-right: 0; }
+
+/* 连接状态文字再小一号：状态词 11.5px，毫秒数 10px；列宽随之收窄 */
+.hs .net em, .plist.srcs .pitems .net em { font-size: 11.5px; line-height: 1.15; }
+.hs .net small, .plist.srcs .pitems .net small { font-size: 10px; line-height: 1.15; }
+.hs .net, .plist.srcs .net { width: 68px; gap: 6px; }
+.hs .net .nt, .plist.srcs .net .nt { width: 42px; gap: 0; }
+.hs .net .bars, .plist.srcs .net .bars { width: 18px; height: 14px; }
+.hs .net:not(:has(.bars)) .nt, .plist.srcs .net:not(:has(.bars)) .nt { margin-left: 24px; }
+.hs .net, .plist.srcs .net { width: 74px; }
+.hs .net .nt, .plist.srcs .net .nt { width: 48px; }
+.hs .net small, .plist.srcs .pitems .net small { letter-spacing: -.1px; }
