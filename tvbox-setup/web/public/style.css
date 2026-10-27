@@ -1702,7 +1702,7 @@ html.touchui .plist.skipset .pitems button { min-height: 62px; font-size: 15px; 
 .plist.skipset .sn { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow: visible; white-space: normal; }
 .plist.skipset .sn b { font-size: 15px; font-weight: 600; color: #fff; }
 .plist.skipset .sn small { color: var(--muted); font-size: 12px; }
-.sw { flex: none; position: relative; width: 40px; height: 24px; border-radius: 12px; background: #ffffff33; transition: background .15s; }
-.sw::after { content: ""; position: absolute; left: 2px; top: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
-.sw.on { background: #46d369; }
-.sw.on::after { transform: translateX(16px); }
+.tgl { flex: none; position: relative; width: 40px; height: 24px; border-radius: 12px; background: #ffffff33; transition: background .15s; }
+.tgl::after { content: ""; position: absolute; left: 2px; top: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.tgl.on { background: #46d369; }
+.tgl.on::after { transform: translateX(16px); }

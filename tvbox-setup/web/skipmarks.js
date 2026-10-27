@@ -83,7 +83,7 @@ async function common(A, B, minRun = MIN_RUN) {
   }
   return toRanges(runs);
 }
-// 间隔不到 20 秒的碎片并成一段, 再留最长的 keep 段 (片头 2 段: 开场 logo + 片头曲; 片尾 1 段), 按时间排好; 旧缓存里的多段也在这里收拾
+// 间隔不到 20 秒的碎片并成一段, 再留最长的 keep 段 (多留一段: 客户端会把其中是广告的剔掉, 再收到 片头 2 段 / 片尾 1 段), 按时间排好; 旧缓存里的多段也在这里收拾
 function pick(list, keep, dur, tail) {
   const a = (list || []).map(r => [...r]).sort((x, y) => x[0] - y[0]), cl = [];
   for (const r of a) { const c = cl[cl.length - 1]; if (c && r[0] - c[1] < 20) c[1] = Math.max(c[1], r[1]); else cl.push(r); }
@@ -167,7 +167,7 @@ module.exports = function ({ ffmpeg, ua, file }) {
     if (!ffmpeg || !/^https?:\/\//.test(u) || !/^https?:\/\//.test(n || '')) return { status: 'none' };
     const k = key(u), hit = get(k);
     if (hit?.none && Date.now() - hit.at < 7 * 86400e3) return { status: 'none' };
-    if (hit && !hit.none) return { status: 'ready', head: pick(hit.head, 2, hit.dur, false), tail: pick(hit.tail, 1, hit.dur, true), dur: hit.dur };
+    if (hit && !hit.none) return { status: 'ready', head: pick(hit.head, 3, hit.dur, false), tail: pick(hit.tail, 2, hit.dur, true), dur: hit.dur };
     if (peek) return { status: 'none' };
     if (busy.has(k)) return { status: 'pending' };
     if (Date.now() - (retry.get(k) || 0) < 600e3) return { status: 'none' };

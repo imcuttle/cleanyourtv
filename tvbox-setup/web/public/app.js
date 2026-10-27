@@ -2547,7 +2547,7 @@ function drawSkip() {
   const box = $('.plist');
   box.dataset.mode = 'skip'; box.classList.remove('live', 'srcs'); box.classList.add('skipset');
   box.innerHTML = `<div class="phead"><i class="grab"></i><b>自动跳过</b><span>进度条上标出位置</span><button class="icon sm" data-pclose title="关闭">✕</button></div>
-    <div class="pitems">${skipState().map(r => `<button data-k="${r.key}" role="switch" aria-checked="${r.on}"><span class="sn"><b>${r.name}</b><small>${esc(r.sub)}</small></span><i class="sw${r.on ? ' on' : ''}"></i></button>`).join('')}</div>`;
+    <div class="pitems">${skipState().map(r => `<button data-k="${r.key}" role="switch" aria-checked="${r.on}"><span class="sn"><b>${r.name}</b><small>${esc(r.sub)}</small></span><i class="tgl${r.on ? ' on' : ''}"></i></button>`).join('')}</div>`;
   $('[data-pclose]', box).onclick = () => togglePlist(false);
   $$('.pitems button', box).forEach(b => b.onclick = () => {
     const k = b.dataset.k, on = (k === 'skipAd' ? skipAd() : skipHT()) ? '0' : '1';
@@ -2587,17 +2587,29 @@ function skipFetch(tok) {
     else if (r.status === 'pending' && ++A.tries < 40 && skipHT()) A.timer = setTimeout(() => skipFetch(tok), 15000);
   }).catch(() => {});
 }
-// 片尾后面紧跟的广告 (间隔 20 秒内) 并进片尾: 一起标、一起跳到结尾。返回 { head, tail, mid (画标记用, 已并入片尾的不再单画), ads (跳过用, 全部) }
-function marksOf() {
-  const tail = (ask.tail || []).map(r => [...r]), ads = ask.mid || [];
-  for (const t of tail) for (const x of ads) if (x[0] >= t[0] - 1 && x[0] - t[1] < 20) t[1] = Math.max(t[1], x[1]);
+// 把声音指纹的结果 (片头 / 片尾) 和播放列表里认出的广告对起来:
+//  1. 指纹会把「每集都一样的广告」也当成片头 / 片尾 (实测: 开头 5 分钟里的广告被报成第二段片头): 和广告重叠一半以上的剔掉, 只当广告
+//  2. 片头最多留 2 段 (最长的), 片尾 1 段
+//  3. 片尾后面的广告并进片尾: 紧跟着 (间隔 ≤ 30 秒) 或者是视频最后的那条广告 (间隔 ≤ 120 秒, 中间多半是下集预告) 都并入, 一起标、一起跳到结尾
+// 返回 { head, tail, mid (画标记用, 已并入片尾的不再单画), ads (跳过用, 全部) }
+function marksOf(d = vdur(video)) {
+  const ads = (ask.mid || []).map(r => [...r]).sort((x, y) => x[0] - y[0]);
+  const isAd = r => ads.some(x => Math.min(r[1], x[1]) - Math.max(r[0], x[0]) >= (r[1] - r[0]) * .5);
+  const longest = (l, n) => l.slice().sort((x, y) => (y[1] - y[0]) - (x[1] - x[0])).slice(0, n).sort((x, y) => x[0] - y[0]);
+  const head = longest((ask.head || []).filter(r => !isAd(r)), 2);
+  const tail = longest((ask.tail || []).filter(r => !isAd(r)), 1).map(r => [...r]);
+  for (const t of tail) for (const x of ads) {
+    if (x[0] < t[0] - 1 || x[1] <= t[1]) continue;
+    const gap = x[0] - t[1], last = isFinite(d) && x[1] >= d - 3;
+    if (gap < 30 || (last && gap < 120)) t[1] = x[1];
+  }
   const merged = x => tail.some(t => x[0] >= t[0] - 1 && x[1] <= t[1] + 0.5);
-  return { head: ask.head, tail, mid: ads.filter(x => !merged(x)), ads };
+  return { head, tail, mid: ads.filter(x => !merged(x)), ads };
 }
 // 进度条上标出片头 / 片尾 (青色) 和广告 (琥珀色); 位置没变就不重画
 const marksEl = $('.tl .marks'); let marksKey = '';
 function paintMarks(d = vdur(video)) {
-  const M = ask && d > 0 && isFinite(d) && isVodTime() ? marksOf() : null, list = M ? [['h', M.head], ['a', M.mid], ['h', M.tail]] : [];
+  const M = ask && d > 0 && isFinite(d) && isVodTime() ? marksOf(d) : null, list = M ? [['h', M.head], ['a', M.mid], ['h', M.tail]] : [];
   const key = list.map(([, l]) => JSON.stringify(l)).join('|') + '/' + Math.round(d);
   if (key === marksKey) return;
   marksKey = key;
