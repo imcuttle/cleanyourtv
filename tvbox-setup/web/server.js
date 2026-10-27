@@ -821,7 +821,7 @@ const sizeQuality = (w, h) => (w >= 3000 || h >= 1900) ? '4K' : (w >= 1800 || h 
 // Local files go to the media process (ffmpeg -i). Results are cached for a day; identical probes share one request.
 const skipMarks = require('./skipmarks')({ ffmpeg: FFMPEG, ua: UA, file: path.join(DATA, 'skipmarks.json') });
 const probeCache = new Map(), probeBusy = new Map();
-rpcHandlers.skipmarks = ({ u, n }) => skipMarks(u, n);   // 只在主进程算 + 写缓存, 多个 worker 不会互相覆盖
+rpcHandlers.skipmarks = ({ u, n, peek }) => skipMarks(u, n, peek);   // 只在主进程算 + 写缓存, 多个 worker 不会互相覆盖
 let probeRunning = 0; const probeWait = [];
 async function probeStream(u) {
   const hit = probeCache.get(u);
@@ -3232,7 +3232,7 @@ async function api(route, q, res, req) {
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
   if (route === 'speed') return send(res, 200, await speedOf(q.get('u') || '', q.get('fresh') === '1'));
   // 自动识别片头 / 片尾 / 每集重复的广告: 立刻返回，没算完是 pending，客户端过一会儿再问
-  if (route === 'skipmarks') return send(res, 200, await rpc('skipmarks', { u: q.get('u') || '', n: q.get('n') || '' }, 5000).catch(() => ({ status: 'none' })));
+  if (route === 'skipmarks') return send(res, 200, await rpc('skipmarks', { u: q.get('u') || '', n: q.get('n') || '', peek: q.get('peek') === '1' }, 5000).catch(() => ({ status: 'none' })));
   if (route === 'adsegs') return send(res, 200, await adSegments(q.get('u') || ''));
   if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
   if (route === 'local/vod') {

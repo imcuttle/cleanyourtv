@@ -83,6 +83,13 @@ async function common(A, B, minRun = MIN_RUN) {
   }
   return toRanges(runs);
 }
+// 间隔不到 20 秒的碎片并成一段, 再留最长的 keep 段 (片头 2 段: 开场 logo + 片头曲; 片尾 1 段), 按时间排好; 旧缓存里的多段也在这里收拾
+function pick(list, keep, dur, tail) {
+  const a = (list || []).map(r => [...r]).sort((x, y) => x[0] - y[0]), cl = [];
+  for (const r of a) { const c = cl[cl.length - 1]; if (c && r[0] - c[1] < 20) c[1] = Math.max(c[1], r[1]); else cl.push(r); }
+  const best = cl.sort((x, y) => (y[1] - y[0]) - (x[1] - x[0])).slice(0, keep).sort((x, y) => x[0] - y[0]);
+  return best.map(c => [Math.round(c[0] * 10) / 10, Math.round((tail && dur - c[1] < 20 ? dur : c[1]) * 10) / 10]);
+}
 module.exports = function ({ ffmpeg, ua, file }) {
   // 持久 LRU: Map 的插入顺序就是新旧顺序, 命中时挪到最后, 超过上限从最旧的丢。落盘走临时文件 + 改名, 停手几秒后才写。
   const MAX = 2000;
@@ -155,11 +162,13 @@ module.exports = function ({ ffmpeg, ua, file }) {
   const retry = new Map();   // 本次运行里失败过的 (网络 / 源不通): 10 分钟内不再试, 不落盘
 
   // u: 这一集的原始地址, n: 相邻一集 (下一集, 没有就用上一集)。从不等计算: 没好就回 pending
-  return function marks(u, n) {
+  // peek: 只看缓存, 没有就回 none, 绝不启动计算 (自动跳过关着时只为了在进度条上标出位置)
+  return function marks(u, n, peek) {
     if (!ffmpeg || !/^https?:\/\//.test(u) || !/^https?:\/\//.test(n || '')) return { status: 'none' };
     const k = key(u), hit = get(k);
     if (hit?.none && Date.now() - hit.at < 7 * 86400e3) return { status: 'none' };
-    if (hit && !hit.none) return { status: 'ready', head: hit.head, tail: hit.tail, dur: hit.dur };
+    if (hit && !hit.none) return { status: 'ready', head: pick(hit.head, 2, hit.dur, false), tail: pick(hit.tail, 1, hit.dur, true), dur: hit.dur };
+    if (peek) return { status: 'none' };
     if (busy.has(k)) return { status: 'pending' };
     if (Date.now() - (retry.get(k) || 0) < 600e3) return { status: 'none' };
     if (queue.length >= 8) return { status: 'none' };             // 排队太多就先不接新的

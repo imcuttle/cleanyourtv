@@ -417,6 +417,9 @@ a.ch { color: inherit; }
 .tl .buf { width: var(--b); background: #ffffff55; }
 .tl .hov { width: var(--h); background: #ffffff40; }
 .tl .played { width: var(--p); background: var(--red); }
+.tl .marks { position: absolute; inset: 0; pointer-events: none; }
+.tl .marks i { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 1px; background: #4fd1c5; box-shadow: 0 0 0 1px #0006; }
+.tl .marks i.a { background: #fbbf24; }
 .tl .knob { position: absolute; left: var(--p); width: 15px; height: 15px; margin-left: -7.5px; border-radius: 50%; background: var(--red); transform: scale(0); transition: transform .12s; }
 .tl:hover .knob, .tl.drag .knob { transform: scale(1); }
 .tip { position: absolute; bottom: 26px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
@@ -1039,6 +1042,7 @@ html { touch-action: pan-x pan-y; }
 .pill:hover { background: #ffffff26; }
 .pill svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 .pill.on { background: none; color: #fff; }
+.pill.on:hover { background: #ffffff26; }   /* 开着的按钮 (收藏 / 自动跳过) 悬停也要有底色, 不然被上一条的 background:none 盖掉 */
 .pill.on svg { fill: currentColor; }
 .pill .l { display: none; }
 .tlrow { display: flex; align-items: center; gap: 14px; }
@@ -1686,3 +1690,19 @@ html #player.rot .plist { height: min(72%, 300px); max-height: none; }
 html #player.rot .plist.srcs { height: auto; max-height: 78%; }
 html #player.rot .psyspanel { max-height: calc(100% - 90px); }
 html.touchui #player.rot .pcenter button[data-c=play] { width: 64px; height: 64px; }
+
+/* 自动跳过设置浮窗 (复用 .plist): 内容只有两行, 高度跟着内容走; 小屏 (touchui) 是底部上拉 */
+@media (min-width: 761px) { .plist.skipset { bottom: auto; } }
+@media (max-width: 760px) { html .plist.skipset { height: auto; max-height: min(64vh, 560px); } }
+html.touchui .plist.skipset { top: auto; bottom: 0; height: auto; max-height: min(64vh, 560px); padding-bottom: var(--sb); }
+.plist.skipset .pitems { flex: none; display: flex; flex-direction: column; gap: 2px; overflow: visible; }
+.plist.skipset .pitems button { width: 100%; min-height: 58px; justify-content: space-between; gap: 12px; padding: 6px 12px; background: none; text-align: left; border-radius: 10px; }
+.plist.skipset .pitems button:hover { background: #ffffff14; }
+html.touchui .plist.skipset .pitems button { min-height: 62px; font-size: 15px; }
+.plist.skipset .sn { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow: visible; white-space: normal; }
+.plist.skipset .sn b { font-size: 15px; font-weight: 600; color: #fff; }
+.plist.skipset .sn small { color: var(--muted); font-size: 12px; }
+.sw { flex: none; position: relative; width: 40px; height: 24px; border-radius: 12px; background: #ffffff33; transition: background .15s; }
+.sw::after { content: ""; position: absolute; left: 2px; top: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.sw.on { background: #46d369; }
+.sw.on::after { transform: translateX(16px); }

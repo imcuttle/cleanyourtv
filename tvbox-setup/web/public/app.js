@@ -2348,7 +2348,7 @@ async function openSrcSheet() {
   const alive = () => srcRun === run && !box.hidden && box.dataset.mode === 'src';
   const slotOf = r => $$('.pitems button', box)[rows.indexOf(r)];
   const draw = () => {
-    box.classList.remove('live'); box.classList.add('srcs'); box.dataset.mode = 'src';
+    box.classList.remove('live', 'skipset'); box.classList.add('srcs'); box.dataset.mode = 'src';
     box.innerHTML = `<div class="phead"><i class="grab"></i><b>切换源</b><span>${rows.length} 个源</span><span class="mre" data-retest role="button" tabindex="0" title="重新测速">重测</span></div>
       <div class="srctip" hidden></div>
       <div class="pitems">${rows.map((a, i) => `<button data-i="${i}" class="${a.cur ? 'on' : ''}"><span class="sn"><b>${esc(a.siteName)}</b>${a.cur ? '<u>当前</u>' : ''}<s class="best" hidden>最快</s>${a.remarks ? `<small>${esc(a.remarks)}</small>` : ''}</span><span class="netslot">${netCell(a.net)}</span></button>`).join('')}</div>`;
@@ -2515,44 +2515,106 @@ video.addEventListener('timeupdate', () => {
 // 服务端拿相邻两集的音频做指纹, 找出两集里一模一样的片段 (片头曲、片尾曲、每集都插的同一条广告), 算好后缓存。
 // 选集少于 3 集不做。这里只管问结果、播放到那一段时自动跳过 (每一段只跳一次, 跳完想回看不会再拦)。只有点播多集、普通播放器用; 沉浸看片不用。
 let ask = null;
-const skipOn = () => localStorage.autoSkip !== '0';
-function paintSkip() { const b = $('[data-act=skipt]'); if (!b) return; b.classList.toggle('on', skipOn()); setL('skipt', skipOn() ? '自动跳过' : '不跳过'); }
-// 开关关着时一个请求都不发、定时器全撤; 中途打开时才补问, 已经拿到的结果 (ask 里) 留着复用, 不重复问。
-// ad: 片源拼进 m3u8 的广告, 不需要选集门槛; fp: 音频指纹 (片头 / 片尾), 要 3 集以上才有「相邻一集」可比。
+// 广告 (skipAd) 和片头片尾 (skipHT) 分开设置, 进度条上的标记不受开关影响 (关着也标出来, 只是不跳)。旧的总开关 autoSkip 当作两者的默认值。
+const skipHT = () => (localStorage.skipHT ?? localStorage.autoSkip) !== '0';
+const skipAd = () => (localStorage.skipAd ?? localStorage.autoSkip) !== '0';
+function paintSkip() { const b = $('[data-act=skipt]'); if (!b) return; const on = skipHT() || skipAd(); b.classList.toggle('on', on); setL('skipt', on ? '自动跳过' : '不跳过'); }
+// 数据的获取 (ask 里留着复用, 同一集不重复问):
+//  ad  片源拼进 m3u8 的广告: 读一次播放列表, 很轻, 不管开关都问 (为了标记), 不需要选集门槛
+//  fp  片头 / 片尾的音频指纹: 重活 (服务端要下载整段音频)。开着才让服务端去算; 关着只用 peek 看看服务端有没有现成的缓存 (只为标记), 要 3 集以上
 function skipInit() {
   skipStop();
   const e = cur.eps[cur.ep], n = cur.eps[cur.ep + 1] || cur.eps[cur.ep - 1];
   const ok = cur.kind === 'vod' && !cur.d.local && /^https?:/.test(e.url);
+  const fp = ok && cur.eps.length >= 3 && n && /^https?:/.test(n.url);
   $('[data-act=skipt]').hidden = !ok;
-  ask = ok ? { tok: Math.random(), u: e.url, n: cur.eps.length >= 3 && n && /^https?:/.test(n.url) ? n.url : '', head: [], tail: [], mid: [], done: new Set(), adGot: false, adBusy: false, adTries: 0, adT: 0, fpGot: false, tries: 0, timer: 0, t0: Date.now() } : null;
+  ask = ok ? { tok: Math.random(), u: e.url, n: fp ? n.url : '', head: [], tail: [], mid: [], done: new Set(), adGot: false, adBusy: false, adTries: 0, adT: 0, fpGot: false, peeked: false, tries: 0, timer: 0, t0: Date.now() } : null;
   if (ok) { paintSkip(); skipKick(); }
 }
-function skipStop() { if (ask) { clearTimeout(ask.timer); clearTimeout(ask.adT); ask.timer = ask.adT = 0; } }
+// 自动跳过设置: 顶栏一个按钮, 点开浮窗 (大屏在右侧, 小屏从底部上拉), 里面两个开关。复用选集 / 换源用的 .plist 面板, 样式和关闭方式都一致
+const skipUiOpen = () => { const b = $('.plist'); return !b.hidden && b.dataset.mode === 'skip'; };
+function skipState() {
+  const A = ask; if (!A) return [];
+  const n = x => x.length;
+  return [
+    { key: 'skipHT', name: '跳过片头 / 片尾', on: skipHT(),
+      sub: !A.n ? '选集要 3 集以上才能识别' : A.fpGot ? (n(A.head) + n(A.tail) ? `已识别 ${n(A.head) ? '片头 ' : ''}${n(A.tail) ? '片尾' : ''}`.trim() : '这一集没识别到') : skipHT() ? '识别中，稍等…' : '开启后才会分析' },
+    { key: 'skipAd', name: '跳过广告', on: skipAd(),
+      sub: A.adGot ? (n(A.mid) ? `发现 ${n(A.mid)} 段广告` : '没有发现广告') : '检测中…' },
+  ];
+}
+function drawSkip() {
+  const box = $('.plist');
+  box.dataset.mode = 'skip'; box.classList.remove('live', 'srcs'); box.classList.add('skipset');
+  box.innerHTML = `<div class="phead"><i class="grab"></i><b>自动跳过</b><span>进度条上标出位置</span><button class="icon sm" data-pclose title="关闭">✕</button></div>
+    <div class="pitems">${skipState().map(r => `<button data-k="${r.key}" role="switch" aria-checked="${r.on}"><span class="sn"><b>${r.name}</b><small>${esc(r.sub)}</small></span><i class="sw${r.on ? ' on' : ''}"></i></button>`).join('')}</div>`;
+  $('[data-pclose]', box).onclick = () => togglePlist(false);
+  $$('.pitems button', box).forEach(b => b.onclick = () => {
+    const k = b.dataset.k, on = (k === 'skipAd' ? skipAd() : skipHT()) ? '0' : '1';
+    localStorage[k] = on; paintSkip(); skipKick(); if (!skipHT()) skipStopFp(); drawSkip();
+  });
+}
+function openSkipSheet() {
+  if (!ask) return;
+  if (skipUiOpen()) return togglePlist(false);
+  drawSkip(); togglePlist(true);
+}
+function skipStopFp() { if (ask) { clearTimeout(ask.timer); ask.timer = 0; } }
+function skipStop() { if (ask) { skipStopFp(); clearTimeout(ask.adT); ask.adT = 0; } }
 function skipKick() {
-  if (!ask || !skipOn()) return;
+  if (!ask) return;
   const A = ask, tok = A.tok;
   if (!A.adGot && !A.adBusy) {
     A.adBusy = true;
-    api('adsegs', { u: A.u }, null).then(r => { if (ask?.tok === tok) { A.mid = r?.ads || []; A.adGot = !r?.err; } }, () => {})
+    api('adsegs', { u: A.u }, null).then(r => { if (ask?.tok === tok) { A.mid = r?.ads || []; A.adGot = !r?.err; paintMarks(); } }, () => {})
       .finally(() => { A.adBusy = false; if (ask?.tok === tok && !A.adGot && ++A.adTries < 3 && !A.adT) A.adT = setTimeout(() => { A.adT = 0; skipKick(); }, 5000); });
   }
-  if (A.n && !A.fpGot && !A.timer && A.tries < 40) A.timer = setTimeout(() => skipFetch(tok), Math.max(0, 8000 - (Date.now() - A.t0)));   // 先让正片稳稳播起来, 再去问
+  if (!A.n || A.fpGot) return;
+  if (!skipHT()) {                                    // 关着: 只看服务端有没有现成的, 没有就算了, 绝不触发计算
+    if (!A.peeked) { A.peeked = true; api('skipmarks', { u: A.u, n: A.n, peek: 1 }, null).then(r => { if (ask?.tok === tok && r?.status === 'ready') { A.head = r.head || []; A.tail = r.tail || []; A.fpGot = true; paintMarks(); } }, () => {}); }
+    return;
+  }
+  if (!A.timer && A.tries < 40) A.timer = setTimeout(() => skipFetch(tok), Math.max(0, 8000 - (Date.now() - A.t0)));   // 先让正片稳稳播起来, 再去问
 }
 function skipFetch(tok) {
   const A = ask; if (!A || A.tok !== tok) return;
   A.timer = 0;
-  if (!skipOn()) return;
+  if (!skipHT()) return;
   api('skipmarks', { u: A.u, n: A.n }, null).then(r => {
     if (ask?.tok !== tok) return;
-    if (r.status === 'ready') { A.head = r.head || []; A.tail = r.tail || []; A.fpGot = true; }
-    else if (r.status === 'none') A.fpGot = true;     // 算不了 (太短 / 没音轨 / 排队满): 不再追问
-    else if (r.status === 'pending' && ++A.tries < 40 && skipOn()) A.timer = setTimeout(() => skipFetch(tok), 15000);
+    if (r.status === 'ready') { A.head = r.head || []; A.tail = r.tail || []; A.fpGot = true; paintMarks(); }
+    else if (r.status === 'none') { A.fpGot = true; if (skipUiOpen()) drawSkip(); }     // 算不了 (太短 / 没音轨 / 排队满): 不再追问
+    else if (r.status === 'pending' && ++A.tries < 40 && skipHT()) A.timer = setTimeout(() => skipFetch(tok), 15000);
   }).catch(() => {});
 }
+// 片尾后面紧跟的广告 (间隔 20 秒内) 并进片尾: 一起标、一起跳到结尾。返回 { head, tail, mid (画标记用, 已并入片尾的不再单画), ads (跳过用, 全部) }
+function marksOf() {
+  const tail = (ask.tail || []).map(r => [...r]), ads = ask.mid || [];
+  for (const t of tail) for (const x of ads) if (x[0] >= t[0] - 1 && x[0] - t[1] < 20) t[1] = Math.max(t[1], x[1]);
+  const merged = x => tail.some(t => x[0] >= t[0] - 1 && x[1] <= t[1] + 0.5);
+  return { head: ask.head, tail, mid: ads.filter(x => !merged(x)), ads };
+}
+// 进度条上标出片头 / 片尾 (青色) 和广告 (琥珀色); 位置没变就不重画
+const marksEl = $('.tl .marks'); let marksKey = '';
+function paintMarks(d = vdur(video)) {
+  const M = ask && d > 0 && isFinite(d) && isVodTime() ? marksOf() : null, list = M ? [['h', M.head], ['a', M.mid], ['h', M.tail]] : [];
+  const key = list.map(([, l]) => JSON.stringify(l)).join('|') + '/' + Math.round(d);
+  if (key === marksKey) return;
+  marksKey = key;
+  if (skipUiOpen()) drawSkip();
+  marksEl.innerHTML = list.flatMap(([k, l]) => l.map(r => `<i class="${k}" style="left:${Math.max(0, r[0] / d * 100)}%;width:${Math.max(0.4, (Math.min(r[1], d) - r[0]) / d * 100)}%"></i>`)).join('');
+}
+// t 秒落在哪类段里 (预览浮层的时间后面带上类型)
+function markAt(t) {
+  if (!ask) return '';
+  const M = marksOf();
+  for (const [name, list] of [['片头', M.head], ['广告', M.mid], ['片尾', M.tail]]) if (list.some(r => t >= r[0] && t < r[1])) return name;
+  return '';
+}
 video.addEventListener('timeupdate', () => {
-  if (!ask || !skipOn() || (!ask.head.length && !ask.tail.length && !ask.mid.length) || scrubbing || video.seeking) return;
-  const t = video.currentTime, d = vdur(video);
-  for (const [name, list] of [['片头', ask.head], ['广告', ask.mid], ['片尾', ask.tail]]) for (const r of list) {
+  if (!ask || (!ask.head.length && !ask.tail.length && !ask.mid.length) || scrubbing || video.seeking) return;
+  const t = video.currentTime, d = vdur(video), M = marksOf();
+  for (const [name, list] of [['片头', skipHT() ? M.head : []], ['广告', skipAd() ? M.ads : []], ['片尾', skipHT() ? M.tail : []]]) for (const r of list) {
     const id = name + r[0];
     if (ask.done.has(id) || t < r[0] - 0.3 || t >= r[1] - 2) continue;
     ask.done.add(id);
@@ -2566,7 +2628,7 @@ function step(n) { cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)
 // Picking closes the panel; click outside or Esc also closes it.
 function renderPlist() {
   const box = $('.plist'), live = cur.kind === 'live';
-  box.dataset.mode = 'ep'; box.classList.remove('srcs');
+  box.dataset.mode = 'ep'; box.classList.remove('srcs', 'skipset');
   box.classList.toggle('live', live);
   box.innerHTML = `<div class="phead"><i class="grab"></i><b>${live ? '频道' : '选集'}</b><span>${cur.ep + 1} / ${cur.eps.length}</span>
       <button class="icon sm" data-pclose title="关闭">✕</button></div>
@@ -2584,7 +2646,7 @@ function togglePlist(open = $('.plist').hidden) {
   const box = $('.plist');
   if (open) sysClose();
   box.hidden = !open;
-  $('[data-act=list]').classList.toggle('on', open && box.dataset.mode !== 'src');
+  $('[data-act=list]').classList.toggle('on', open && box.dataset.mode === 'ep');
   player.classList.toggle('plopen', open);
   player.classList.toggle('srcopen', open && box.dataset.mode === 'src');
   if (open) {
@@ -2611,7 +2673,7 @@ player.addEventListener('click', e => {
   if (act === 'next') step(1);
   if (act === 'pip') togglePip();
   if (act === 'src') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSrcSheet(); }
-  if (act === 'list') { if ($('.plist').dataset.mode === 'src') { renderPlist(); return togglePlist(true); } return togglePlist(); }
+  if (act === 'list') { if ($('.plist').dataset.mode !== 'ep') { renderPlist(); return togglePlist(true); } return togglePlist(); }
   if (act === 'ext') { video.pause(); return openLocal(cur.eps[cur.ep].url, 'play'); }
   if (act === 'share') {
     const c = cur.eps[cur.ep], live = cur.kind === 'live';
@@ -2631,7 +2693,7 @@ player.addEventListener('click', e => {
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); paintStar(liveFavs.has(c.url)); return; }
   if (act === 'more') { sysClose(); const m = $('.pmore'); m.hidden = !m.hidden; e.target.closest('[data-act]').setAttribute('aria-expanded', !m.hidden); return; }
   if (act === 'rate') return cycleRate();
-  if (act === 'skipt') { localStorage.autoSkip = skipOn() ? '0' : '1'; paintSkip(); if (skipOn()) skipKick(); else skipStop(); return toast(skipOn() ? '已开启自动跳过片头片尾和广告' : '已关闭自动跳过'); }
+  if (act === 'skipt') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSkipSheet(); }
   if (act === 'fs') return toggleFs();
   if (act === 'cast') return sysToggle();
   if (act === 'lock') return setLock(true);
@@ -2668,17 +2730,10 @@ if (!fineCursor) {
   pacts.insertBefore($('[data-act=rate]'), $('[data-act=fs]'));
 }
 else {
-  pacts.insertBefore($('[data-act=share]'), $('[data-act=more]')); pacts.insertBefore($('[data-act=skipt]'), $('[data-act=more]'));
   $('[data-c=rate]').before($('[data-act=next]'), $('[data-act=list]'));   // 大屏: 选集在播放器下面, 倍速左边
-  // 窗口窄 (≤760px，比如缩小的浏览器窗口)：下载 / 分享 / 自动跳过 收进「更多」，顶栏只留 收藏 和 更多；变宽再放回去
-  const narrow = matchMedia('(max-width: 760px)'), tail = ['dl', 'share', 'skipt'].map(a => $(`[data-act=${a}]`)), home = [$('[data-act=ext]'), $('[data-act=more]'), $('[data-act=more]')];
-  const layoutNarrow = () => {
-    const more = $('.pmore');
-    tail.forEach((b, i) => narrow.matches ? more.insertBefore(b, $('[data-act=rate]', more)) : pacts.insertBefore(b, home[i]));
-    syncMore?.();
-  };
-  setTimeout(() => { layoutNarrow(); narrow.addEventListener('change', layoutNarrow); });   // syncMore 在下面才定义，等本段跑完再排
-}   // 大屏：分享留在顶栏；右上角「更多」里放切换源 (有别的源时才出现)
+  // 下载 / 分享 / 自动跳过 不管窗口多宽都收进「更多」，顶栏只留 收藏 和 更多
+  setTimeout(() => { const more = $('.pmore'); for (const x of ['dl', 'share', 'skipt']) more.insertBefore($(`[data-act=${x}]`), $('[data-act=rate]', more)); syncMore?.(); });   // syncMore 在下面才定义，等本段跑完再排
+}   // 右上角「更多」里放 下载 / 分享 / 自动跳过 / 切换源
 // 「更多」里一个能点的都没有 (本地文件、浏览器没有小窗…) 就不显示这个按钮
 const syncMore = () => { $('[data-act=more]').hidden = ![...$('.pmore').children].some(b => !b.hidden && !(fineCursor && b.dataset.act === 'rate')); };   // 大屏的倍速在控制条里，「更多」里只剩切换源
 const syncFs = () => { const h = hideFs(); $('[data-act=fs]').hidden = h; $('[data-c=fs]').hidden = h; };
@@ -2726,6 +2781,7 @@ function paintCtrl() {
   let end = 0;
   for (let i = 0; i < video.buffered.length; i++) if (video.buffered.start(i) <= t + 1) end = Math.max(end, video.buffered.end(i));
   tl.style.setProperty('--b', (end / d) * 100 + '%');
+  paintMarks(d);
 }
 for (const ev of ['timeupdate', 'durationchange', 'progress', 'play', 'pause', 'volumechange', 'loadedmetadata']) video.addEventListener(ev, paintCtrl);
 // Volume and mute are remembered (localStorage) and shared with the 沉浸 player: restored once at start, saved on every change.
@@ -2919,7 +2975,7 @@ function showAt(f) {
   const t = f * vdur(video), r = rotR(tl);
   tl.style.setProperty('--h', f * 100 + '%');
   tip.hidden = false;
-  $('span', tip).textContent = fmtT(t);
+  $('span', tip).textContent = fmtT(t) + (markAt(t) ? ' · ' + markAt(t) : '');   // 落在会被跳过的段里: 时间后面带上类型 (电脑悬停 / 手机拖动都走这里)
   const w = tip.offsetWidth;
   tip.style.left = Math.min(r.width - w / 2, Math.max(w / 2, f * r.width)) + 'px';
   previewAt(t);
