@@ -2032,3 +2032,11 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 
 .under-modal { transition: opacity .22s; }
 .under-modal.fade { opacity: 0; }
+
+.hact { display: flex; align-items: center; gap: 8px; }
+@media (max-width: 760px) {
+  .cathead .hact .spd { margin-right: 6px; font-size: 13px; }
+}
+
+/* 垫在下面的拷贝要接住触摸 (不是穿透): 转场期间手势不会落到不可见的下层页面上 */
+.under, .modal.under-modal { pointer-events: auto !important; }

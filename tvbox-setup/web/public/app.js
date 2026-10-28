@@ -1053,7 +1053,7 @@ const keepable = k => k.startsWith('#/|') || k.startsWith('#/charts|') || k.star
 const tabLast = new Map();
 const noteTab = h => { const m = /^#\/(charts|live)(\/|$)/.exec((h || '').split('?')[0]); if (m) tabLast.set(m[1], h); };
 const BACK_BTN = '<button type="button" class="cback" aria-label="返回"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>返回</button>';
-const isSubPage = p => p === 'cat' || p === 'person' || p === 'history';
+const isSubPage = p => p === 'cat' || p === 'person' || p === 'history' || p === 'favorites' || p === 'downloads';
 // 榜单里点进去的单个榜 (精选榜单的一个 / 某个类型 / 某年的榜) 也是子页面; 「类型排行」「年度榜」两个落地页本身不是 (它们是榜单页里的分段)
 const chartDetail = h => { const [, pg, tab, ...p] = (h || '').split('?')[0].split('/'); return pg === 'charts' && (tab === 'c' || ((tab === 'genre' || tab === 'year') && p.length > 0)); };
 const chartLanding = h => { const [, pg, tab, ...p] = (h || '').split('?')[0].split('/'); return pg === 'charts' && (tab === 'genre' || tab === 'year') && p.length === 0; };
@@ -1153,8 +1153,13 @@ function pushOverlay(kind, url) {
   history.pushState({ [kind]: 1, stack: [...(st.stack || []), curHash()], sk: st.sk }, '', url || location.href);
 }
 // 关掉最上面一层浮层 (✕ / 点遮罩 / Esc / 播放器返回键) = 后退一条历史记录。quiet: 浮层自己要留着 (进画中画), 后退时不用关
-let pipSkip = false, backAnim = false;     // backAnim: 这次返回是页面自己发起的 (返回按钮 / 自己的左滑), 详情页要播退出动画; 系统手势发起的返回系统已经有过渡了, 直接收起
-function closeOverlay(quiet) { if (quiet) pipSkip = true; backAnim = true; history.back(); }
+let pipSkip = false, backAnim = false, lastBackAt = 0;     // backAnim: 这次返回是页面自己发起的 (返回按钮 / 自己的左滑), 详情页要播退出动画; 系统手势发起的返回系统已经有过渡了, 直接收起
+// 返回锁: 自己发起的返回 450ms 内、或子页面正在滑出 / 详情页正在换回来时, 所有「返回」入口 (按钮 / 左边缘滑动 / 遮罩 / Esc) 一律不再处理
+const backLocked = () => Date.now() - lastBackAt < 450 || subLeaving || document.body.classList.contains('detail-wait');
+function closeOverlay(quiet) {
+  if (!quiet && backLocked()) return;            // 上一次返回还在转场 / 刚发出: 这次不再处理, 免得连下面不可见的那一层也一起退掉
+  if (quiet) pipSkip = true; backAnim = true; lastBackAt = Date.now(); history.back();
+}
 function setOverlayUrl(url) { if (url && url !== location.hash) history.replaceState(history.state, '', url); }
 // 当前这一页的 ?参数 改了 (排序 / 筛选…): 只改地址, 不重画, 不新增历史记录
 function setQuery(patch) {
@@ -1270,7 +1275,7 @@ async function route(opts = {}) {
   if (sub) { const sk = ensureSk(); if (!subInfo.has(sk)) setSubInfo(sk, { below: pageHash }); }
   if (sub && !prevSub) {
     const pp = (pageHash || '#/').split('?')[0].split('/')[1] || '';
-    catOrigin = ['charts', 'live', 'favorites', 'downloads', 'settings', 'search'].includes(pp) ? pp : !pageHash && page === 'charts' ? 'charts' : 'home';   // 从首页点进来 pp 是空的 → 首页; 只有刷新直接落在榜单子页时才默认榜单
+    catOrigin = page === 'favorites' || page === 'downloads' ? 'me' : ['charts', 'live', 'favorites', 'downloads', 'settings', 'search'].includes(pp) ? pp : !pageHash && page === 'charts' ? 'charts' : 'home';   // 收藏 / 下载是「我的」里的页面, 底部高亮「我的」; 其余: 从哪个 tab 点进来的 (首页点进来 pp 是空的 → 首页; 只有刷新直接落在榜单子页时才默认榜单)
     if (smallScreen.matches && !fineCursor) { view.classList.add('subin'); showUnder(); setTimeout(() => { view.classList.remove('subin'); hideUnder(); }, 380); }
   }
   document.body.dataset.sub = sub ? '1' : '';
@@ -1279,7 +1284,7 @@ async function route(opts = {}) {
   document.body.dataset.page = !page || page === 'site' ? 'home' : page;      // 小屏只有首页显示顶栏 (logo + 当前源)
   const navPage = sub ? catOrigin : page === 'site' ? '' : page;      // 点详情里的「点播源」标签 (#/site/源) = 切到那个源的首页, 高亮首页
   $$('nav a').forEach(n => n.classList.toggle('on', n.dataset.nav === (navPage || 'home')));
-  $('#mineTab')?.classList.toggle('on', ['favorites', 'downloads', 'settings'].includes(navPage));
+  $('#mineTab')?.classList.toggle('on', ['me', 'favorites', 'downloads', 'settings'].includes(navPage));
   restoreCtl?.();
   const hit = opts.nav && tabMode && nextKey && tabKeep.get(nextKey);
   if (hit) {                                              // 保活的页面: 原样放回来
@@ -1801,8 +1806,8 @@ function renderHistory() {
 function renderFavorites() {
   if (kidsMode()) { view.innerHTML = '<div class="page"><h1>我的收藏</h1><p class="empty">儿童模式下收藏不可见。</p></div>'; return; }
   const list = favs.list();
-  view.innerHTML = `<div class="page"><div class="pagehead"><h1>我的收藏</h1>
-      ${list.length ? `<button class="small ibs feedgo" data-feed="fav" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button><button class="small ibs" data-clear="fav" title="清空全部" aria-label="清空全部">${IC.trash}</button>` : ''}</div>
+  view.innerHTML = `<div class="page"><div class="pagehead cathead">${BACK_BTN}<h1>我的收藏</h1>
+      ${list.length ? `<div class="hact"><button class="small ibs feedgo" data-feed="fav" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button><button class="small ibs" data-clear="fav" title="清空全部" aria-label="清空全部">${IC.trash}</button></div>` : ''}</div>
     <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有收藏。打开影片，点封面页的「♡」。</p>
     ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'fav', sub: [it.siteName, it.type].filter(Boolean).join(' · ') })).join('')}</div>` : ''}</div>`;
   observeRatings(view);
@@ -2331,10 +2336,10 @@ async function renderDownloads() {
     const total = j.jobs.reduce((s, x) => s + (x.bytes || 0), 0);
     const anyActive = j.jobs.some(x => ACTIVE.includes(x.status)), anyPaused = j.jobs.some(x => ['paused', 'error'].includes(x.status));
     const totalSpeed = j.jobs.reduce((n, x) => n + (x.speed || 0), 0);
-    view.innerHTML = `<div class="page"><div class="pagehead"><h1>下载</h1>
+    view.innerHTML = `<div class="page"><div class="pagehead cathead">${BACK_BTN}<h1>下载</h1><div class="hact">
         ${anyActive ? `<button class="small ibs" data-op="pause" data-all title="全部暂停" aria-label="全部暂停">${IC.pause}</button>` : ''}
         ${anyPaused ? `<button class="small ibs" data-op="resume" data-all title="全部开始" aria-label="全部开始">${IC.play}</button>` : ''}
-        ${totalSpeed ? `<span class="spd">${fmtSpeed(totalSpeed)}</span>` : ''}</div>
+        ${totalSpeed ? `<span class="spd">${fmtSpeed(totalSpeed)}</span>` : ''}</div></div>
       <p class="lan">已用 ${fmtSize(total)}${j.free ? ` · 剩余 ${fmtSize(j.free)}` : ''} · 同时下载 ${j.maxJobs} 集</p>
       ${j.jobs.length ? `<div class="dls">${j.jobs.map(x => {
         const pct = x.pct || 0;
@@ -2401,8 +2406,10 @@ function enableEdgeBack(m) {
     g = null;
     if (!smallScreen.matches || e.touches.length !== 1) return;
     const t = e.touches[0];
-    if (t.clientX <= 32) g = { x: t.clientX, y: t.clientY, dx: 0, lock: '', t: Date.now() };
-  }, { passive: true });
+    if (t.clientX > 32) return;
+    e.preventDefault();                       // 屏幕左边缘的触摸归自己: 系统的边缘返回手势不再触发 (不然系统退一层、这里又退一层)
+    if (!backLocked()) g = { x: t.clientX, y: t.clientY, dx: 0, lock: '', t: Date.now() };
+  }, { passive: false });
   m.addEventListener('touchmove', e => {
     if (!g) return;
     const t = e.touches[0], dx = t.clientX - g.x, dy = t.clientY - g.y;
@@ -5541,7 +5548,7 @@ function hideUnder(fade) {
   if (fade) { u.classList.add('fade'); setTimeout(() => u.remove(), 260); } else u.remove();
 }
 function leaveSub() {
-  if (subLeaving) return; subLeaving = true;
+  if (backLocked()) return; subLeaving = true; lastBackAt = Date.now();
   showUnder();
   const info = curInfo(), toDetail = !!info?.snap;      // 下面是一页详情: 真正的详情页画好之前一直留着那份拷贝垫着 (不然会闪一下骨架屏)
   view.classList.add('subleave');
@@ -5559,6 +5566,7 @@ function leaveSub() {
     view.style.visibility = 'hidden';
     if (toDetail) document.body.classList.add('detail-wait');
     const from = location.hash, seq0 = routeSeq, want = info?.snap?.dataset.key;
+    lastBackAt = Date.now();
     if (history.length > 1 && history.state) history.back(); else location.hash = catOrigin === 'charts' ? '#/charts' : '#/';
     // 不靠固定的延时: 一直垫着, 直到后退真的完成、目标页面 (和详情) 都画好了才撤掉 —— 页面大 / 路由慢 (榜单这种几百行的页面) 时不会提前露出黑底。
     // 目标是详情: 下面那页被详情整个盖住, 只等详情; 目标是页面: 等路由重画 (routeSeq 变了) 并完成 (readyHash)。后退后什么都没变 (同一地址) 就别干等
@@ -5583,10 +5591,14 @@ document.addEventListener('click', e => {
   let g = null;
   view.addEventListener('touchstart', e => {
     g = null;
-    if (document.body.dataset.sub !== '1' || !smallScreen.matches || subLeaving || e.touches.length !== 1) return;
+    if (document.body.dataset.sub !== '1' || !smallScreen.matches || e.touches.length !== 1) return;
     const t = e.touches[0];
-    if (t.clientX <= 32) g = { x: t.clientX, y: t.clientY, dx: 0, lock: '', t: Date.now() };
-  }, { passive: true });
+    if (t.clientX > 32) return;
+    // 上面还盖着详情 / 播放器 / 沉浸页时, 这一层是不可见的下层: 不处理 (它们的触摸本来也到不了这里, 这里再兜一道)
+    if ($('#modal') || playerOpen() || window.feedOpen?.()) return;
+    e.preventDefault();                       // 同详情页: 屏幕左边缘的触摸归自己, 不让系统的边缘返回手势再退一层
+    if (!backLocked()) g = { x: t.clientX, y: t.clientY, dx: 0, lock: '', t: Date.now() };
+  }, { passive: false });
   view.addEventListener('touchmove', e => {
     if (!g) return;
     const t = e.touches[0], dx = t.clientX - g.x, dy = t.clientY - g.y;
