@@ -456,6 +456,7 @@ function activate() {
   skEnsure(s); feedMarks();
   F.userPaused = false;
   if (!s.it) return;
+  syncFeedUrl();
   markSeen(s.it);
   syncRail();
   clearTimeout(kickT); kickT = setTimeout(kick, 7000);
@@ -597,6 +598,12 @@ async function pump() {
   F.pumping = true;
   const gen = F.gen;
   try {
+    if (F.at && !F.items.length) {                      // 从地址 (?v=) 恢复: 先把指定的这一部放在第一个, 后面照常往下抽
+      const [site, ...r] = F.at.split('|'), id = r.join('|'); F.at = null;
+      const d = site && id ? await validate({ site, id }) : null;
+      if (gen !== F.gen) return;
+      if (d) { const it = { ...d, site, id, _d: d }; F.keys.add(keyOf(it)); F.names.add(nameOf(it)); F.items.push(it); onItems(); }
+    }
     while (gen === F.gen && F.items.length < F.idx + AHEAD + 1) {
       if (F.cand.length < 3) {
         let more = [];
@@ -675,7 +682,8 @@ function startMode(mode, extra) {
   closeOverlays();
   q('.fd-mode span').textContent = modeLabel();
   syncRail();
-  if (!root.hidden && history.state?.feed) { setOverlayUrl(feedUrl()); if (feedAt) feedAt.url = location.href; }
+  F.at = F.atNext || null; F.atNext = null;
+  syncFeedUrl();
   pump();
 }
 function renderMenu() {
@@ -956,12 +964,19 @@ const feedUrl = () => {
   if (F.mode === 'search') return `#/feed/search/${e(x.q || '')}/${e(x.scope || '')}`;
   return `#/feed/${F.mode === 'list' ? 'rec' : F.mode}`;
 };
+// 正在看的这一部也写进地址 (?v=源|片ID): 刷新 / 分享链接回来时从这一部接着看, 而不是重新抽一批
+const feedHref = () => {
+  const base = feedUrl(), it = !root.hidden && cur()?.it;
+  return it?.site && it.id != null ? base + '?v=' + encodeURIComponent(it.site + '|' + it.id) : base;
+};
+const syncFeedUrl = () => { if (!root.hidden && history.state?.feed) { setOverlayUrl(feedHref()); if (feedAt) feedAt.url = location.href; } };
 let feedAt = null;                                         // 沉浸页这条历史记录 (state + 地址): 拖动误触返回后原样补回去
 function openFeed(o = {}, restore = false) {
   if (!root.hidden) return;
   if (!state.sites.length) return toast('还没有可用的点播源');
   const mode = o.mode === 'fav' && kidsMode() ? 'rec' : (o.mode || 'rec');
   F.mode = mode; F.extra = o.mode === 'cat' || o.mode === 'search' || o.mode === 'list' ? o : null;
+  F.atNext = o.at || null;
   if (!restore) pushOverlay('feed', feedUrl());
   feedAt = { state: history.state, url: location.href };
   root.hidden = false; document.body.style.overflow = 'hidden';

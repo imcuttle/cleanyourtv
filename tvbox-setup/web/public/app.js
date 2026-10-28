@@ -1125,21 +1125,15 @@ const curHash = () => location.hash || '#/';
 let pageHash = null, routeHash = '', restoring = false;
 const onPage = p => (pageHash ?? location.hash ?? '').startsWith(p);       // 当前页面 (浮层下面那一页) 是不是 p
 const hashParams = () => new URLSearchParams((routeHash || location.hash).split('?')[1] || '');
-// 浮层不新增历史记录: 打开 / 关闭都是 replaceState, 返回键直接回到上一个「页面」(菜单切换、去搜索才是 push)。
-// state 里的 stack 记着它下面每一层的地址, 关闭 (closeOverlay) 就是换回上一层的地址; sk 是页面的滚动位置键, 一路带着。
-const OV_KIND = { v: 'modal', play: 'player', tv: 'player', feed: 'feed' };
+// 浮层 (详情 / 播放器 / 沉浸页) 打开时 pushState: 新历史记录, 地址跟着变, 系统返回 / 左滑 = 收起最上面一层, 回到它下面那一层。
+// state 里的 stack 记着它下面每一层的地址 (刷新后按它把下面几层重新搭起来); sk 是页面的滚动位置键, 一路带着。
 function pushOverlay(kind, url) {
   const st = history.state && typeof history.state === 'object' ? history.state : {};
-  history.replaceState({ [kind]: 1, stack: [...(st.stack || []), curHash()], sk: st.sk }, '', url || location.href);
+  history.pushState({ [kind]: 1, stack: [...(st.stack || []), curHash()], sk: st.sk }, '', url || location.href);
 }
-// 关掉最上面一层浮层 (✕ / 点遮罩 / Esc / 播放器返回键): 地址和 state 换回下面一层。quiet: 浮层自己已经处理 (进画中画), 不用再通知
-function closeOverlay(quiet) {
-  const st = history.state && typeof history.state === 'object' ? history.state : {};
-  if (!(st.modal || st.player || st.feed) || !st.stack?.length) return history.back();
-  const stack = st.stack.slice(0, -1), under = st.stack.at(-1), k = OV_KIND[hashPage(under)];
-  history.replaceState({ ...(k ? { [k]: 1, stack } : {}), sk: st.sk }, '', under);
-  if (!quiet) dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
-}
+// 关掉最上面一层浮层 (✕ / 点遮罩 / Esc / 播放器返回键) = 后退一条历史记录。quiet: 浮层自己要留着 (进画中画), 后退时不用关
+let pipSkip = false;
+function closeOverlay(quiet) { if (quiet) pipSkip = true; history.back(); }
 function setOverlayUrl(url) { if (url && url !== location.hash) history.replaceState(history.state, '', url); }
 // 当前这一页的 ?参数 改了 (排序 / 筛选…): 只改地址, 不重画, 不新增历史记录
 function setQuery(patch) {
@@ -1209,7 +1203,7 @@ async function restoreOverlays(H) {
       } else if (p === 'feed') {
         const m = hashSeg(h, 2) || 'rec';
         window.openFeed?.({ mode: m, t: m === 'cat' ? hashSeg(h, 3) : '', name: m === 'cat' ? hashSeg(h, 4) : '', site: m === 'cat' ? hashSeg(h, 5) || state.site : state.site,
-          q: m === 'search' ? hashSeg(h, 3) : '', scope: m === 'search' ? hashSeg(h, 4) : '' }, again);
+          q: m === 'search' ? hashSeg(h, 3) : '', scope: m === 'search' ? hashSeg(h, 4) : '', at: new URLSearchParams(h.split('?')[1] || '').get('v') || '' }, again);
       }
     }
   } finally { restoring = false; }
@@ -1630,7 +1624,7 @@ function hero(items) {
         <p>${esc(it.blurb)}</p>
         <div class="btns"><button class="btn play">▶ 播放</button><button class="btn more">ⓘ 详情</button></div></div>
       <div class="dots">${items.map((_, k) => `<i class="${k === i ? 'on' : ''}" data-k="${k}"></i>`).join('')}</div>`;
-    el.querySelector('.play').onclick = () => openDetail(it.site, it.id, true);
+    el.querySelector('.play').onclick = () => { if (it.site) cardItems.set(it.site + '|' + it.id, it); playDirect({ dataset: { site: it.site, id: it.id } }); };
     el.querySelector('.more').onclick = () => openDetail(it.site, it.id);
     $$('.dots i', el).forEach(d => d.onclick = () => { i = +d.dataset.k; show(); });
     const dbTag = r => { if (items[i] !== it) return; const t = el.querySelector('.dbtag'); if (t && r.rate) { t.textContent = '豆瓣 ' + r.rate; t.hidden = false; } };
@@ -2485,6 +2479,7 @@ function closeDetail() {
   m.remove(); document.body.style.overflow = '';
 }
 addEventListener('popstate', () => {
+  if (pipSkip) { pipSkip = false; return; }   // 我们自己为画中画做的后退
   const P = hashPage(location.hash);
   // 回到哪一层的地址, 就关掉它上面的: 播放器 → 详情 (只关播放器), 详情 → 页面 (关详情)
   if (playerOpen() && P !== 'play' && P !== 'tv') closePlayer();
