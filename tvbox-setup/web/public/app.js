@@ -2407,9 +2407,8 @@ function enableEdgeBack(m) {
     if (!smallScreen.matches || e.touches.length !== 1) return;
     const t = e.touches[0];
     if (t.clientX > 32) return;
-    e.preventDefault();                       // 屏幕左边缘的触摸归自己: 系统的边缘返回手势不再触发 (不然系统退一层、这里又退一层)
     if (!backLocked()) g = { x: t.clientX, y: t.clientY, dx: 0, lock: '', t: Date.now() };
-  }, { passive: false });
+  }, { passive: true });
   m.addEventListener('touchmove', e => {
     if (!g) return;
     const t = e.touches[0], dx = t.clientX - g.x, dy = t.clientY - g.y;
@@ -5596,9 +5595,8 @@ document.addEventListener('click', e => {
     if (t.clientX > 32) return;
     // 上面还盖着详情 / 播放器 / 沉浸页时, 这一层是不可见的下层: 不处理 (它们的触摸本来也到不了这里, 这里再兜一道)
     if ($('#modal') || playerOpen() || window.feedOpen?.()) return;
-    e.preventDefault();                       // 同详情页: 屏幕左边缘的触摸归自己, 不让系统的边缘返回手势再退一层
     if (!backLocked()) g = { x: t.clientX, y: t.clientY, dx: 0, lock: '', t: Date.now() };
-  }, { passive: false });
+  }, { passive: true });
   view.addEventListener('touchmove', e => {
     if (!g) return;
     const t = e.touches[0], dx = t.clientX - g.x, dy = t.clientY - g.y;
@@ -5606,7 +5604,7 @@ document.addEventListener('click', e => {
     if (g.lock !== 'x') return;
     e.preventDefault();
     g.dx = Math.max(0, dx);
-    showUnder(); view.style.transition = 'none'; view.style.transform = `translate3d(${g.dx}px,0,0)`;
+    showUnder(); view.classList.add('subleave'); view.style.transition = 'none'; view.style.transform = `translate3d(${g.dx}px,0,0)`;
   }, { passive: false });
   const end = () => {
     if (!g) return;
@@ -5614,7 +5612,7 @@ document.addEventListener('click', e => {
     if (d.lock !== 'x') return;
     const v = d.dx / Math.max(1, Date.now() - d.t);
     if (d.dx > innerWidth / 3 || v > .5) leaveSub();
-    else { view.style.transition = 'transform .25s cubic-bezier(.32,.72,0,1)'; view.style.transform = 'translate3d(0,0,0)'; setTimeout(() => { view.style.transition = view.style.transform = ''; hideUnder(); }, 270); }
+    else { view.style.transition = 'transform .25s cubic-bezier(.32,.72,0,1)'; view.style.transform = 'translate3d(0,0,0)'; setTimeout(() => { view.style.transition = view.style.transform = ''; view.classList.remove('subleave'); hideUnder(); }, 270); }
   };
   view.addEventListener('touchend', end); view.addEventListener('touchcancel', end);
 }
