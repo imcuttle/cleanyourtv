@@ -5255,7 +5255,7 @@ setInterval(() => { if (cur?.kind === 'vod' && !player.hidden && state.downloads
     Pop.open({
       anchor: tab, sheet: false, x: innerWidth, cls: 'pop-menu minemenu', role: 'menu',
       body: rows.map(([k, t]) => `<a href="#/${k}" role="menuitem" class="${pageNow === k ? 'on' : ''}">${ICONS[k]}<span>${t}</span></a>`).join('')
-        + (ACCT.me || localStorage.tvbox_acct_on ? `<a href="#/settings/account" role="menuitem">${tab.querySelector('svg').outerHTML}<span>账号：${esc(ACCT.me ? ACCT.me.name : '访客')}</span></a>` : ''),
+        + ($('.acctwrap') && !$('.acctwrap').hidden ? `<a href="#/settings/account" role="menuitem">${tab.querySelector('svg').outerHTML}<span>账号</span>${$('#acctBtn')?.innerHTML || ''}</a>` : ''),
       onClick: (ev, close) => { if (ev.target.closest('a')) setTimeout(close, 0); },
     });
   });
