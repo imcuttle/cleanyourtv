@@ -35,12 +35,12 @@ root.innerHTML = `
     <button class="fd-ic" data-a="mute" title="静音 (m)" aria-label="静音">${I.vol}</button>
   </div>
   <div class="fd-rail">
-    <button data-a="like" title="喜欢 (l)">${I.heart}<span>喜欢</span></button>
-    <button data-a="fav" title="收藏 (s)">${I.star}<span>收藏</span></button>
-    <button data-a="eps" title="选集 (e)">${I.list}<span>选集</span></button>
-    <button data-a="share" title="分享">${I.share}<span>分享</span></button>
-    <button data-a="detail" title="详情 (i)">${I.info}<span>详情</span></button>
-    <button data-a="dislike" title="不感兴趣 (d)">${I.ban}<span>不想看</span></button>
+    <button data-a="like" title="喜欢 (l)" aria-label="喜欢">${I.heart}</button>
+    <button data-a="fav" title="收藏 (s)" aria-label="收藏">${I.star}</button>
+    <button data-a="eps" title="选集 (e)" aria-label="选集">${I.list}</button>
+    <button data-a="share" title="分享" aria-label="分享">${I.share}</button>
+    <button data-a="detail" title="详情 (i)" aria-label="详情">${I.info}</button>
+    <button data-a="dislike" title="不感兴趣 (d)" aria-label="不感兴趣">${I.ban}</button>
   </div>
   <div class="fd-nav fd-fine"><button data-a="up" title="上一个 (↑)" aria-label="上一个">${I.up}</button><button data-a="down" title="下一个 (↓)" aria-label="下一个">${I.down}</button></div>
   <div class="fd-prog"><div class="rail"><i class="buf"></i><i class="played"></i><span class="marks"></span><b class="knob"></b></div></div>
@@ -172,7 +172,7 @@ function mkSlide() {
     if (s !== cur()) return;
     if (dt > 0 && dt < 1.5 && !v.paused) s.watched += dt;
     if (Date.now() - s.lastSave > 4000 && vdur(v)) saveHist(s);
-    if (s.sk && !scrub && !(g && g.axis === 'x')) {                 // 自动跳过片头 / 片尾 / 广告 (开关在普通播放器的「自动跳过」里, 沉浸里不放入口)
+    if (s.sk && !scrub && !ks && !(g && g.axis === 'x')) {                 // 自动跳过片头 / 片尾 / 广告 (开关在普通播放器的「自动跳过」里, 沉浸里不放入口)
       const hit = skipDue(s.sk, v);
       if (hit) { v.currentTime = hit.to; noteSkip('已跳过' + hit.name); }
     }
@@ -913,6 +913,26 @@ root.addEventListener('wheel', e => {
   if (Math.abs(wAcc) >= 40) { wLocked = true; wLockAt = performance.now(); go(wAcc > 0 ? 1 : -1); wAcc = 0; }
 }, { passive: false });
 
+// 长按 ← → 连续快进快退 (和普通播放器一致: 每个按键事件 ±10 秒): 画面和进度条实时跟着走, 松开 / 失焦时落到最终位置
+let ks = null;
+function keySeek(v, d) {
+  const dur = vdur(v); if (!dur || !isFinite(dur)) return;
+  if (!ks || ks.v !== v) ks = { v, t: v.currentTime || 0 };
+  ks.t = Math.max(0, Math.min(dur - .5, ks.t + d));
+  root.classList.add('scrubbing');
+  root.style.setProperty('--p', ks.t / dur);
+  showTip(fmtT(ks.t), tipSub(cur(), ks.t, dur));
+  liveSeek(ks.t);
+}
+function keySeekEnd() {
+  if (!ks) return;
+  const { v, t } = ks; ks = null; seekWant = null;
+  v.currentTime = t;
+  root.classList.remove('scrubbing'); tipEl.hidden = true;
+}
+addEventListener('keyup', e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') keySeekEnd(); }, true);
+addEventListener('blur', keySeekEnd);
+
 // keyboard
 addEventListener('keydown', e => {
   if (root.hidden || e.target.matches?.('input, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -923,8 +943,7 @@ addEventListener('keydown', e => {
   if (k === 'Escape') { if (!menuEl.hidden || !sheetEl.hidden) { used(); return closeOverlays(); } if (document.fullscreenElement) return; used(); guardUntil = 0; return closeOverlay(); }
   if (k === 'ArrowDown' || k === 'j' || k === 'PageDown') { used(); return go(1); }
   if (k === 'ArrowUp' || k === 'k' || k === 'PageUp') { used(); return go(-1); }
-  if (k === 'ArrowRight' && vdur(v)) { used(); seekBy(v, 5); return; }
-  if (k === 'ArrowLeft' && vdur(v)) { used(); seekBy(v, -5); return; }
+  if ((k === 'ArrowRight' || k === 'ArrowLeft') && vdur(v)) { used(); keySeek(v, k === 'ArrowRight' ? 10 : -10); return; }
   if (k === ' ') { used(); return togglePause(); }
   const map = { l: 'like', s: 'fav', e: 'eps', i: 'detail', d: 'dislike', m: 'mute', f: 'fs' };
   if (map[k]) { used(); return act(map[k]); }
@@ -941,7 +960,7 @@ function tick() {
   root.classList.toggle('live', !vod);
   if (!vod) return;
   const t = v.currentTime, d = vdur(v);
-  if (!scrub && !(g && g.axis === 'x')) {
+  if (!scrub && !ks && !(g && g.axis === 'x')) {
     const p = t / d; if (Math.abs(p - lastP) > 1e-4) { lastP = p; root.style.setProperty('--p', p); }
   }
   let end = 0;
@@ -991,7 +1010,7 @@ function hideFeed() {
   F.gen++;
   ring.forEach(s => { teardown(s); Object.assign(s, { i: -1, it: null, d: null }); s.el.classList.add('empty'); });
   root.hidden = true; closeOverlays(); tipEl.hidden = true; rateEl.hidden = true;
-  root.classList.remove('scrubbing', 'dragging');
+  ks = null; root.classList.remove('scrubbing', 'dragging');
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   if (!$('#modal') && player.hidden) document.body.style.overflow = '';
   cancelAnimationFrame(raf);

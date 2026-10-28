@@ -16,7 +16,7 @@
 <link rel="icon" href="icon.svg">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=20261028t">
+<link rel="stylesheet" href="style.css?v=20261030z">
 <style>
 /* 访问令牌蒙层。html 的 data-auth 属性由服务端写：1 已登录（蒙层从头到尾不存在）、0 未登录（首帧就是登录框）；
    pending = 正在用浏览器里记住的令牌自动登录（只显示 logo，不闪登录框）。没有这个属性 = 离线缓存的页面，按 pending 处理。 */
@@ -142,11 +142,12 @@ html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
   <nav>
     <a href="#/" data-nav="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span>首页</span></a>
     <a href="#/charts" data-nav="charts"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V10h4v11zM10 21V3h4v18zM15 21v-7h4v7z"/></svg><span>榜单</span></a>
-    <a href="#/live" data-nav="live"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v12H3z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 21h6M10 10l5 2.5-5 2.5z"/></svg><span>直播</span></a>
+    <a href="#/search" data-nav="search" class="stab" id="searchTab" role="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.3" fill="none" stroke="currentColor" stroke-width="2.6"/><path d="M15.4 15.4L21 21" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/></svg><span>搜索</span></a>
+    <a href="#/live" data-nav="live"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13.2" rx="2.4"/><path d="M8 20h8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg><span>直播</span></a>
     <a href="#/favorites" data-nav="favorites"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21l-1.5-1.3C5.4 15.1 2 12 2 8.5A4.5 4.5 0 0 1 6.5 4c1.7 0 3.4.8 4.5 2.1C12.1 4.8 13.8 4 15.5 4A4.5 4.5 0 0 1 20 8.5c0 3.5-3.4 6.6-8.5 11.2z"/></svg><span>收藏</span></a>
     <a href="#/downloads" data-nav="downloads"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h2v9l3.5-3.5 1.4 1.4L12 16 6.1 9.9l1.4-1.4L11 12zM4 18h16v3H4z"/></svg><span>下载</span></a>
     <a href="#/settings" data-nav="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.7 1.7 1L11 21h4l.4-2.9c.6-.3 1.2-.6 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg><span>设置</span></a>
-    <a href="#/me" class="mine" data-nav="me" id="mineTab" role="button" aria-haspopup="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.2 4.2 0 1 0 0-8.4 4.2 4.2 0 0 0 0 8.4zM4 21c0-4.4 3.6-7.4 8-7.4s8 3 8 7.4z"/></svg><span>我的</span></a>
+    <a href="#/me" class="mine" data-nav="me" id="mineTab" role="button" aria-haspopup="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 4.2a3.3 3.3 0 1 1 0 6.6 3.3 3.3 0 0 1 0-6.6zm0 13a8 8 0 0 1-6.3-3.1c.7-2 3.7-3.1 6.3-3.1s5.6 1.1 6.3 3.1a8 8 0 0 1-6.3 3.1z"/></svg><span>我的</span></a>
   </nav>
   <div class="right">
     <form id="searchForm" class="search" role="search">
@@ -250,8 +251,8 @@ html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
 
 <script>if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));</script>
 <script src="vendor/hls.min.js"></script>
-<script src="acct.js?v=20261028t"></script>
-<script src="app.js?v=20261028t"></script>
-<script src="feed.js?v=20261028t"></script>
+<script src="acct.js?v=20261030z"></script>
+<script src="app.js?v=20261030z"></script>
+<script src="feed.js?v=20261030z"></script>
 </body>
 </html>

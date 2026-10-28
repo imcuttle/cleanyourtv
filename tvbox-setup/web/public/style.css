@@ -78,7 +78,7 @@ nav a:hover { color: #b3b3b3; }
 .hero .bg { position: absolute; inset: -40px; background-size: cover; background-position: center 25%; filter: blur(28px) brightness(.55); transform: scale(1.1); }
 .hero .poster { position: absolute; right: 8%; bottom: 14%; height: 62%; aspect-ratio: 2/3; border-radius: 8px; background-size: cover; background-position: center;
   box-shadow: 0 30px 60px #000c; }
-.hero::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, #141414e6 0, #14141466 45%, #0000 70%), linear-gradient(#0000 60%, var(--bg)); }
+.hero .hslide::after { content: ""; position: absolute; inset: 0; z-index: 1; background: linear-gradient(90deg, #141414e6 0, #14141466 45%, #0000 70%), linear-gradient(#0000 60%, var(--bg)); }
 .hero .info { position: absolute; z-index: 2; left: 4%; bottom: 20%; width: min(560px, 60%); }
 .hero h1 { font-size: clamp(30px, 4.5vw, 60px); line-height: 1.1; margin: 0 0 12px; text-shadow: 2px 2px 8px #0008; }
 .hero .meta { color: #ddd; margin-bottom: 10px; }
@@ -98,7 +98,6 @@ nav a:hover { color: #b3b3b3; }
 .rows { position: relative; z-index: 3; margin-top: -9vh; padding-bottom: 50px; }
 .row { margin: 0 0 3vw; }
 .row h2 { margin: 0 4% 8px; font-size: clamp(16px, 1.5vw, 22px); }
-.row h2 a:hover::after { content: " 全部 ›"; font-size: 13px; color: #54b9c5; }
 .track { position: relative; }
 .scroller { display: flex; gap: 8px; overflow-x: auto; scroll-behavior: smooth; padding: 0 4% 10px; scrollbar-width: none; }
 .scroller::-webkit-scrollbar { display: none; }
@@ -126,7 +125,8 @@ nav a:hover { color: #b3b3b3; }
 .dbtag { display: inline-block; background: #00b51d; color: #fff; font-size: 12px; font-weight: 700; padding: 1px 7px; border-radius: 3px; }
 .meta .dbtag { margin-right: 10px; }
 a.dbtag:hover { filter: brightness(1.15); }
-.card .prog { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--red); }
+.card .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: #ffffff4d; }
+.card .prog i { display: block; height: 100%; background: var(--red); }
 
 .page { padding: 90px 4% 50px; }
 .page h1 { margin: 0 0 18px; font-size: 28px; }
@@ -332,7 +332,7 @@ a.ch { color: inherit; }
   .hero .poster { right: 50%; transform: translateX(50%); top: 110px; bottom: auto; height: 48%; }
   .hero .info { width: 92%; bottom: 13%; text-align: center; } .hero .btns { justify-content: center; }
   .hero p { display: none; }
-  .hero::after { background: linear-gradient(#0000 40%, var(--bg) 92%); }
+  .hero .hslide::after { background: linear-gradient(#0000 40%, var(--bg) 92%); }
   .rows { margin-top: -4vh; }
   .page { padding-top: 120px; }
   .sheet .top { height: 300px; } .sheet .top .poster { height: 200px; top: 30px; }
@@ -614,6 +614,7 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 /* ---------- 沉浸式看片 (feed.js) ---------- */
 .feedgo { background: var(--red) !important; border-color: var(--red) !important; color: #fff !important; font-weight: 700; }
 #feed { position: fixed; inset: 0; z-index: 28; background: #000; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; overscroll-behavior-y: none; -webkit-touch-callout: none; }
+#feed:not([hidden]) ~ .modal { z-index: 29; }   /* 沉浸页里点「详情」: 小屏的详情页 z-index 比沉浸页低, 会被盖在下面 */
 #feed[hidden] { display: none; }
 #feed button { font: inherit; color: #fff; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .fd-slides { position: absolute; inset: 0; }
@@ -624,10 +625,10 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 .fd-slide video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: transparent; }
 .fd-slide.empty video, .fd-slide.empty .fd-info { display: none; }
 .fd-shade { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(#0008, #0000 18%, #0000 55%, #000d); }
-.fd-info { position: absolute; left: max(16px, env(safe-area-inset-left)); right: 96px; bottom: calc(34px + var(--sb)); pointer-events: none; text-shadow: 0 1px 6px #000a; }
-.fd-info h2 { margin: 0 0 6px; font-size: 19px; line-height: 1.3; font-weight: 800; }
-.fd-info .m { font-size: 13px; color: #ddd; margin-bottom: 6px; }
-.fd-info p { margin: 0; font-size: 13px; line-height: 1.5; color: #ccc; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 640px; }
+.fd-info { position: absolute; z-index: 2; left: max(16px, env(safe-area-inset-left)); right: 76px; bottom: calc(34px + var(--sb)); pointer-events: none; text-shadow: 0 1px 6px #000a; }
+.fd-info h2 { margin: 0 0 3px; font-size: 16px; line-height: 1.3; font-weight: 800; }
+.fd-info .m { font-size: 12px; color: #ddd; margin-bottom: 3px; }
+.fd-info p { margin: 0; font-size: 12px; line-height: 1.5; color: #ccc; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 640px; }
 .fd-pause { position: absolute; left: 50%; top: 50%; width: 76px; height: 76px; margin: -38px 0 0 -38px; border-radius: 50%; background: #0007; display: none; align-items: center; justify-content: center; pointer-events: none; }
 .fd-pause svg { width: 38px; height: 38px; fill: #fff; margin-left: 4px; }
 .fd-slide.paused .fd-pause { display: flex; }
@@ -636,16 +637,16 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 .fd-msg { position: absolute; left: 0; right: 0; top: 46%; text-align: center; font-size: 15px; color: #fff; pointer-events: none; text-shadow: 0 1px 6px #000; }
 .fd-top { position: absolute; z-index: 3; left: 0; right: 0; top: 0; display: flex; align-items: center; gap: 8px; padding: calc(10px + env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left)); pointer-events: none; }
 .fd-top > * { pointer-events: auto; } .fd-top .fd-grow { flex: 1; pointer-events: none; }
-.fd-ic { width: 40px; height: 40px; border-radius: 50%; border: 0; background: #0006; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); display: inline-flex; align-items: center; justify-content: center; padding: 0; }
-.fd-ic svg { width: 21px; height: 21px; fill: currentColor; } .fd-ic.sm { width: 32px; height: 32px; }
+.fd-ic { width: 40px; height: 40px; border-radius: 50%; border: 0; background: none; text-shadow: 0 1px 4px #000a; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.fd-ic svg { width: 21px; height: 21px; fill: currentColor; filter: drop-shadow(0 1px 4px #0009); } .fd-ic.sm { width: 32px; height: 32px; }
 .fd-top .fd-ic:active, .fd-rail button:active svg { transform: scale(.9); }
-.fd-mode { height: 36px; padding: 0 12px 0 16px; border-radius: 18px; border: 0; background: #0006; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); font-size: 15px; font-weight: 700; display: inline-flex; align-items: center; gap: 4px; max-width: 56vw; }
+.fd-mode { height: 36px; padding: 0 12px 0 16px; border-radius: 18px; border: 0; background: none; text-shadow: 0 1px 4px #000a; font-size: 15px; font-weight: 700; display: inline-flex; align-items: center; gap: 4px; max-width: 56vw; }
 .fd-mode span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .fd-mode svg { width: 16px; height: 16px; flex: none; }
 [data-a=mute] .x { display: none; } [data-a=mute].off .w { display: none; } [data-a=mute].off .x { display: inline; }
-.fd-rail { position: absolute; z-index: 3; right: max(10px, env(safe-area-inset-right)); bottom: calc(60px + var(--sb)); display: flex; flex-direction: column; gap: 14px; align-items: center; }
-.fd-rail button { background: none; border: 0; padding: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; width: 56px; font-size: 12px; text-shadow: 0 1px 4px #000a; }
+.fd-rail { position: absolute; z-index: 3; right: max(2px, env(safe-area-inset-right)); bottom: calc(60px + var(--sb)); display: flex; flex-direction: column; gap: 14px; align-items: center; }
+#feed .fd-rail button { background: none; border: 0; padding: 0; display: flex; flex-direction: column; align-items: center; gap: 1px; width: 48px; font-size: 12px; line-height: 1.3; text-shadow: 0 1px 4px #000a; }
 .fd-rail button[hidden] { display: none; }
-.fd-rail svg { width: 32px; height: 32px; fill: #fff; filter: drop-shadow(0 1px 4px #0009); transition: transform .15s, fill .15s; }
+.fd-rail svg { width: 30px; height: 30px; fill: #ffffffb3; filter: drop-shadow(0 1px 4px #0009); transition: transform .15s, fill .15s; }
 .fd-rail button.on svg { fill: #ff2c55; } .fd-rail [data-a=fav].on svg { fill: #ffc400; }
 .fd-nav { position: absolute; z-index: 3; right: 80px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 10px; }
 .fd-nav button { width: 42px; height: 42px; border-radius: 50%; border: 0; background: #ffffff26; display: flex; align-items: center; justify-content: center; padding: 0; }
@@ -682,7 +683,7 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 @media (max-width: 760px) {
   .fd-sheet { top: auto; width: auto; left: 0; max-height: 62vh; border-radius: 16px 16px 0 0; animation-name: fdUp; }
   @keyframes fdUp { from { transform: translateY(40px); opacity: 0; } }
-  .fd-info h2 { font-size: 17px; }
+  .fd-info h2 { font-size: 15px; }
 }
 @media (prefers-reduced-motion: reduce) { .fd-slide { transition-duration: .01s; } }
 /* phone: the sticky bulk bar is one swipeable line (a wrapped 3-line bar would eat the screen) */
@@ -1242,8 +1243,8 @@ nav .mine { display: none; }
 /* 沉浸看片: 横屏视频上提 + 「全屏观看」按钮 (同抖音) */
 .fd-full { display: none; }
 .fd-slide.land video, .fd-slide.land .fd-cover { transform: translateY(calc(-1 * var(--lshift, 0px))); }
-.fd-slide.land:not(.empty) .fd-full { display: flex; position: absolute; z-index: 3; left: 50%; top: var(--lbtn); transform: translateX(-50%); align-items: center; gap: 3px; padding: 2px 8px 2px 6px;
-  border-radius: 11px; border: 1px solid #ffffff14; background: #ffffff0f; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-size: 10px; line-height: 1.2; color: #fff; white-space: nowrap; }
+#feed .fd-slide.land:not(.empty) .fd-full { display: flex; position: absolute; z-index: 3; left: 50%; top: var(--lbtn); transform: translateX(-50%); align-items: center; gap: 3px; padding: 2px 8px 2px 6px;
+  border-radius: 11px; border: 1px solid #ffffff14; background: #ffffff0f; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-size: 12px; line-height: 1.2; color: #fff; white-space: nowrap; }
 .fd-full svg { width: 10px; height: 10px; }
 @media (hover: none), (pointer: coarse) {
 }
@@ -1775,3 +1776,259 @@ html.touchui .pbar > [data-act=vfav][hidden] { display: none; }
   .stool .lg { display: none; }
   .stool .lan { order: 3; }
 }
+
+
+/* ---------- 首页轮播 (跑马灯): 海报并排在一条轨道上, 平移切换 ---------- */
+.htrack { display: flex; height: 100%; will-change: transform; touch-action: pan-y; }
+.hslide { position: relative; flex: 0 0 100%; min-width: 0; height: 100%; overflow: hidden; }
+.stab { display: none; }
+
+/* ---------- 小屏 (手机 / PWA): 首页对齐原生 app —— 满幅海报、透明顶栏、搜索放进底部 tab ---------- */
+@media (max-width: 760px) {
+  :root { --bg: #000; --tab: 49px; --sab: env(safe-area-inset-bottom); }   /* --sab: 底部安全区; app.js 在「视口已经让出了它」的 iOS 主屏幕里把它改成 0 */
+  html, body { background: #000; }
+  /* 顶栏: 透明, 左 logo、右当前源 (无边框); 滚动后由 header::before 渐显毛玻璃 */
+  header { background: none; justify-content: space-between; }
+  header::before, header::after { display: none !important; }   /* 滚动时也保持透明 */
+  html:root header { padding-top: max(6px, calc(env(safe-area-inset-top) - 6px)); padding-bottom: 6px; }   /* 更贴近状态栏 */
+  :root { --hh: max(46px, calc(env(safe-area-inset-top) + 34px)); }
+  html:root .page { padding-top: max(66px, calc(env(safe-area-inset-top) + 54px)); }   /* 顶栏上移了, 各页内容跟着上移同样的距离 */
+  header, header.solid { background: none !important; backdrop-filter: none; -webkit-backdrop-filter: none; border: 0; }
+  .right { flex: none; width: auto; margin-left: auto; }
+  .right .search { display: none !important; }
+  .right .sitebtn { background: none; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; height: 34px; padding: 0 2px 0 8px; min-width: 0; max-width: 160px; font-size: 15px; font-weight: 600; text-shadow: none; }
+  .logo { font-size: 24px; text-shadow: 0 0 3px #000a, 0 1px 10px #000c; }
+  /* 海报: 满幅、上沿顶到屏幕最上面 (状态栏下面也是图), 底部渐变进黑色 */
+  html:root .hero { height: clamp(430px, 125vw, 640px); min-height: 0; display: block; padding: 0; gap: 0; }
+  html:root .hero .hslide { display: block; padding: 0; }
+  html:root .hero .bg { display: none; }
+  html:root .hero .poster { position: absolute; inset: 0; right: 0; bottom: 0; top: 0; width: 100%; height: 100%; aspect-ratio: auto; transform: none; border-radius: 0; border: 0; box-shadow: none; background-size: cover; background-position: center 18%; }
+  html:root .hero .hslide::after { background: linear-gradient(#000a 0, #0000 22%, #0000 52%, #000b 80%, #000 100%); }
+  html:root .hero .info { position: absolute; z-index: 2; left: 0; right: 0; bottom: 58px; width: auto; padding: 0 24px; text-align: center; }
+  .hero h1 { font-size: 28px; font-weight: 800; line-height: 1.15; margin: 0 0 8px; }
+  .hero .meta { color: #ffffffcc; font-size: 13px; font-weight: 500; margin: 0 0 14px; }
+  .hero .btns { justify-content: center; }
+  .hero .btns .btn { min-width: 125px; height: 44px; justify-content: center; padding: 0 20px; border-radius: 8px; font-size: 17px; }
+  .hero p, .hero .btn.more { display: none; }
+  html:root .hero .dots { left: 50%; right: auto; transform: translateX(-50%); bottom: 26px; gap: 14px; }
+  .hero .dots i { width: 7px; height: 7px; border-radius: 50%; background: #ffffff59; }
+  .hero .dots i.on { background: #fff; }
+  .rows, html.wide-cards .rows { margin-top: 0; }
+  .row h2 { font-size: 20px; font-weight: 700; }
+  .row h2 a::after { content: "›"; margin-left: 6px; color: var(--muted); font-weight: 700; }
+  .card .name { font-size: 13px; color: #fff; }
+  .card .sub { font-size: 11px; }
+  /* 底部 tab: 49pt 的图标行 + 下面整块安全区 (home 条) 都是毛玻璃, 贴到屏幕最底 */
+  #view { padding-bottom: calc(var(--tab) + var(--sab)); }
+  nav { align-items: flex-start; height: calc(var(--tab) + var(--sab)); padding: 0 env(safe-area-inset-right) var(--sab) env(safe-area-inset-left); background: #1c1c1c8c; border-top: .5px solid #ffffff1f; }
+  nav a { flex: 1; height: var(--tab); justify-content: center; padding: 0; gap: 2px; font-size: 10px; color: #8e8e93; }
+  nav a svg { width: 30px; height: 30px; }
+  nav .stab { display: flex; }
+  .toast { bottom: calc(var(--tab) + var(--sab) + 14px); }
+  html.vshort header { position: absolute; }   /* fixed 会被裁在偏矮的视口里; absolute 跟着 100lvh 的文档走, 能画到屏幕最底 (页面本身是固定的 #view 在滚, 文档不滚) */
+  html.vshort, html.vshort body { overflow: hidden; overscroll-behavior: none; }   /* 文档比视口高一截: 不许它被拖动 / 被滚动到可见, 否则 absolute 的 tab 栏跟着上移, 底下露出黑块 */
+  html.vshort nav { position: absolute; bottom: auto; top: calc(100lvh - var(--tab) - var(--sab)); }
+  /* 右上角「点播源」上拉浮窗: 半透明毛玻璃 */
+  #siteMenu.pop-sheet { background: #2a2a2c80; backdrop-filter: blur(30px) saturate(1.8); -webkit-backdrop-filter: blur(30px) saturate(1.8); border-top: .5px solid #ffffff26; }
+  #siteMenu.pop-sheet .msearch { background: transparent; }
+}
+}
+
+/* ---------- 卡片长按 / 右键菜单 ---------- */
+.pop-menu button.danger { color: #ff453a; }
+.card.ctx-src { visibility: hidden; }
+#cardCtx { position: fixed; inset: 0; z-index: 90; touch-action: none; }
+/* 虚化压暗层单独淡入; 被按的卡片副本一开始就和原卡片重合、不淡入, 所以不会「从无到有」闪一下 */
+#cardCtx::before { content: ""; position: absolute; inset: 0; background: #000a; backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4); animation: scrimIn .2s ease-out both; }
+#cardCtx.out::before, #cardCtx.out .ctx-menu { opacity: 0; transition: opacity .15s; }
+#cardCtx.out { pointer-events: none; }
+#cardCtx .ctx-pv { position: fixed; margin: 0; pointer-events: none; transform-origin: 50% 40%; animation: ctxPv .22s cubic-bezier(.2,.9,.3,1.2) both; }
+@keyframes ctxPv { from { transform: scale(1); } to { transform: scale(1.04); } }
+#cardCtx .ctx-menu { position: fixed; min-width: 220px; padding: 0; border-radius: 14px; overflow: hidden; background: #2c2c2ee6; backdrop-filter: blur(30px) saturate(1.8); -webkit-backdrop-filter: blur(30px) saturate(1.8); box-shadow: 0 12px 40px #0008; animation: ctxIn .2s cubic-bezier(.2,.9,.3,1.1) both; transform-origin: 20% 0; }
+@keyframes ctxIn { from { opacity: 0; transform: scale(.85); } }
+#cardCtx .ctx-menu button { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 24px; height: 48px; padding: 0 16px; border: 0; background: none; color: #fff; font-size: 17px; text-align: left; }
+#cardCtx .ctx-menu button + button { border-top: .5px solid #ffffff1f; }
+#cardCtx .ctx-menu button:active { background: #ffffff26; }
+#cardCtx .ctx-menu button svg { width: 21px; height: 21px; fill: currentColor; flex: none; }
+#cardCtx .ctx-menu button.danger { color: #ff453a; }
+.pop-menu button.danger svg, #cardCtx .ctx-menu button.danger svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#cardCtx .ctx-pv .img, #cardCtx .ctx-pv .img img { transition: none !important; animation: none !important; }
+
+/* ---------- 详情页 ---------- */
+.sheet .close .bk, .btn .bt { display: none; }
+@media (max-width: 760px) {
+  /* 小屏: 详情是一个独立页面 —— 从右边推入, 底部 tab 栏还在, 左上角「‹ 返回」 */
+  body.detail-open header .logo, body.detail-open header .right, body.detail-open header::before { visibility: hidden; }
+  .modal { z-index: 18; padding: 0; background: #000; animation: pageIn .32s cubic-bezier(.32,.72,0,1) both; }
+  @keyframes pageIn { from { transform: translateX(100%); } }
+  .sheet { background: #000; box-shadow: none; padding-bottom: calc(var(--tab) + var(--sab)); }
+  html:root .sheet .top { height: auto; min-height: 0; display: block; padding: calc(env(safe-area-inset-top) + 56px) 0 0; }
+  .sheet .top .bg { filter: blur(30px) brightness(.75) saturate(1.3); }
+  html:root .sheet .top::after { background: linear-gradient(#0000 28%, #000 66%); }
+  html:root .sheet .top .poster { position: relative; z-index: 1; display: block; right: auto; top: auto; left: auto; width: 170px; height: auto; aspect-ratio: 2/3; margin: 0 auto; order: 0; flex: none; border-radius: 8px; transform: none; box-shadow: 0 10px 30px #0008; background-size: cover; background-position: center; }
+  html:root .sheet .top .info { position: relative; z-index: 2; left: auto; bottom: auto; width: auto; padding: 22px 20px 0; }
+  .sheet .top h1, html:root .sheet .top h1 { margin: 0 0 12px; font-size: 24px; font-weight: 800; line-height: 1.2; display: block; }
+  html:root .sheet .close { left: 8px; right: auto; top: max(1px, calc(env(safe-area-inset-top) - 11px));   /* 和顶栏 logo 同一条水平线 */
+    z-index: 4; width: auto; height: 44px; padding: 0 12px 0 4px; border-radius: 0; background: none; color: var(--red); font-size: 17px; display: flex; align-items: center; }
+  .sheet .close .x { display: none; }
+  .sheet .close .bk { display: inline-flex; align-items: center; gap: 0; font-weight: 400; }
+  .sheet .close .bk svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+  .metaRow { gap: 8px; margin: 0 0 14px; font-size: 14px; color: #8e8e93; line-height: 1.6; }
+  .tag { font-size: 13px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+  .sheet .top .btns { flex-wrap: nowrap; gap: 10px; }
+  .sheet .top .btns .btn { height: 44px; border-radius: 8px; justify-content: center; }
+  .sheet .top .btns .btn.play { flex: 1; min-width: 0; padding: 0 12px; font-size: 17px; white-space: nowrap; }
+  .sheet .top .btns .btn.more { flex: none; }
+  .sheet .top .btns .btn.play { overflow: hidden; text-overflow: ellipsis; }
+  .sheet .body { padding: 16px 20px 32px; }
+  .desc { font-size: 15px; line-height: 1.55; color: #d1d1d6; margin: 0 0 18px; }
+  .people { position: relative; gap: 6px; margin: 10px 0; padding-left: 38px; min-height: 32px; }
+  .plabel { position: absolute; left: 0; top: 0; line-height: 32px; width: auto; font-size: 14px; color: #8e8e93; }   /* 标签固定在左边, 换行的人名也对齐在它右边 */
+  .sheet .chip { background: #2c2c2e; border: 0; color: #fff; font-size: 14px; padding: 6px 13px; }
+  .sheet h3 { margin: 24px 0 12px; font-size: 18px; font-weight: 700; }
+  .eps { grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  .eps button, .eps a { background: #2c2c2e; color: #fff; border-radius: 8px; padding: 11px 2px; font-size: 14px; }
+}
+
+/* 下拉刷新的小圆标 */
+#ptr { position: fixed; z-index: 18; left: 50%; top: max(46px, calc(env(safe-area-inset-top) + 34px)); width: 34px; height: 34px; margin-left: -17px; border-radius: 50%; background: #2c2c2ef2; color: #fff; display: grid; place-items: center; opacity: 0; pointer-events: none;
+  transform: translateY(var(--py, 0px)) rotate(var(--pr, 0deg)); transition: opacity .2s, transform .2s; box-shadow: 0 4px 14px #0008; }
+#ptr.drag { transition: none; }
+#ptr.ready { background: var(--red); }
+#ptr svg { width: 20px; height: 20px; }
+#ptr.spin svg { animation: ptrSpin .8s linear infinite; }
+@keyframes ptrSpin { to { transform: rotate(360deg); } }
+@media (min-width: 761px) { #ptr { display: none; } }
+
+/* 小屏: 只有首页有顶栏 (logo + 源); 其他页面不显示, 内容直接从状态栏下面开始 (底部 tab 栏照旧) */
+@media (max-width: 760px) {
+  body:not([data-page=home]) header .logo, body:not([data-page=home]) header .right { display: none; }
+  html:root body:not([data-page=home]) header { padding-top: 0; padding-bottom: 0; }
+  html:root body:not([data-page=home]) .page { padding-top: calc(env(safe-area-inset-top) - 5px); }   /* 首行 (32px 高) 的中线 = 安全区 + 11px, 和首页 logo、详情页返回按钮同一条线 */
+  body:not([data-page=home]) { --hh: env(safe-area-inset-top); }
+}
+
+@media (max-width: 760px) {
+  header { pointer-events: none; }
+  header > * { pointer-events: auto; }   /* 顶栏本身不挡点击 (详情页的返回按钮就在它下面) */
+}
+
+/* 小屏: 搜索页 (全屏搜索) 也留着底部 tab 栏 —— 它压在 tab 栏 (在顶栏元素里, z 20) 的下面 */
+@media (max-width: 760px) {
+  #sOv { z-index: 19; }
+  body.sov-open header .logo, body.sov-open header .right { visibility: hidden; }
+  .sov-body { padding-bottom: calc(24px + var(--tab) + var(--sab)); }
+}
+
+/* 小屏直播页: 标题在左、直播源在右 (样式同点播源: 无边框文字 + 箭头), 搜索框和分组标签都收紧 */
+@media (max-width: 760px) {
+  #liveHead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 10px; }
+  #liveHead h1 { margin: 0; }
+  #liveHead .lpick { flex: none; margin-left: auto; }
+  #liveHead .lbtn { width: auto; max-width: 62vw; height: 34px; padding: 0 2px 0 8px; background: none; border: 0; box-shadow: none; font-size: 15px; font-weight: 600; }
+  #liveHead #chq { flex: 1 1 100%; width: 100%; height: 36px; font-size: 16px; }
+  .groups { gap: 6px; }
+  .groups button { min-width: 0; padding: 7px 14px; font-size: 14px; border-radius: 18px; }
+}
+
+@media (max-width: 760px) {
+  .modal.leaving { pointer-events: none; animation: pageOut .3s cubic-bezier(.32,.72,0,1) both; }
+  @keyframes pageOut { to { transform: translateX(100%); } }
+}
+
+/* 小屏: 搜索输入页打开时, 底部 tab 高亮「搜索」, 其他取消高亮 */
+@media (max-width: 760px) {
+  body.sov-open nav a:not(#searchTab) { color: #8e8e93; }
+  body.sov-open nav a:not(#searchTab) svg { color: inherit; }
+  body.sov-open nav #searchTab { color: #fff; }
+  body.sov-open nav #searchTab svg { color: var(--red); }
+}
+
+.spill { display: none; }
+@media (max-width: 760px) {
+  .spill { display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; margin: 0 0 14px; padding: 0 12px; border-radius: 6px; border: 1px solid #ffffff40; background: #0009; color: #fff; font-size: 16px; text-align: left; }
+  .spill svg { width: 18px; height: 18px; flex: none; color: #ffffffa6; }
+  .spill span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+/* 小屏: 各页面顶部的操作按钮 (沉浸播放 / 清空 / 下载页的暂停·开始·删除 …) 小一圈 */
+@media (max-width: 760px) {
+  .small { padding: 3px 8px; font-size: 12px; }
+  .small.ibs { width: 32px; height: 28px; border-radius: 7px; }
+  .small.ibs svg { width: 17px; height: 17px; }
+  .pagehead { gap: 8px; }
+  .pagehead h1, .page .pagehead h1 { line-height: 32px; }
+}
+
+@media (max-width: 760px) {
+  .modal { will-change: transform; }
+  /* 拖着详情页走的时候, 底下的 tab 栏不做实时模糊 (每帧重算毛玻璃是卡顿的主要来源) */
+  body.edge-drag nav { backdrop-filter: none; -webkit-backdrop-filter: none; background: #1c1c1cf2; }
+  .modal .top .bg { will-change: transform; }
+}
+#cardCtx .ctx-pv .img:not(.noimg) { background: none !important; }
+#cardCtx .ctx-pv .img img { opacity: 1 !important; }
+
+/* 分类页: 大屏不显示返回; 小屏 左「‹ 返回」、中间标题、右边功能按钮 (白色半透明) */
+.cback { display: none; }
+@media (max-width: 760px) {
+  .pagehead.cathead { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .cathead .cback { display: inline-flex; align-items: center; justify-self: start; height: 36px; margin-left: -6px; padding: 0 8px 0 0; border: 0; background: none; color: var(--red); font-size: 17px; }
+  .cathead .cback svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+  .cathead h1, .page .cathead h1 { grid-column: 2; text-align: center; font-size: 18px; font-weight: 700; white-space: nowrap; max-width: 52vw; overflow: hidden; text-overflow: ellipsis; }
+  .cathead .feedgo { grid-column: 3; justify-self: end; width: 34px; height: 34px; border: 0; border-radius: 50%; background: #ffffff26; color: #fff; }
+  .cathead .feedgo svg { width: 18px; height: 18px; }
+}
+
+@media (max-width: 760px) {
+  #view.subin { animation: pageIn .32s cubic-bezier(.32,.72,0,1) both; }
+  .cathead .cback { touch-action: manipulation; }
+}
+
+/* 小屏: 返回按钮 (连同标题 / 右侧按钮) 固定在顶部, 内容在下面滚动 */
+@media (max-width: 760px) {
+  .pagehead.cathead { position: sticky; top: 0; z-index: 6; margin: calc(5px - env(safe-area-inset-top)) -4% 12px; padding: calc(env(safe-area-inset-top) - 7px) 4% 8px; background: #000; }
+  .cathead .cback { margin-left: -6px; }
+  /* 详情页: 返回按钮改成 sticky (原来是绝对定位, 跟着内容滚走); 外壳不再裁切, 否则 sticky 不生效 */
+  .sheet { overflow: visible; }
+  .sheet .top { overflow: hidden; }
+  html:root .sheet .close { position: sticky; top: max(1px, calc(env(safe-area-inset-top) - 11px)); left: auto; right: auto; margin: 0 0 -44px 8px; width: fit-content; text-shadow: 0 0 6px #000, 0 1px 10px #000; }
+}
+
+.sheet { position: relative; }
+
+@media (max-width: 760px) {
+  .cathead .hact { grid-column: 3; justify-self: end; display: flex; gap: 2px; }
+  .cathead .ibs, .cathead .feedgo { width: 34px; height: 34px; border: 0; border-radius: 0; background: none !important; color: #fff; box-shadow: none; }
+  .cathead .ibs svg { width: 22px; height: 22px; }
+}
+
+/* 子页面: 自己带黑底 (滑出时下面垫着原来的页面); 垫在下面的拷贝不可点、不滚动 */
+@media (max-width: 760px) {
+  body[data-sub="1"] #view { background: #000; box-shadow: -8px 0 24px #0008; }
+  .under { position: fixed; inset: 0; overflow: hidden; background: #000; pointer-events: none; }
+  .under .page { min-height: 100%; }
+}
+
+/* 小屏: 详情页返回按钮不要阴影; 页面加载中的转圈放到屏幕中间偏上, 不要贴在最顶上 */
+@media (max-width: 760px) {
+  html:root .sheet .close { text-shadow: none; }
+  .page > .spinner, .pageload .spinner, .sheet > .spinner { margin: 28vh auto 0; }
+  .pageload .spinner { margin: 28vh 0 0; }
+}
+
+@media (max-width: 760px) {
+  .charts .pagehead.cathead { margin-bottom: 12px; }
+  body[data-sub="1"] .charts .rtitle { display: none; }
+}
+
+/* 恢复出来的详情 (返回 / 刷新) 不播推入动画; 垫在子页面下面的详情拷贝: 不可点、在 #view 下面 */
+.modal.noanim:not(.leaving) { animation: none !important; }
+body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
+@media (max-width: 760px) {
+  .modal.under-modal { z-index: 18; pointer-events: none; overflow: hidden; }
+  #view.subin, #view.subleave { z-index: 19; }   /* 推入 / 滑出的那一下才压在垫底的详情拷贝上面; 平时详情 (z 18) 在页面上面 */
+}
+
+.under-modal { transition: opacity .22s; }
+.under-modal.fade { opacity: 0; }
