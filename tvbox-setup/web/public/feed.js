@@ -43,7 +43,8 @@ root.innerHTML = `
     <button data-a="dislike" title="不感兴趣 (d)">${I.ban}<span>不想看</span></button>
   </div>
   <div class="fd-nav fd-fine"><button data-a="up" title="上一个 (↑)" aria-label="上一个">${I.up}</button><button data-a="down" title="下一个 (↓)" aria-label="下一个">${I.down}</button></div>
-  <div class="fd-prog"><div class="rail"><i class="buf"></i><i class="played"></i><b class="knob"></b></div></div>
+  <div class="fd-prog"><div class="rail"><i class="buf"></i><i class="played"></i><span class="marks"></span><b class="knob"></b></div></div>
+  <div class="fd-skipnote" hidden></div>
   <div class="fd-tip" hidden></div>
   <div class="fd-rate" hidden>2x 快进中</div>
   <div class="fd-boot">${spinner}<span>正在为你挑选…</span></div>
@@ -52,7 +53,7 @@ root.innerHTML = `
   <div class="fd-sheet" hidden></div>`;
 document.body.append(root);
 const q = s => root.querySelector(s);
-const slidesBox = q('.fd-slides'), prog = q('.fd-prog'), tipEl = q('.fd-tip'), rateEl = q('.fd-rate'), menuEl = q('.fd-menu'), sheetEl = q('.fd-sheet'), bootEl = q('.fd-boot');
+const slidesBox = q('.fd-slides'), prog = q('.fd-prog'), marksEl = q('.fd-prog .marks'), skipNote = q('.fd-skipnote'), tipEl = q('.fd-tip'), rateEl = q('.fd-rate'), menuEl = q('.fd-menu'), sheetEl = q('.fd-sheet'), bootEl = q('.fd-boot');
 
 // ---------- taste profile ----------
 // Flat map tag → score. Tags: t:类型 a:地区 y:年代 p:演员. Likes / long watches raise, quick skips / 不想看 lower.
@@ -154,6 +155,7 @@ function mkSlide() {
     i: -1, it: null, d: null, line: 0, ep: 0, eps: [], startAt: 0, hls: null, via: false, loading: false, pre: false, err: false, watched: 0, lastT: 0, judged: true, lastSave: 0 };
   const v = s.video;
   { const vol = parseFloat(localStorage.playerVolume); if (Number.isFinite(vol)) v.volume = Math.min(1, Math.max(0, vol)); }   // same level as the main player
+  for (const ev of ['durationchange', 'loadedmetadata']) v.addEventListener(ev, () => { if (s === cur()) feedMarks(); });
   for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize']) v.addEventListener(ev, () => layoutLand(s));   // HLS 的画面尺寸有时晚一点才知道
   v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); });
   duckOnSeek(v, () => F.muted || F.autoMuted);
@@ -170,6 +172,10 @@ function mkSlide() {
     if (s !== cur()) return;
     if (dt > 0 && dt < 1.5 && !v.paused) s.watched += dt;
     if (Date.now() - s.lastSave > 4000 && vdur(v)) saveHist(s);
+    if (s.sk && !scrub && !(g && g.axis === 'x')) {                 // 自动跳过片头 / 片尾 / 广告 (开关在普通播放器的「自动跳过」里, 沉浸里不放入口)
+      const hit = skipDue(s.sk, v);
+      if (hit) { v.currentTime = hit.to; noteSkip('已跳过' + hit.name); }
+    }
   });
   return s;
 }
@@ -197,7 +203,7 @@ function saveHist(s) {
 }
 
 function teardown(s) {
-  clearTimeout(s.dog); s.tried = null;
+  clearTimeout(s.dog); s.tried = null; skStop(s);
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = s.video;
   v.onerror = null; v.onloadedmetadata = null;
@@ -293,7 +299,7 @@ function attach(s, viaProxy = false) {
     v.preload = role === 0 || s.pre ? 'auto' : 'metadata';
     v.src = src; v.onloadedmetadata = onMeta;
   }
-  if (s === cur()) { s.el.classList.add('wait'); tryPlay(s); watch(s); }
+  if (s === cur()) { s.el.classList.add('wait'); tryPlay(s); watch(s); skEnsure(s); }
 }
 // 起播看门狗: 当前这部 20 秒还没出画面 (既没报错也没动、缓冲也没增长), 当作失败处理; 慢但在加载的不算, 最多等 60 秒。
 const bufEnd = v => { let e = 0; for (let i = 0; i < v.buffered.length; i++) e = Math.max(e, v.buffered.end(i)); return e; };
@@ -411,9 +417,43 @@ function switchEp(s, line, ep, startAt = 0) {
   if (!sheetEl.hidden) renderSheet();
 }
 
+// ---------- 自动跳过: 进度条上的标记 + 播到那一段时跳过 ----------
+// 取数据、判断「现在该不该跳」的部分和普通播放器共用 (app.js 的 skipNew / skipKick / skipDue / marksOf)。只对当前这一屏做, 离开就停。
+// 设置 (跳过片头片尾 / 跳过广告) 在普通播放器里改, 这里只读不放入口; 关着的时候标记照样画, 只是不跳。
+function skStop(s) { if (s.sk) { clearTimeout(s.sk.kt); skipStop(s.sk); s.sk = null; } }
+function skEnsure(s) {
+  if (!s?.d || s !== cur()) return;
+  const e = s.eps[s.ep]; if (!e) return;
+  if (s.sk && !s.sk.dead && s.sk.u === e.url) return;
+  skStop(s);
+  const n = s.eps[s.ep + 1] || s.eps[s.ep - 1];
+  const okUrl = x => /^https?:/.test(x) || x.startsWith('/media/f/');       // 本地媒体的原文件也行
+  const ok = okUrl(e.url);
+  const fp = ok && s.eps.length >= 3 && n && okUrl(n.url);
+  const A = s.sk = ok ? skipNew(e.url, fp ? n.url : '', () => { if (s === cur() && s.sk === A) feedMarks(); }) : null;
+  if (A) A.kt = setTimeout(() => skipKick(A), 1200);          // 快速划过的不去问
+  feedMarks();
+}
+let fmKey = '';
+function feedMarks() {
+  const s = cur(), d = s?.video ? vdur(s.video) : NaN;
+  const M = s?.sk && d > 0 && isFinite(d) ? marksOf(d, s.sk) : null, list = M ? [['h', M.head], ['a', M.mid], ['h', M.tail]] : [];
+  const key = list.map(([, l]) => JSON.stringify(l)).join('|') + '/' + Math.round(d || 0);
+  if (key === fmKey) return;
+  fmKey = key;
+  marksEl.innerHTML = list.flatMap(([k, l]) => l.map(r => `<i class="${k}" style="left:${Math.max(0, r[0] / d * 100)}%;width:${Math.max(0.5, (Math.min(r[1], d) - r[0]) / d * 100)}%"></i>`)).join('');
+}
+let noteT = 0;
+function noteSkip(text) {
+  skipNote.textContent = text; skipNote.hidden = false; skipNote.classList.remove('go'); void skipNote.offsetWidth; skipNote.classList.add('go');
+  clearTimeout(noteT); noteT = setTimeout(() => { skipNote.hidden = true; }, 1800);
+}
+const tipSub = (s, t, d) => `/ ${fmtT(d)}${s?.sk && markAt(t, s.sk, s.video) ? ' · ' + markAt(t, s.sk, s.video) : ''}`;   // 拖到会被跳过的段里: 时间后面带上类型
+
 function activate() {
   ring.forEach((s, r) => { setRole(s, r - 1); if (r !== 1) s.video.pause(); });
   const s = cur();
+  skEnsure(s); feedMarks();
   F.userPaused = false;
   if (!s.it) return;
   markSeen(s.it);
@@ -427,6 +467,7 @@ function activate() {
 // Leaving a title tells the profile what it was worth.
 function leave(s) {
   if (!s.it) return;
+  skStop(s); skipNote.hidden = true;
   F.visited.add(s.i);
   saveHist(s);
   if (s.judged) return; s.judged = true;
@@ -634,6 +675,7 @@ function startMode(mode, extra) {
   closeOverlays();
   q('.fd-mode span').textContent = modeLabel();
   syncRail();
+  if (!root.hidden && history.state?.feed) { setOverlayUrl(feedUrl()); if (feedAt) feedAt.url = location.href; }
   pump();
 }
 function renderMenu() {
@@ -699,7 +741,7 @@ function heartAt(x, y) {
 }
 function act(a) {
   const s = cur();
-  if (a === 'close') { guardUntil = 0; return history.back(); }   // 主动退出: 不要被「拖动误触返回」的保护拦下
+  if (a === 'close') { guardUntil = 0; return closeOverlay(); }   // 主动退出: 不要被「拖动误触返回」的保护拦下
   if (a === 'mode') { if (menuEl.hidden) { renderMenu(); menuEl.hidden = false; sheetEl.hidden = true; } else menuEl.hidden = true; return; }
   if (a === 'mute') { setMuted(F.autoMuted ? false : !F.muted); if (!F.muted) tryPlay(s); return; }
   if (a === 'up') return go(-1);
@@ -778,7 +820,7 @@ root.addEventListener('pointermove', e => {
     g.target = Math.max(0, Math.min(dur - .5, g.t0 + g.dx / W() * span));
     root.classList.add('scrubbing');
     root.style.setProperty('--p', g.target / dur);
-    showTip(fmtT(g.target), `/ ${fmtT(dur)}`);
+    showTip(fmtT(g.target), tipSub(cur(), g.target, dur));
     liveSeek(g.target);
   }
 });
@@ -831,7 +873,7 @@ const fracOf = e => { const r = prog.querySelector('.rail').getBoundingClientRec
 function scrubTo(e) {
   const v = cur().video; scrub.frac = fracOf(e);
   root.style.setProperty('--p', scrub.frac);
-  showTip(fmtT(scrub.frac * vdur(v)), `/ ${fmtT(vdur(v))}`);
+  showTip(fmtT(scrub.frac * vdur(v)), tipSub(cur(), scrub.frac * vdur(v), vdur(v)));
   liveSeek(scrub.frac * vdur(v));
 }
 prog.addEventListener('pointerdown', e => {
@@ -870,7 +912,7 @@ addEventListener('keydown', e => {
   const s = cur(), v = s?.video;
   const k = e.key;
   const used = () => { e.preventDefault(); e.stopImmediatePropagation(); };
-  if (k === 'Escape') { if (!menuEl.hidden || !sheetEl.hidden) { used(); return closeOverlays(); } if (document.fullscreenElement) return; used(); guardUntil = 0; return history.back(); }
+  if (k === 'Escape') { if (!menuEl.hidden || !sheetEl.hidden) { used(); return closeOverlays(); } if (document.fullscreenElement) return; used(); guardUntil = 0; return closeOverlay(); }
   if (k === 'ArrowDown' || k === 'j' || k === 'PageDown') { used(); return go(1); }
   if (k === 'ArrowUp' || k === 'k' || k === 'PageUp') { used(); return go(-1); }
   if (k === 'ArrowRight' && vdur(v)) { used(); seekBy(v, 5); return; }
@@ -907,15 +949,24 @@ function showHint() {
   h.textContent = touchUi ? '上下滑动切换 · 左右滑动快进 · 双击喜欢 · 长按 2 倍速' : '滚轮 / ↑↓ 切换 · ←→ 快进 · 双击喜欢 · 空格暂停 · 拖动底部进度条';
   h.hidden = false; setTimeout(() => { h.hidden = true; }, 4500);
 }
-function openFeed(o = {}) {
+// 沉浸页自己的地址: #/feed/模式[/参数]。刷新 / 新标签页打开同一个地址会回到同一个模式 (从某一列表点进来的「列表」模式没法重建, 回到推荐)
+const feedUrl = () => {
+  const x = F.extra || {}, e = encodeURIComponent;
+  if (F.mode === 'cat') return `#/feed/cat/${e(x.t || '')}/${e(x.name || '')}/${e(x.site || '')}`;
+  if (F.mode === 'search') return `#/feed/search/${e(x.q || '')}/${e(x.scope || '')}`;
+  return `#/feed/${F.mode === 'list' ? 'rec' : F.mode}`;
+};
+let feedAt = null;                                         // 沉浸页这条历史记录 (state + 地址): 拖动误触返回后原样补回去
+function openFeed(o = {}, restore = false) {
   if (!root.hidden) return;
   if (!state.sites.length) return toast('还没有可用的点播源');
   const mode = o.mode === 'fav' && kidsMode() ? 'rec' : (o.mode || 'rec');
-  history.pushState({ feed: 1 }, '');
+  F.mode = mode; F.extra = o.mode === 'cat' || o.mode === 'search' || o.mode === 'list' ? o : null;
+  if (!restore) pushOverlay('feed', feedUrl());
+  feedAt = { state: history.state, url: location.href };
   root.hidden = false; document.body.style.overflow = 'hidden';
   root.style.setProperty('--dy', '0px'); root.style.setProperty('--p', 0); root.style.setProperty('--b', 0);
   setMuted(F.muted, false);
-  F.extra = o.mode === 'cat' || o.mode === 'search' || o.mode === 'list' ? o : null;
   startMode(mode);
   lastP = lastB = -1; cancelAnimationFrame(raf); raf = requestAnimationFrame(tick);
 }
@@ -934,7 +985,7 @@ function hideFeed() {
 const flushProfile = () => { if (P) UD.set('feedProf', JSON.stringify(P)); };
 addEventListener('popstate', () => {
   if (root.hidden) return;
-  if (touching() && !$('#modal') && player.hidden) { history.pushState({ feed: 1 }, ''); return; }   // 拖动时误触发的系统返回
+  if (touching() && !$('#modal') && player.hidden) { history.pushState(feedAt?.state || { feed: 1 }, '', feedAt?.url || location.href); return; }   // 拖动时误触发的系统返回
   const st = history.state || {};
   if (!st.feed && !st.modal && !st.player) return hideFeed();
   setTimeout(() => { if (!root.hidden && !covered()) tryPlay(cur()); }, 0);      // back from the detail sheet / player
@@ -954,4 +1005,6 @@ document.addEventListener('click', e => {
   openFeed({ mode: d.feed, t: d.t || '', name: d.name || '', site: d.site || state.site, q: d.q || '', scope: d.scope || '' });
 });
 window.openFeed = openFeed;
+window.feedOpen = () => !root.hidden;
+window.closeFeedQuiet = () => hideFeed();
 })();

@@ -858,14 +858,14 @@ async function probeStream(u) {
 // 有的源把贴片广告直接拼进播放列表：广告分片和正片分片之间隔着 #EXT-X-DISCONTINUITY。两种形态:
 //   A. 广告放在另一个目录 / 域名下 (魔都、樱花、量子等)  B. 广告和正片同目录，但是夹在两大段正片之间的一小块 (非凡、电影天堂等)
 // 按 DISCONTINUITY 切块，返回广告块在整段里的 [开始, 结束] 秒。
-// 只读播放列表文本，不下载任何媒体。结果缓存 30 分钟。
+// 只读播放列表文本，不下载任何媒体。结果缓存 3 小时。
 const adCache = new Map(), adBusy = new Map();
 // 同一条地址同时来多个请求只读一次播放列表
 const adSegments = u => adBusy.get(u) || (p => (adBusy.set(u, p), p.finally(() => adBusy.delete(u))))(adSegmentsRaw(u));
 async function adSegmentsRaw(u) {
   if (!/^https?:\/\//i.test(u)) return { ads: [] };
   const hit = adCache.get(u);
-  if (hit && Date.now() - hit.at < 1800e3) return hit.v;
+  if (hit && Date.now() - hit.at < 3 * 3600e3) return hit.v;
   const sig = AbortSignal.timeout(12000);
   const text = async url => { const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: sig }); if (r.status >= 400) throw new Error('HTTP ' + r.status); return { body: (await r.text()).slice(0, 2e6), url: r.url }; };
   let v = { ads: [] };
@@ -970,12 +970,29 @@ function adultOf(site, d) {
   if (site.adult) return 1;
   return ADULT.test(str(d.type_name)) ? 1 : 0;
 }
+// 第一条能直接播放的地址 (第一条线路的第一集): 列表 / 搜索的每张卡片都带着, 点「影片播放」/「新窗口播放」时不用等详情, 直接起播, 详情在后台补全选集。
+// 判定条件和 lines() 一致, 所以它一定是详情里 lines[0].episodes[0]。
+function firstPlay(site, d) {
+  if (site.local) return undefined;
+  const froms = str(d.vod_play_from).split('$$$');
+  const lns = str(d.vod_play_url).split('$$$');
+  for (let i = 0; i < lns.length; i++) {
+    if (!lns[i]) continue;
+    for (const p of lns[i].split('#')) {
+      const [a, b] = p.split('$');
+      const url = (b === undefined ? a : b || '').trim();
+      if (/^https?:\/\//.test(url) && /\.(m3u8|mp4)(\?|$)/i.test(url)) return { l: froms[i] || `线路${i + 1}`, n: b === undefined ? '播放' : a, u: url };
+    }
+  }
+  return undefined;
+}
 function item(site, d) {
   const adult = adultOf(site, d);
+  const p1 = firstPlay(site, d);
   return { site: site.key, siteName: site.name, id: str(d.vod_id), name: str(d.vod_name), pic: str(d.vod_pic),
     remarks: str(d.vod_remarks), type: str(d.type_name), typeId: str(d.type_id), year: str(d.vod_year), area: str(d.vod_area), time: str(d.vod_time),
     quality: qualityOf(d.vod_remarks, d.vod_version, d.vod_name), blurb: clean(d.vod_content).slice(0, 300),
-    ...(adult ? { adult } : {}) };
+    ...(adult ? { adult } : {}), ...(p1 ? { p1 } : {}) };
 }
 // 成人 titles (flagged source / category / local folder) never leave the server outside 安全级别「全部」.
 const itemOk = (site, it) => (safety.level === 'all' || !it.adult) && (!it.type || catAllowed(site, it.type));
@@ -1057,12 +1074,31 @@ async function groupDetail(g, id) {
   return { first, all: [...found.values()] };
 }
 
-async function categories(site) {
+async function categoryTree(site) {
   const b = await cmsGet(site, { ac: 'list' });
-  const all = (b.class || []).map(c => ({ id: str(c.type_id), pid: str(c.type_pid), name: str(c.type_name) }));
+  return (b.class || []).map(c => ({ id: str(c.type_id), pid: str(c.type_pid), name: str(c.type_name) }));
+}
+async function categories(site) {
+  const all = await categoryTree(site);
   const parents = new Set(all.map(c => c.pid));
   // Top-level categories return empty lists on these sites; only leaves are useful.
   return all.filter(c => !parents.has(c.id) && catAllowed(site, c.name));
+}
+// 二级分类树 (搜索页按分类筛选): 一级 → 它下面的叶子。叶子没有一级的 (扁平的源) 单独成一组。只含当前安全级别看得到的分类。
+async function categoryGroups(site) {
+  const all = await categoryTree(site);
+  const byId = new Map(all.map(c => [c.id, c])), parents = new Set(all.map(c => c.pid));
+  const groups = new Map();
+  for (const c of all) {
+    if (parents.has(c.id) || !catAllowed(site, c.name)) continue;
+    const p = byId.get(c.pid);
+    const k = p ? p.id : '';
+    if (!groups.has(k)) groups.set(k, { id: p ? p.id : '', name: p ? p.name : '', children: [] });
+    groups.get(k).children.push({ id: c.id, name: c.name });
+  }
+  const out = [...groups.values()];
+  const flat = out.filter(g => !g.id).flatMap(g => g.children);
+  return [...out.filter(g => g.id), ...(flat.length ? [{ id: '', name: '', children: flat }] : [])];
 }
 
 // TVBox configs: single or multi-warehouse `{urls:[…]}`. Keep what a browser can use.
@@ -1640,16 +1676,18 @@ async function recognizeRepo(repo, url, emit) {
 // visible site (two pages), keep titles whose credits really contain the name, one per title+year.
 const NO_PERSON = /^(暂无|未知|内详|无|不详|佚名|其他|n\/?a|none|unknown|-+)$/i;
 const splitPeople = v => str(v).split(/[,，、/|;；]+|\s{2,}/).map(x => x.trim()).filter(x => x && !NO_PERSON.test(x));
-async function person(name, role, sites) {
+async function person(name, role, sites, want = new Set()) {
   const field = role === 'director' ? 'vod_director' : 'vod_actor';
-  const pages = await Promise.all(sites.flatMap(s => [1, 2].map(pg => cmsGet(s, { ac: 'detail', wd: name, pg: String(pg) }, false, 8000)
-    .then(b => (b.list || []).map(d => ({ s, d })), () => []))));
+  // want: 只要这些分类 (分类 id, 单个源时才有)。选得不多就让源按分类查 (命中更全), 查回来再按分类 id 过滤一遍。
+  const ts = want.size && want.size <= 3 ? [...want] : [''];
+  const pages = await Promise.all(sites.flatMap(s => ts.flatMap(t => [1, 2].map(pg => cmsGet(s, { ac: 'detail', wd: name, pg: String(pg), ...(t ? { t } : {}) }, false, 8000)
+    .then(b => (b.list || []).map(d => ({ s, d })), () => [])))));
   const seen = new Set(), out = [];
   for (const { s, d } of pages.flat()) {
     if (!splitPeople(d[field]).some(p => p === name)) continue;
     if (/解说|预告/.test(str(d.vod_name)) || /解说|预告/.test(str(d.type_name))) continue;
     const it = item(s, d);
-    if (!itemOk(s, it)) continue;
+    if (!itemOk(s, it) || (want.size && !want.has(it.typeId))) continue;
     const k = s.key + '|' + it.name.replace(/\s+/g, '') + '|' + it.year;   // one per source: the client merges same-title ones (or not)
     if (seen.has(k)) continue;
     seen.add(k);
@@ -3232,7 +3270,15 @@ async function api(route, q, res, req) {
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
   if (route === 'speed') return send(res, 200, await speedOf(q.get('u') || '', q.get('fresh') === '1'));
   // 自动识别片头 / 片尾 / 每集重复的广告: 立刻返回，没算完是 pending，客户端过一会儿再问
-  if (route === 'skipmarks') return send(res, 200, await rpc('skipmarks', { u: q.get('u') || '', n: q.get('n') || '', peek: q.get('peek') === '1' }, 5000).catch(() => ({ status: 'none' })));
+  if (route === 'skipmarks') {
+    // 本地媒体: /media/f/<id>.<ext> 换成磁盘上的文件路径给 ffmpeg (和 /media/f 一样要求这个文件当前看得到)
+    const local = u => {
+      const m = /^\/media\/f\/([^/?#]+?)(?:\.\w+)?$/.exec(u || ''); if (!m) return u || '';
+      const snap = localIndex(), f = snap.byFile.get(m[1]);
+      return f && localCfg.enabled && localCatOk(snap.catById.get(f.item.cat)) ? f.path : '';
+    };
+    return send(res, 200, await rpc('skipmarks', { u: local(q.get('u')), n: local(q.get('n')), peek: q.get('peek') === '1' }, 5000).catch(() => ({ status: 'none' })));
+  }
   if (route === 'adsegs') return send(res, 200, await adSegments(q.get('u') || ''));
   if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
   if (route === 'local/vod') {
@@ -3366,7 +3412,8 @@ async function api(route, q, res, req) {
     const name = (q.get('name') || '').trim();
     if (!name) return send(res, 400, { error: '缺少名字' });
     const only = SITES.find(s => s.key === q.get('site'));   // same scope switch as search: one source (a 聚合源 → its members) or all
-    return send(res, 200, { list: await person(name, q.get('role'), only ? scopeSites(only) : SITES.filter(s => !s.memberSites)) });
+    const want = only && !only.memberSites ? new Set((q.get('t') || '').split(',').map(x => x.trim()).filter(Boolean)) : new Set();
+    return send(res, 200, { list: await person(name, q.get('role'), only ? scopeSites(only) : SITES.filter(s => !s.memberSites), want) });
   }
   if (route === 'search') {
     const wd = (q.get('wd') || '').trim();
@@ -3384,8 +3431,17 @@ async function api(route, q, res, req) {
       }
       return false;
     };
-    const out = await Promise.all(targets.map(s => cmsGet(s, { ac: 'detail', wd }, false, 8000)
-      .then(b => ({ site: s.key, all: (b.list || []).map(d => ({ d, it: item(s, d) })).filter(x => itemOk(s, x.it)) }))
+    // `t` (逗号分隔的分类 id, 只在指定了单个源时生效): 只搜这些分类。源支持 t 就让它在分类里找 (命中更全), 不支持也没关系, 下面再按分类 id 过滤一遍。
+    const want = only && !only.memberSites ? new Set((q.get('t') || '').split(',').map(x => x.trim()).filter(Boolean)) : new Set();
+    const asks = want.size && want.size <= 3 ? [...want] : [];   // 选得多就不逐个问了: 搜一次再过滤
+    const fetchHits = s => asks.length
+      ? Promise.all(asks.map(t => cmsGet(s, { ac: 'detail', wd, t }, false, 8000).catch(() => ({ list: [] })))).then(bs => {
+        const seen = new Set();
+        return { list: bs.flatMap(b => b.list || []).filter(d => !seen.has(str(d.vod_id)) && seen.add(str(d.vod_id))) };
+      })
+      : cmsGet(s, { ac: 'detail', wd }, false, 8000);
+    const out = await Promise.all(targets.map(s => fetchHits(s)
+      .then(b => ({ site: s.key, all: (b.list || []).map(d => ({ d, it: item(s, d) })).filter(x => itemOk(s, x.it) && (!want.size || want.has(x.it.typeId))) }))
       .then(o => ({ site: o.site, all: o.all, list: o.all.filter(x => nameHit(x.d)) }))
       .catch(e => ({ site: s.name, error: e.message, list: [] }))));
     // Many sites' `wd` also matches vod_actor / vod_director. Any credited name containing the query counts;
@@ -3412,7 +3468,12 @@ async function api(route, q, res, req) {
   const site = SITES.find(s => s.key === q.get('site')) || SITES[0];
   if (!site) return send(res, 404, { error: safety.level === 'kids' ? '儿童模式下没有少儿源，去「设置」添加' : '还没有点播源，去「设置」里添加' });
 
-  if (route === 'categories') return send(res, 200, { categories: site.memberSites ? await groupCategories(site) : await categories(site) });
+  if (route === 'categories') {
+    const cats = site.memberSites ? await groupCategories(site) : await categories(site);
+    // groups: 搜索页的二级分类树。聚合源没有一级, 全部平铺成一组。
+    const groups = site.memberSites ? [{ id: '', name: '', children: cats.map(c => ({ id: c.id, name: c.name })) }] : await categoryGroups(site).catch(() => []);
+    return send(res, 200, { categories: cats, groups });
+  }
   if (route === 'list' && site.memberSites) return send(res, 200, await groupList(site, q.get('t') || '', q.get('pg') || '1'));
   if (route === 'detail' && site.memberSites) {
     const gd = await groupDetail(site, q.get('id'));

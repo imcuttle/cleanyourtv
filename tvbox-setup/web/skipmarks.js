@@ -1,6 +1,6 @@
 // 自动识别片头 / 片尾 / 每集都插的同一条广告：把相邻两集的开头和结尾各一段音频做指纹，找出两集里「一模一样」的片段。
 // 片头曲、片尾曲、固定贴片广告每集都重复，正片内容不会，所以不需要任何人工标记。
-// 只有 ffmpeg 可用时才工作；结果按集缓存在 data/skipmarks.json。
+// 只有 ffmpeg 可用时才工作；结果按集缓存在 data/skipmarks.json，3 小时过期。
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -100,8 +100,13 @@ module.exports = function ({ ffmpeg, ua, file }) {
     try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file + '.tmp', JSON.stringify(Object.fromEntries(cache))); fs.renameSync(file + '.tmp', file); } catch {}
   };
   const touch = () => { dirty = true; clearTimeout(saveT); saveT = setTimeout(flush, 5000); saveT.unref?.(); };
-  const put = (k, v) => { cache.delete(k); cache.set(k, v); while (cache.size > MAX) cache.delete(cache.keys().next().value); touch(); };
-  const get = k => { const v = cache.get(k); if (v) { cache.delete(k); cache.set(k, v); touch(); } return v; };
+  const TTL = 3 * 3600e3;   // 识别结果缓存 3 小时 (none 标记另算, 一周)
+  const put = (k, v) => { cache.delete(k); cache.set(k, { ...v, at: v.at || Date.now() }); while (cache.size > MAX) cache.delete(cache.keys().next().value); touch(); };
+  const get = k => {
+    const v = cache.get(k); if (!v) return v;
+    if (!v.none && Date.now() - (v.at || 0) > TTL) { cache.delete(k); touch(); return undefined; }   // 过期 (旧缓存没有 at 也算过期)
+    cache.delete(k); cache.set(k, v); touch(); return v;
+  };
   process.once('exit', flush);
   const key = u => crypto.createHash('md5').update(u).digest('hex');
   const base = ['-hide_banner', '-nostdin', '-user_agent', ua, '-rw_timeout', '15000000'];
@@ -164,7 +169,8 @@ module.exports = function ({ ffmpeg, ua, file }) {
   // u: 这一集的原始地址, n: 相邻一集 (下一集, 没有就用上一集)。从不等计算: 没好就回 pending
   // peek: 只看缓存, 没有就回 none, 绝不启动计算 (自动跳过关着时只为了在进度条上标出位置)
   return function marks(u, n, peek) {
-    if (!ffmpeg || !/^https?:\/\//.test(u) || !/^https?:\/\//.test(n || '')) return { status: 'none' };
+    const okSrc = x => /^https?:\/\//.test(x || '') || (path.isAbsolute(x || '') && fs.existsSync(x));   // 网络地址, 或本地媒体的文件路径
+    if (!ffmpeg || !okSrc(u) || !okSrc(n)) return { status: 'none' };
     const k = key(u), hit = get(k);
     if (hit?.none && Date.now() - hit.at < 7 * 86400e3) return { status: 'none' };
     if (hit && !hit.none) return { status: 'ready', head: pick(hit.head, 3, hit.dur, false), tail: pick(hit.tail, 2, hit.dur, true), dur: hit.dur };

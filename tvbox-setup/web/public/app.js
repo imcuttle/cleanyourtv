@@ -600,8 +600,13 @@ const healthCell = (s, busy) => busy ? `<b class="hs">${netBusy}</b>`
   : !s.api || s.local ? ''
   : !siteHealth.get(s.api) ? '<b class="hs"><span class="net"><span class="nt"><small>…</small></span></span></b>'
   : siteHealth.get(s.api).ok ? `<b class="hs">${netBox(netLvMs(siteHealth.get(s.api).ms), siteHealth.get(s.api).ms + ' ms')}</b>` : `<b class="hs">${netBox(0, '连不上')}</b>`;
+// ---------- 基础控件的生成函数 (样式见 style.css 的「基础控件」) ----------
+// 分段选择: items = [[值, 文字, 悬停提示?], …]; 每个按钮带 attr="值" (比如 data-sc), cur 是当前值, sm 是菜单里的小号
+const segHtml = (items, { attr, cur, sm = false, label = '' } = {}) => `<div class="seg${sm ? ' sm' : ''}" role="group"${label ? ` aria-label="${esc(label)}"` : ''}>${items.map(([k, text, tip]) => `<button type="button" ${attr}="${esc(k)}" class="${k === cur ? 'on' : ''}"${tip ? ` title="${esc(tip)}"` : ''}><span>${text}</span></button>`).join('')}</div>`;
+// 带文字的开关 (checkbox)
+const switchHtml = (id, checked, text, tip = '') => `<label class="swt"${tip ? ` title="${esc(tip)}"` : ''}><input type="checkbox" id="${id}" ${checked ? 'checked' : ''}><i class="tgl"></i><span>${text}</span></label>`;
 let menuQ = '', menuTab = 'vis';   // menuTab: 'vis' = 可见的点播源, 'hid' = 在设置里标为隐藏的
-const menuTabs = (n, h, tab, attr) => h ? `<div class="mtabs"><button type="button" ${attr}="vis" class="${tab === 'vis' ? 'on' : ''}">可见 ${n}</button><button type="button" ${attr}="hid" class="${tab === 'hid' ? 'on' : ''}">隐藏 ${h}</button></div>` : '';
+const menuTabs = (n, h, tab, attr) => h ? segHtml([['vis', `可见 ${n}`], ['hid', `隐藏 ${h}`]], { attr, cur: tab, sm: true }) : '';
 function filterMenu() {
   const q = menuQ.toLowerCase(), rows = $$('#siteMenu button[data-k]');
   let n = 0;
@@ -726,12 +731,20 @@ if (!PV && 'serviceWorker' in navigator) {
   });
   navigator.serviceWorker.startMessages?.();
 }
-$('#siteBtn').onclick = e => { e.stopPropagation(); closeScope(); if ($('#siteMenu').hidden) { menuTab = state.sites.find(s => s.key === state.site)?.hidden ? 'hid' : 'vis'; renderMenu(); } $('#siteMenu').hidden = !$('#siteMenu').hidden; if (!$('#siteMenu').hidden) healthEpoch = Date.now(); $('#siteBtn').classList.toggle('open', !$('#siteMenu').hidden); if (!$('#siteMenu').hidden) { requestAnimationFrame(() => pingMenu()); if (matchMedia('(hover:hover)').matches) $('#menuQ')?.focus(); $('#siteMenu button.on')?.scrollIntoView({ block: 'nearest' }); } };
+$('#siteBtn').onclick = e => {
+  e.stopPropagation();
+  if (!Pop.isOpen($('#siteMenu'))) { menuTab = state.sites.find(s => s.key === state.site)?.hidden ? 'hid' : 'vis'; renderMenu(); }
+  if (!Pop.attach($('#siteMenu'), { anchor: $('#siteBtn') })) return;
+  healthEpoch = Date.now();
+  requestAnimationFrame(() => pingMenu());
+  if (matchMedia('(hover:hover)').matches) $('#menuQ')?.focus();
+  $('#siteMenu button.on')?.scrollIntoView({ block: 'nearest' });
+};
 $('#siteMenu').oninput = e => { if (e.target.id === 'menuQ') { menuQ = e.target.value.trim(); filterMenu(); } };
 $('#siteMenu').onkeydown = e => {
   if (e.target.id !== 'menuQ') return;
   if (e.key === 'Enter') { e.preventDefault(); $('#siteMenu button[data-k]:not(.mhid)')?.click(); }
-  else if (e.key === 'Escape') { if (menuQ) { e.target.value = menuQ = ''; filterMenu(); } else closeMenu(); }
+  else if (e.key === 'Escape' && menuQ) { e.preventDefault(); e.target.value = menuQ = ''; filterMenu(); }   // 没有搜索词时交给 Pop 的 Esc 关菜单
 };
 $('#siteMenu').onclick = async e => {
   const mt = e.target.closest('[data-mtab]');
@@ -750,7 +763,7 @@ $('#siteMenu').onclick = async e => {
       apiMemo.clear(); state.cats = []; await loadSites();
       toast(`已删除「${s.name}」`);
       if (was) route();
-      else if (location.hash.startsWith('#/settings')) renderSettings();
+      else if (onPage('#/settings')) renderSettings();
     } catch (err) { toast(err.message); }
     return;
   }
@@ -759,32 +772,102 @@ $('#siteMenu').onclick = async e => {
   closeMenu(); syncScope(); menuQ = '';
   loadSites(); if (location.hash && location.hash !== '#/') location.hash = '#/'; else route();
 };
-const closeMenu = () => { $('#siteMenu').hidden = true; $('#siteBtn').classList.remove('open'); };
 // 小屏: the 点播源 list is a bottom sheet (like the 直播源 picker) over a blurred scrim instead of a popover under the header.
 const sheetScrim = $('#sheetScrim');
-{
-  const sheets = () => [$('#siteMenu'), $('#liveMenu')].filter(Boolean);
-  // The 直播源 sheet is built inside #view (a fixed layer below the scrim), so on a phone it moves to <body> while open and goes back when closed.
-  const dockLive = () => {
-    const m = $('#liveMenu'); if (!m) return;
-    const mobile = matchMedia('(max-width: 760px)').matches;
-    if (!m.hidden && mobile && m.parentElement !== document.body) document.body.append(m);
-    else if ((m.hidden || !mobile) && m.parentElement === document.body) { const home = $('#view .lpick'); if (home) home.append(m); else m.remove(); }
-  };
-  // (长按卡片的浮窗开着时 ctxSheet 为真: 源菜单那边任何 hidden 变动触发 sync, 都不能把遮罩和 sheet-open 收掉)
-  const sync = () => { dockLive(); const on = ctxSheet || (matchMedia('(max-width: 760px)').matches && sheets().some(m => !m.hidden)); sheetScrim.hidden = !on; document.body.classList.toggle('sheet-open', on); document.body.classList.toggle('live-sheet', on && !!$('#liveMenu') && !$('#liveMenu').hidden); };
-  addEventListener('hashchange', () => { const m = $('#liveMenu'); if (m && m.parentElement === document.body) { m.hidden = true; $('#liveBtn')?.classList.remove('open'); } });
-  const mo = new MutationObserver(sync);
-  const watch = () => sheets().forEach(m => { if (!m._w) { m._w = 1; mo.observe(m, { attributes: true, attributeFilter: ['hidden'] }); } });
-  watch(); new MutationObserver(watch).observe(document.body, { childList: true, subtree: true });
-  matchMedia('(max-width: 760px)').addEventListener('change', sync);
-  sheetScrim.addEventListener('click', () => { closeMenu(); const l = $('#liveMenu'); if (l && !l.hidden) { l.hidden = true; $('#liveBtn')?.classList.remove('open'); } });
-}
-document.addEventListener('click', e => { if (!e.composedPath().some(n => n.classList?.contains('picker'))) closeMenu(); });
+// ---------- Pop: 统一的浮层组件 (所有下拉 / 菜单 / 上拉浮窗都走它) ----------
+// 大屏是浮在鼠标 / 触发按钮旁的小窗, 小屏 (≤760px, 或 sheet:true 强制) 是底部上拉浮窗: 小横条 + 虚化遮罩 (点遮罩收起)。同一时间只开一个, 打开新的会收掉旧的。
+// 关闭的方式统一: 点外面 (大屏) / 点遮罩 (小屏) / Esc / 换页 / 页面滚动或缩放 (大屏) / 再点一次触发按钮 / 调用方 close()。
+//   Pop.open({ x, y | anchor, sheet?, cls?, role?, title?, head?, body, foot?, onClick(e, close), onInput(e), onClose() })
+//       新建一个浮层 → { el, $body, $foot, close, sheet }。结构 .pop > .p-head / .p-body / .p-foot (head: 自定义标题行 HTML, 默认 title 一行)
+//   Pop.attach(el, { anchor, sheet?, fixed?, cls?, onClose() })
+//       把页面里已有的常驻菜单 (内容自己维护 / 事件自己绑: 源菜单、直播源菜单、搜索范围、批量操作…) 接进来: 小屏时临时搬到 <body> 变成上拉浮窗,
+//       fixed:true 时用 position:fixed 贴着按钮 (放不下就翻到上面), 否则留在原位 (CSS 自己的下拉)。关闭时放回原位。再点触发按钮 = 收起 (返回 false)。
+const Pop = (() => {
+  let cur = null;
+  const isSmall = () => matchMedia('(max-width: 760px)').matches;
+  function place(el, anchor, x, y) {
+    const r = el.getBoundingClientRect(), a = anchor?.getBoundingClientRect();
+    let left = x ?? a.left, top = y ?? a.bottom + 6;
+    if (y == null && top + r.height > innerHeight - 8 && a.top - r.height - 6 >= 8) top = a.top - r.height - 6;      // 下面放不下、上面放得下: 翻到按钮上面
+    el.style.left = Math.max(8, Math.min(left, innerWidth - r.width - 8)) + 'px';
+    el.style.top = Math.max(8, Math.min(top, innerHeight - r.height - 8)) + 'px';
+    if (y == null) el.style.maxHeight = Math.max(200, innerHeight - parseFloat(el.style.top) - 12) + 'px';
+  }
+  function close() {
+    if (!cur) return;
+    const p = cur; cur = null;
+    document.removeEventListener('pointerdown', p.away, true);
+    p.teardown();
+    if (p.sheet) { sheetScrim.hidden = true; document.body.classList.remove('sheet-open', 'card-sheet', 'pop-open'); }
+    if (p.anchor) { p.anchor.classList.remove('open'); if (p.anchor.hasAttribute('aria-expanded')) p.anchor.setAttribute('aria-expanded', 'false'); }
+    p.onClose?.();
+  }
+  // 公共的"开着"状态: 遮罩 / 点外面 / 按钮高亮
+  function start(el, o, sheet, teardown) {
+    const p = cur = { el, sheet, anchor: o.anchor, onClose: o.onClose, teardown, at: Date.now(),
+      away: e => { if (!p.el.contains(e.target) && !(p.anchor && p.anchor.contains(e.target))) close(); } };
+    if (o.anchor) { o.anchor.classList.add('open'); if (o.anchor.hasAttribute('aria-expanded')) o.anchor.setAttribute('aria-expanded', 'true'); }
+    if (sheet) { sheetScrim.hidden = false; document.body.classList.add('sheet-open', 'card-sheet', 'pop-open'); }
+    else document.addEventListener('pointerdown', p.away, true);   // 手机浮窗只由遮罩的 click 收起 (pointerdown 就收的话, 随后的 click 会穿透到背后)
+    return p;
+  }
+  function open(o) {
+    if (cur && o.anchor && cur.anchor === o.anchor) { close(); return null; }     // 再点一次触发按钮 = 收起
+    close();
+    const sheet = o.sheet ?? isSmall();
+    const el = document.createElement('div');
+    el.className = 'pop' + (sheet ? ' pop-sheet' : '') + (o.cls ? ' ' + o.cls : '');
+    if (o.role) el.setAttribute('role', o.role);
+    const head = o.head ?? (o.title ? `<div class="p-head"><b>${esc(o.title)}</b></div>` : '');
+    el.innerHTML = `${head}<div class="p-body">${o.body || ''}</div>${o.foot ? `<div class="p-foot">${o.foot}</div>` : ''}`;
+    document.body.append(el);
+    start(el, o, sheet, () => el.remove());
+    if (!sheet) place(el, o.anchor, o.x, o.y);
+    el.addEventListener('click', e => o.onClick?.(e, close));
+    el.addEventListener('input', e => o.onInput?.(e));
+    return { el, sheet, $body: $('.p-body', el), $foot: $('.p-foot', el), close };
+  }
+  function attach(el, o) {
+    if (cur && cur.el === el) { close(); return false; }
+    close();
+    const sheet = o.sheet ?? isSmall();
+    const home = { parent: el.parentNode, next: el.nextSibling }, own = el.className;
+    el.hidden = false;
+    if (sheet) { document.body.append(el); el.classList.add('pop', 'pop-sheet'); }
+    else if (o.fixed) el.classList.add('pop');
+    if (o.cls && (sheet || o.fixed)) el.classList.add(...o.cls.split(' '));
+    start(el, o, sheet, () => {
+      el.hidden = true; el.className = own;
+      el.style.left = el.style.top = el.style.maxHeight = '';
+      if (el.parentNode !== home.parent) home.parent.insertBefore(el, home.next);
+    });
+    if (!sheet && o.fixed) place(el, o.anchor);
+    return true;
+  }
+  sheetScrim.addEventListener('click', e => {
+    if (!cur?.sheet) return;
+    e.preventDefault(); e.stopPropagation();
+    if (Date.now() - cur.at > 400) close();                  // 长按松手补的那一下 click 不算
+  });
+  addEventListener('keydown', e => { if (e.key === 'Escape' && !e.defaultPrevented) close(); });
+  addEventListener('hashchange', close);
+  addEventListener('scroll', e => { if (cur && !cur.sheet && Date.now() - cur.at > 400 && !cur.el.contains(e.target)) close(); }, true);   // 刚打开时的 scrollIntoView 不算
+  addEventListener('resize', () => { if (cur && !cur.sheet) close(); });
+  matchMedia('(max-width: 760px)').addEventListener('change', close);   // 跨过大小屏分界: 形态变了, 直接收掉
+  return { open, attach, close, isOpen: el => !!cur && cur.el === el, sheetOpen: () => !!cur?.sheet, openFor: a => !!cur && cur.anchor === a };
+})();
+const closeMenu = () => Pop.close(), closeScope = closeMenu;
 // ---------- search box: scope (全部源 / 仅当前源) ----------
 const searchScope = { get: () => localStorage.searchScope === 'site' ? 'site' : 'all', set(v) { localStorage.searchScope = v; syncScope(); } };
-const personHash = (role, name, scope = searchScope.get()) => '#/person/' + role + '/' + encodeURIComponent(name) + (scope === 'site' && state.site ? '/' + encodeURIComponent(state.site) : '');
-const searchHash = (q, scope = searchScope.get()) => '#/search/' + encodeURIComponent(q) + (scope === 'site' && state.site ? '/' + encodeURIComponent(state.site) : '');
+const personHash = (role, name, scope = searchScope.get()) => '#/person/' + role + '/' + encodeURIComponent(name) + (scope === 'site' && state.site ? '/' + encodeURIComponent(state.site) : '') + catQuery(scope);
+// 搜索时只搜当前源里的哪些分类 (分类 id, 二级树里勾的): 只对「当前源」有效, 换了源就清掉; 搜索页的地址 ?c= 带着它
+const searchCats = {
+  get: (site = state.site) => { try { const j = JSON.parse(localStorage.searchCats || 'null'); return j && j.site === site && Array.isArray(j.ids) ? j.ids : []; } catch { return []; } },
+  set(ids, site = state.site) { if (ids.length) localStorage.searchCats = JSON.stringify({ site, ids }); else localStorage.removeItem('searchCats'); syncScope(); },
+};
+// 地址里带的分类筛选 (?c=): 搜索页 ⇄ 演员 / 导演页互相跳转都继承, 只在「当前源」范围里有
+const catQuery = scope => { const cats = scope === 'site' && state.site ? searchCats.get() : []; return cats.length ? '?c=' + encodeURIComponent(cats.join(',')) : ''; };
+const searchHash = (q, scope = searchScope.get()) => '#/search/' + encodeURIComponent(q) + (scope === 'site' && state.site ? '/' + encodeURIComponent(state.site) : '') + catQuery(scope);
 const searchableCount = () => state.sites.filter(s => !s.group).length;
 function syncScope() {
   const sc = searchScope.get(), cur = state.sites.find(s => s.key === state.site), site = sc === 'site' && !!cur;
@@ -795,22 +878,36 @@ function syncScope() {
   $('#scopeSiteHint').textContent = cur ? cur.name : '没有可用的源';
   $$('#scopeMenu [data-scope]').forEach(b => b.classList.toggle('on', b.dataset.scope === (site ? 'site' : 'all')));
   $('#q').placeholder = smallScreen.matches ? '搜索' : site ? `在「${cur.name}」里搜` : '搜片名 / 演员 / 导演';
+  const n = site ? searchCats.get().length : 0, txt = n ? `已选 ${n} 个分类` : '全部分类';
+  $('#scopeCats').hidden = !site; $('#scopeCatsHint').textContent = txt; $('#scopeCats').classList.toggle('on', n > 0);
+  $('#sOvCats').hidden = !site; $('#sOvCatsHint').textContent = txt; $('#sOvCats').classList.toggle('on', n > 0);
 }
-const closeScope = () => { $('#scopeMenu').hidden = true; $('#scopeBtn').classList.remove('open'); $('#scopeBtn').setAttribute('aria-expanded', 'false'); };
+// 搜索框的范围里「只搜哪些分类」: 浮层 / 上拉浮窗里的二级树, 选好后下一次搜索就按它来; 已经在搜索结果页就当场重搜
+async function pickSearchCats(anchor) {
+  const cur = state.sites.find(s => s.key === state.site); if (!cur) return;
+  let groups = [];
+  try { groups = catGroups(await api('categories', { site: cur.key })); } catch (e) { if (!isAbort(e)) toast('分类加载失败：' + e.message); return; }
+  if (!groups.length) return toast('这个源没有分类');
+  closeScope();
+  openCatPick(anchor, groups, searchCats.get(), ids => {
+    searchCats.set(ids); paintSov();
+    const q = ($('#q2').value || $('#q').value).trim();
+    if (location.hash.startsWith('#/search/') && q) { closeSov(); location.replace(searchHash(q)); }
+  });
+}
+$('#scopeCats').onclick = e => { e.stopPropagation(); pickSearchCats($('#scopeBtn')); };
+$('#sOvCats').onclick = () => pickSearchCats($('#sOvCats'));
 $('#scopeBtn').onclick = e => {
-  e.stopPropagation(); closeMenu(); closeHist();
-  const open = $('#scopeMenu').hidden;
-  $('#scopeMenu').hidden = !open; $('#scopeBtn').classList.toggle('open', open); $('#scopeBtn').setAttribute('aria-expanded', String(open));
+  e.stopPropagation(); closeHist();
+  Pop.attach($('#scopeMenu'), { anchor: $('#scopeBtn'), sheet: false });
 };
 $('#scopeMenu').onclick = e => {
   const b = e.target.closest('[data-scope]'); if (!b) return;
   searchScope.set(b.dataset.scope); closeScope(); $('#q').focus(); closeHist();
   // Already looking at results: re-run them in the new scope.
   const q = $('#q').value.trim();
-  if (location.hash.startsWith('#/search/') && q) location.hash = searchHash(q);
+  if (location.hash.startsWith('#/search/') && q) location.replace(searchHash(q));
 };
-document.addEventListener('click', e => { if (!e.target.closest('#searchForm')) closeScope(); });
-addEventListener('keydown', e => { if (e.key === 'Escape') closeScope(); });
 const recents = {
   all: () => { try { return JSON.parse(UD.get('recentSearches') || '[]').filter(x => typeof x === 'string'); } catch { return []; } },
   add(q) { UD.set('recentSearches', JSON.stringify([q, ...this.all().filter(x => x !== q)].slice(0, 12))); },
@@ -915,7 +1012,7 @@ $('#sOvScope').onclick = e => {
   const b = e.target.closest('[data-scope]'); if (!b || b.disabled) return;
   searchScope.set(b.dataset.scope); paintSov(); $('#q2').focus();
   const q = $('#q2').value.trim();
-  if (location.hash.startsWith('#/search/') && q) { closeSov(); location.hash = searchHash(q); }
+  if (location.hash.startsWith('#/search/') && q) { closeSov(); location.replace(searchHash(q)); }
 };
 $('#sOvRecent').onclick = e => {
   const row = e.target.closest('.sov-row'); if (!row) return;
@@ -934,7 +1031,12 @@ syncScope();
   view.addEventListener('scroll', paintTop, { passive: true });
   new MutationObserver(paintTop).observe(view, { childList: true });
 }
-addEventListener('hashchange', () => route({ nav: true }));
+addEventListener('hashchange', () => {
+  const H = location.hash;
+  if (isOverlayHash(H)) { if (overlayMatches(H)) return; }          // 浮层自己改的地址 (返回到详情 / 换集…): 已经开着, 不用再来一遍
+  else if ((H || '#/') === (pageHash || '#/') && pageHash !== null && view.firstElementChild) return;         // 只是关掉浮层回到下面这页: 页面没动, 不重画 (滚动位置也在)
+  route({ nav: true });
+});
 
 let heroTimer, pageTimer;
 function newPage() {
@@ -1010,7 +1112,114 @@ function leaveSettingsOk() {
   return false;
 }
 addEventListener('beforeunload', e => { if (settingsDirty && settingsOpen()) { e.preventDefault(); e.returnValue = ''; } });
+// ---------- 浮层 (详情 / 播放器 / 沉浸) 的地址 ----------
+// 每一层浮层都有自己的地址: 详情 #/v/源/id, 播放器 #/play/源/id/线路/集 (直播 #/tv/…), 沉浸 #/feed/模式/…
+// 打开时 pushState (新历史记录, 地址跟着变), state 里记下它下面每一层的地址 (stack: [页面, 详情, …]),
+// 所以刷新 / 前进 / 新标签页打开同一个地址, 都能把「页面 → 详情 → 播放器」原样搭回来。关闭 = 返回, 回到下面一层的地址。
+// 页面自己的状态 (排序 / 筛选 / 搜索范围…) 放在地址 ? 后面 (见 setQuery), 刷新也在。
+const OVERLAYS = ['v', 'play', 'tv', 'feed'];
+const hashPage = h => (h || '').split('?')[0].split('/')[1] || '';
+const isOverlayHash = h => OVERLAYS.includes(hashPage(h));
+const hashSeg = (h, i) => { try { return decodeURIComponent((h || '').split('?')[0].split('/')[i] || ''); } catch { return (h || '').split('?')[0].split('/')[i] || ''; } };
+const curHash = () => location.hash || '#/';
+let pageHash = null, routeHash = '', restoring = false;
+const onPage = p => (pageHash ?? location.hash ?? '').startsWith(p);       // 当前页面 (浮层下面那一页) 是不是 p
+const hashParams = () => new URLSearchParams((routeHash || location.hash).split('?')[1] || '');
+// 浮层不新增历史记录: 打开 / 关闭都是 replaceState, 返回键直接回到上一个「页面」(菜单切换、去搜索才是 push)。
+// state 里的 stack 记着它下面每一层的地址, 关闭 (closeOverlay) 就是换回上一层的地址; sk 是页面的滚动位置键, 一路带着。
+const OV_KIND = { v: 'modal', play: 'player', tv: 'player', feed: 'feed' };
+function pushOverlay(kind, url) {
+  const st = history.state && typeof history.state === 'object' ? history.state : {};
+  history.replaceState({ [kind]: 1, stack: [...(st.stack || []), curHash()], sk: st.sk }, '', url || location.href);
+}
+// 关掉最上面一层浮层 (✕ / 点遮罩 / Esc / 播放器返回键): 地址和 state 换回下面一层。quiet: 浮层自己已经处理 (进画中画), 不用再通知
+function closeOverlay(quiet) {
+  const st = history.state && typeof history.state === 'object' ? history.state : {};
+  if (!(st.modal || st.player || st.feed) || !st.stack?.length) return history.back();
+  const stack = st.stack.slice(0, -1), under = st.stack.at(-1), k = OV_KIND[hashPage(under)];
+  history.replaceState({ ...(k ? { [k]: 1, stack } : {}), sk: st.sk }, '', under);
+  if (!quiet) dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+}
+function setOverlayUrl(url) { if (url && url !== location.hash) history.replaceState(history.state, '', url); }
+// 当前这一页的 ?参数 改了 (排序 / 筛选…): 只改地址, 不重画, 不新增历史记录
+function setQuery(patch) {
+  if (isOverlayHash(location.hash)) return;
+  const [path, q = ''] = location.hash.split('?'), p = new URLSearchParams(q);
+  for (const [k, v] of Object.entries(patch)) { if (v == null || v === '') p.delete(k); else p.set(k, v); }
+  const h = (path || '#/') + (p.toString() ? '?' + p : '');
+  if (h !== location.hash) history.replaceState(history.state, '', h);
+  pageHash = routeHash = h;
+}
+const playUrl = () => !cur ? '' : cur.kind === 'vod' ? playHref(cur.d.site, cur.d.id, cur.line, cur.ep)
+  : cur.kind === 'live' ? `#/tv/${encodeURIComponent(localStorage.live || '')}/${encodeURIComponent(cur.eps[cur.ep].url)}/${encodeURIComponent(cur.eps[cur.ep].name || '')}` : '';
+function overlayMatches(H) {
+  const p = hashPage(H);
+  if (p === 'v') return $('#modal')?.dataset.key === hashSeg(H, 2) + '|' + hashSeg(H, 3);
+  if (p === 'play') return playerOpen() && cur?.kind === 'vod' && cur.d.site + '|' + cur.d.id === hashSeg(H, 2) + '|' + hashSeg(H, 3);
+  if (p === 'tv') return playerOpen() && cur?.kind === 'live';
+  if (p === 'feed') return !!window.feedOpen?.();
+  return false;
+}
+// 地址是浮层: 先把下面的页面画出来, 再一层层把浮层打开。刷新 / 前进回来 (这条历史记录本来就是浮层) 不再新增历史记录;
+// 别人发来的链接 / 新标签页打开: 先把地址换成首页, 浮层再各自 push 自己的地址 (返回 = 回到首页), 地址栏不会被清掉。
+const takeHandoff = (site, id) => {
+  try {
+    const h = JSON.parse(localStorage['tvbox.handoff'] || 'null'); localStorage.removeItem('tvbox.handoff');
+    return h && h.k === site + '|' + id && Date.now() - h.at < 30e3 && h.it?.p1 ? h.it : null;
+  } catch { return null; }
+};
+async function restoreOverlays(H) {
+  const st = history.state && typeof history.state === 'object' ? history.state : {};
+  if (!(st.modal || st.player || st.feed) && !leaveSettingsOk()) { if (settingsHash) history.replaceState(null, '', settingsHash); return; }
+  const again = !!(st.modal || st.player || st.feed) && Array.isArray(st.stack) && st.stack.length > 0;
+  const page = hashPage(H);
+  let layers, fast = null;
+  if (again) layers = [...st.stack, H];
+  else {
+    history.replaceState(null, '', page === 'tv' ? '#/live' : '#/');
+    const [site, id, line, ep] = [hashSeg(H, 2), hashSeg(H, 3), +hashSeg(H, 4) || 0, +hashSeg(H, 5) || 0];
+    fast = page === 'play' && !line && !ep ? takeHandoff(site, id) : null;     // 「新窗口播放」: 卡片数据带过来了, 不用等详情
+    layers = [page === 'tv' ? '#/live' : '#/', ...(page === 'play' && !fast ? [vodHref(site, id)] : []), H];
+  }
+  if (page === 'tv') localStorage.live = hashSeg(H, 2) || localStorage.live || '';
+  restoring = again;
+  try {
+    let groups;
+    if (layers[0] !== pageHash || !view.firstElementChild || !again) groups = await route({ hash: layers[0], nav: again });
+    for (let i = 1; i < layers.length; i++) {
+      const h = layers[i], p = hashPage(h), nx = layers[i + 1];
+      if (p === 'v') {
+        const [site, id] = [hashSeg(h, 2), hashSeg(h, 3)];
+        const auto = nx && hashPage(nx) === 'play' && hashSeg(nx, 2) === site && hashSeg(nx, 3) === id ? { line: +hashSeg(nx, 4) || 0, ep: +hashSeg(nx, 5) || 0 } : false;
+        await openDetail(site, id, auto, false, again);
+        if (auto) i++;
+      } else if (p === 'play') {
+        const [site, id, line, ep] = [hashSeg(h, 2), hashSeg(h, 3), +hashSeg(h, 4) || 0, +hashSeg(h, 5) || 0];
+        if (fast) playPartial(fast);
+        else {
+          try {
+            const d = await api('detail', { site, id }, null);
+            if (d.lines?.length) play(d, d.lines[line] ? line : 0, d.lines[line]?.episodes[ep] ? ep : 0); else await openDetail(site, id, false, false, again);
+          } catch (e) { if (!isAbort(e)) toast(e.message); }
+        }
+      } else if (p === 'tv') {
+        const url = hashSeg(h, 3), g = groups?.find?.(x => x.channels.some(ch => ch.url === url));
+        if (g) playLive(g.channels, g.channels.findIndex(ch => ch.url === url));
+        else if (url) playLive([{ name: hashSeg(h, 4) || '直播', url }], 0);
+      } else if (p === 'feed') {
+        const m = hashSeg(h, 2) || 'rec';
+        window.openFeed?.({ mode: m, t: m === 'cat' ? hashSeg(h, 3) : '', name: m === 'cat' ? hashSeg(h, 4) : '', site: m === 'cat' ? hashSeg(h, 5) || state.site : state.site,
+          q: m === 'search' ? hashSeg(h, 3) : '', scope: m === 'search' ? hashSeg(h, 4) : '' }, again);
+      }
+    }
+  } finally { restoring = false; }
+}
 async function route(opts = {}) {
+  // 浮层的地址 (分享链接、新标签页、刷新、前进): 页面在下, 浮层一层层搭上去, 地址保持原样; 下面的页面没变就不动它
+  if (OVERLAYS.includes(hashPage(opts.hash || location.hash))) {
+    if (!opts.hash && overlayMatches(location.hash)) return route({ ...opts, hash: pageHash || '#/' });   // 浮层开着时有人要求重画下面的页面 (源列表变了…): 只重画页面, 浮层不动
+    return restoreOverlays(opts.hash || location.hash);
+  }
   if (!leaveSettingsOk()) {
     // The address bar already moved on: put it back without a new history entry, and keep the page as it is.
     if (settingsHash && location.hash !== settingsHash) { history.replaceState(null, '', settingsHash); try { syncNav(); } catch {} }
@@ -1020,33 +1229,17 @@ async function route(opts = {}) {
   newPage();
   const seq = ++routeSeq;
   view.classList.remove('restoring');
-  let [, page, a, b, c] = location.hash.split('/');
+  const H = opts.hash || location.hash;
+  let [, page, a, b, c] = H.split('?')[0].split('/');
   if (PV?.kind === 'live' && page !== 'live' && page !== 'tv') { history.replaceState(null, '', '#/live'); page = 'live'; }
   else if (PV?.kind === 'vod' && ['charts', 'live', 'tv', 'favorites', 'downloads', 'settings', 'me', 'history'].includes(page)) { history.replaceState(null, '', '#/'); page = ''; }
-  // Deep links (what a card's href points at, e.g. after ⌘-click into a new tab): show the page
-  // underneath, then the detail / player on top.
-  if (page === 'play') {
-    const [line, ep] = location.hash.split('/').slice(4).map(Number);
+  if (page === 'find') {
     history.replaceState(null, '', '#/');
+    const name = decodeURIComponent(a || '');
     route();
-    return openDetail(decodeURIComponent(a || ''), decodeURIComponent(b || ''), { line: line || 0, ep: ep || 0 });
+    return openByName(name);
   }
-  if (page === 'v' || page === 'find') {
-    history.replaceState(null, '', '#/');
-    const [site, id, name] = [decodeURIComponent(a || ''), decodeURIComponent(b || ''), decodeURIComponent(a || '')];
-    route();
-    return page === 'v' ? openDetail(site, id) : openByName(name);
-  }
-  if (page === 'tv') {
-    history.replaceState(null, '', '#/live');
-    localStorage.live = decodeURIComponent(a || '');
-    return renderLive().then(groups => {
-      const url = decodeURIComponent(b || '');
-      const g = groups?.find(x => x.channels.some(ch => ch.url === url));
-      if (g) playLive(g.channels, g.channels.findIndex(ch => ch.url === url));
-      else if (url) playLive([{ name: decodeURIComponent(c || '直播'), url }], 0);
-    }).catch(e => { if (!isAbort(e)) throw e; });
-  }
+  pageHash = H; routeHash = H;
   $$('nav a').forEach(n => n.classList.toggle('on', n.dataset.nav === (page || 'home')));
   $('#mineTab')?.classList.toggle('on', ['favorites', 'downloads', 'settings'].includes(page));
   restoreCtl?.();
@@ -1084,11 +1277,15 @@ async function route(opts = {}) {
     if (page === 'site') {
       const k = decodeURIComponent(a || '');
       if (state.sites.some(x => x.key === k)) { state.site = localStorage.site = k; state.cats = []; await loadSites(); }
-      history.replaceState(null, '', '#/');
+      history.replaceState(null, '', '#/'); pageHash = routeHash = '#/';
       return await renderHome();
     }
     if (page === 'search') return await renderSearch(decodeURIComponent(a || ''), decodeURIComponent(b || ''));
     if (page === 'cat') return await renderCategory(decodeURIComponent(a || ''), decodeURIComponent(b || ''), decodeURIComponent(c || ''));
+    // 首页: 当前点播源写进地址 (#/?site=源), 刷新 / 新标签页打开 / 发给别人都是同一个源
+    const want = hashParams().get('site');
+    if (want && want !== state.site && state.sites.some(x => x.key === want && !x.inGroup)) { state.site = localStorage.site = want; state.cats = []; await loadSites(); }
+    setQuery({ site: state.site });
     return await renderHome();
   } catch (e) {
     if (isAbort(e)) return;
@@ -1145,33 +1342,22 @@ document.addEventListener('click', e => {
 // ---------- 卡片菜单: 右键 (PC) / 长按 (手机) → 影片播放 (原模式) | 沉浸播放 (沉浸模式) ----------
 // 沉浸播放从这张卡片开始, 按它所在列表 (一行 / 一个网格) 的顺序往下放; 分类 / 搜索页顶部的沉浸按钮才是随机 + 按喜好推荐。
 // 电脑右键 = 鼠标位置的小菜单; 手机长按 = 底部上拉浮窗 (同点播源 / 直播源的底部抽屉: 虚化遮罩, 点遮罩收起)
-let ctxEl = null, ctxCard = null, ctxSheet = false, ctxAt = 0, lpT = 0, lpXY = null, lpFired = 0;
-function closeCardMenu() {
-  if (!ctxEl) return;
-  ctxEl.remove(); ctxEl = null;
-  if (ctxSheet) { sheetScrim.hidden = true; document.body.classList.remove('sheet-open', 'card-sheet'); ctxSheet = false; }
-  ctxCard?.classList.remove('lp'); ctxCard = null;
-}
+let lpT = 0, lpXY = null, lpFired = 0;
 function openCardMenu(c, x, y, sheet) {
-  closeCardMenu();
-  ctxCard = c; c.classList.add('lp'); ctxAt = Date.now();
-  const m = ctxEl = document.createElement('div');
-  m.className = 'ctxm' + (sheet ? ' csheet' : '');
-  m.innerHTML = `${sheet ? `<div class="chead">${esc(c.querySelector('.name')?.textContent || '')}</div>` : ''}<button data-ctx="play">${IC.play}影片播放</button><button data-ctx="feed">${IC.feed}沉浸播放</button>${c.dataset.site === 'local' ? '' : `<button data-ctx="share">${IC.share}分享</button>`}`;
-  document.body.append(m);
-  if (sheet) { ctxSheet = true; sheetScrim.hidden = false; document.body.classList.add('sheet-open', 'card-sheet'); }
-  else {
-    const r = m.getBoundingClientRect();
-    m.style.left = Math.max(8, Math.min(x, innerWidth - r.width - 8)) + 'px';
-    m.style.top = Math.max(8, Math.min(y, innerHeight - r.height - 8)) + 'px';
-  }
-  m.addEventListener('click', e => {
-    const b = e.target.closest('[data-ctx]'); if (!b) return;
-    e.stopPropagation();
-    closeCardMenu();
-    if (b.dataset.ctx === 'play') playDirect(c);
-    else if (b.dataset.ctx === 'share') shareNow(c.getAttribute('href'), c.querySelector('.name')?.textContent || '');
-    else feedFromCard(c);
+  c.classList.add('lp');
+  const name = c.querySelector('.name')?.textContent || '';
+  Pop.open({
+    x, y, sheet: sheet || undefined, cls: 'pop-menu', title: sheet ? name : '',
+    body: `<button data-ctx="play">${IC.play}影片播放</button>${!sheet && c.dataset.site ? `<button data-ctx="newwin">${IC.win}新窗口播放</button>` : ''}<button data-ctx="feed">${IC.feed}沉浸播放</button>${c.dataset.site === 'local' ? '' : `<button data-ctx="share">${IC.share}分享</button>`}`,
+    onClose: () => c.classList.remove('lp'),
+    onClick: (e, close) => {
+      const b = e.target.closest('[data-ctx]'); if (!b) return;
+      e.stopPropagation(); close();
+      if (b.dataset.ctx === 'play') playDirect(c);
+      else if (b.dataset.ctx === 'newwin') openInNewWindow(c);
+      else if (b.dataset.ctx === 'share') shareNow(c.getAttribute('href'), name);
+      else feedFromCard(c);
+    },
   });
 }
 async function feedFromCard(c) {
@@ -1239,44 +1425,37 @@ for (const ev of ['touchend', 'touchcancel']) document.addEventListener(ev, () =
 document.addEventListener('click', e => {
   if (Date.now() - lpFired < 700 && cardOf(e)) { e.preventDefault(); e.stopImmediatePropagation(); lpFired = 0; }
 }, true);
-// 手机浮窗只由遮罩的 click 收起: 在 pointerdown 就收的话, 随后的 click 会穿透到背后的卡片
-document.addEventListener('pointerdown', e => { if (ctxEl && !ctxSheet && !e.target.closest('.ctxm')) closeCardMenu(); }, true);
-addEventListener('scroll', () => { if (!ctxSheet) closeCardMenu(); }, true);
-sheetScrim.addEventListener('click', e => { if (!ctxSheet) return; e.preventDefault(); e.stopPropagation(); if (Date.now() - ctxAt > 400) closeCardMenu(); });   // 长按松手补的那一下 click 不算
 // 排序浮窗 (手机): 选项取自隐藏的 select，选中后写回 select 并触发它的 change，页面逻辑不用区分手机 / 桌面
 function openSortSheet(btn) {
   const sel = document.getElementById(btn.dataset.for); if (!sel) return;
-  closeCardMenu();
-  ctxAt = Date.now();
-  const m = ctxEl = document.createElement('div');
-  m.className = 'ctxm csheet ssheet';
-  m.setAttribute('role', 'listbox');
-  m.innerHTML = `<div class="chead">排序</div>${[...sel.options].map(o => `<button type="button" role="option" data-v="${esc(o.value)}" class="${o.value === sel.value ? 'on' : ''}">${esc(o.textContent)}</button>`).join('')}`;
-  document.body.append(m);
-  ctxSheet = true; sheetScrim.hidden = false; document.body.classList.add('sheet-open', 'card-sheet');
-  m.addEventListener('click', e => {
-    const b = e.target.closest('[data-v]'); if (!b) return;
-    e.stopPropagation();
-    closeCardMenu();
-    if (sel.value === b.dataset.v) return;
-    sel.value = b.dataset.v;
-    btn.textContent = sel.selectedOptions[0].textContent;
-    sel.dispatchEvent(new Event('change'));
+  Pop.open({
+    sheet: true, cls: 'pop-menu pop-pick', role: 'listbox', title: '排序',
+    body: [...sel.options].map(o => `<button type="button" role="option" data-v="${esc(o.value)}" class="${o.value === sel.value ? 'on' : ''}">${esc(o.textContent)}</button>`).join(''),
+    onClick: (e, close) => {
+      const b = e.target.closest('[data-v]'); if (!b) return;
+      e.stopPropagation(); close();
+      if (sel.value === b.dataset.v) return;
+      sel.value = b.dataset.v;
+      btn.textContent = sel.selectedOptions[0].textContent;
+      sel.dispatchEvent(new Event('change'));
+    },
   });
 }
 document.addEventListener('click', e => { const b = e.target.closest('.ssort .sbtn'); if (b) openSortSheet(b); });
-addEventListener('resize', () => { if (!ctxSheet) closeCardMenu(); });
-addEventListener('keydown', e => { if (e.key === 'Escape') closeCardMenu(); });
 const cardItems = new Map();
 // 卡片菜单「影片播放」: no detail sheet. Resumes where this title was left (or starts at the first episode).
+// 卡片自带第一集的地址 (it.p1, 列表 / 搜索接口一起给的): 从头播放时不等详情, 立刻起播, 选集 / 线路在后台补全 (upgradePlaying)。
 async function playDirect(c) {
+  let site = c.dataset.site, id = c.dataset.id, it = cardItems.get(site + '|' + id);
+  const fromStart = (s_, i_) => { const h = hist.get(s_, i_); return !h || (h.line === 0 && h.ep === 0); };
+  if (c.dataset.db === undefined && it?.p1 && fromStart(site, id)) return playPartial(it);
   const t = toast('正在打开播放…', true);
   try {
-    let site = c.dataset.site, id = c.dataset.id;
     if (c.dataset.db !== undefined) {                       // 豆瓣 card: find the title in our sources first
       const hit = await findTitle(c.dataset.db, new AbortController().signal);
       if (!hit) { t.remove(); return toast(`没找到「${c.dataset.db}」`); }
       ({ site, id } = hit);
+      if (hit.p1 && fromStart(site, id)) { t.remove(); return playPartial(hit); }
     }
     const d = await api('detail', { site, id }, null);
     t.remove();
@@ -1284,6 +1463,32 @@ async function playDirect(c) {
     const h = hist.get(site, id), line = h && d.lines[h.line] ? h.line : 0;
     play(d, line, h && h.line === line && d.lines[line].episodes[h.ep] ? h.ep : 0);
   } catch (err) { t.remove(); if (!isAbort(err)) toast(err.message); }
+}
+function playPartial(it) {
+  const d = { ...it, lines: [{ name: it.p1.l, episodes: [{ name: it.p1.n, url: it.p1.u }] }], partial: true };
+  play(d, 0, 0);
+  api('detail', { site: it.site, id: it.id }, null).then(full => upgradePlaying(d, full), () => {});
+}
+// 详情到了: 把正在播的这部换成完整的 (全部线路 / 选集), 当前正在播的那一集不动, 界面上依赖选集数的地方刷新一下
+function upgradePlaying(partial, full) {
+  if (!cur || cur.d !== partial || !full?.lines?.length) return;
+  const url = cur.eps[cur.ep].url;
+  const line = Math.max(0, full.lines.findIndex(l => l.episodes.some(e => e.url === url)));
+  const eps = full.lines[line].episodes, ep = Math.max(0, eps.findIndex(e => e.url === url));
+  Object.assign(cur, { d: full, line, eps, ep });
+  $('.ptitle').textContent = eps.length > 1 ? `${cur.title} · ${eps[ep].name}` : cur.title;
+  $('[data-act=next]').hidden = ep >= eps.length - 1;
+  $('[data-act=list]').hidden = eps.length <= 1;
+  if ($('.plist').hidden || $('.plist').dataset.mode === 'ep') renderPlist();
+  syncMedia(); paintVodActs(); setOverlayUrl(playUrl());
+  if (ask && !ask.n && eps.length >= 3) skipInit();
+}
+// 卡片右键「新窗口播放」: 新标签页直接打开这部的播放地址。卡片数据 (含第一集地址) 先放进 localStorage 递过去, 新页面不用再等详情。
+function openInNewWindow(c) {
+  const site = c.dataset.site, id = c.dataset.id, it = cardItems.get(site + '|' + id), h = hist.get(site, id);
+  const line = h?.line || 0, ep = h?.ep || 0;
+  if (it?.p1) { try { localStorage['tvbox.handoff'] = JSON.stringify({ k: site + '|' + id, it, at: Date.now() }); } catch {} }
+  if (!window.open(shareUrl(playHref(site, id, line, ep)), '_blank')) toast('浏览器拦截了新窗口，请允许弹出窗口');
 }
 // 豆瓣 card → the same title in our sources. Hits are kept in an LRU (30 min), and identical lookups already
 // in flight share one request. The "finding…" toast stays until it is found, failed, timed out (20 s),
@@ -1306,7 +1511,7 @@ async function findTitle(name, signal) {
   if (!findBusy.has(k)) {
     const p = api('search', { wd: name }, null).then(j => {
       const hit = j.results.find(r => r.name === name) || j.results.find(r => normName(r.name) === k) || null;
-      if (hit) findPut(k, { site: hit.site, id: hit.id });
+      if (hit) findPut(k, hit);
       return hit;
     }).finally(() => findBusy.delete(k));
     findBusy.set(k, p);
@@ -1484,12 +1689,17 @@ async function renderPerson(role, name, scopeKey = '') {
   const label = role === 'director' ? '导演' : '演员';
   const scoped = scopeKey ? state.sites.find(s => s.key === scopeKey) : null;
   const head = `<h1>${esc(name)} <span class="role">${label}</span></h1>`;
-  view.innerHTML = `<div class="page">${head}<p class="lan">在 ${scoped ? `「${esc(scoped.name)}」` : `${searchableCount()} 个源`}里找作品…</p>${spinner}</div>`;
-  const j = await api('person', { name, role, ...(scoped ? { site: scoped.key } : {}) });
+  const hp = hashParams();
+  let cats = scoped ? (hp.get('c') || '').split(',').filter(Boolean) : [];            // 从搜索页点进来时继承它的分类筛选
+  if (scoped) searchCats.set(cats, scoped.key);
+  view.innerHTML = `<div class="page">${head}<p class="lan">在 ${scoped ? `「${esc(scoped.name)}」${cats.length ? `的 ${cats.length} 个分类` : ''}` : `${searchableCount()} 个源`}里找作品…</p>${spinner}</div>`;
+  const ask = () => api('person', { name, role, ...(scoped ? { site: scoped.key } : {}), ...(cats.length ? { t: cats.join(',') } : {}) });
+  let j = await ask();
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
   const curName = names[scoped ? scoped.key : state.site] || '当前源';
+  let merge = hp.has('m') ? hp.get('m') !== '0' : searchMerge.on();
   const cards = () => {
-    const groups = searchMerge.on() ? mergeDupes(j.list) : j.list.map(it => ({ main: it, srcs: [it] }));
+    const groups = merge ? mergeDupes(j.list) : j.list.map(it => ({ main: it, srcs: [it] }));
     const html = groups.map(g => {
       const srcs = [...new Set(g.srcs.map(x => x.site))];
       return card(g.main, { sub: [g.main.year, g.main.type, srcs.length > 1 ? `${srcs.length} 个源` : g.main.siteName].filter(x => x && x !== '0').join(' · '),
@@ -1498,20 +1708,34 @@ async function renderPerson(role, name, scopeKey = '') {
     return { html, shown: groups.length };
   };
   const status = shown => j.list.length ? `${shown} 部作品 · 按年份排序` : '';
+  const emptyMsg = () => `<p class="empty">${scoped ? `「${esc(scoped.name)}」${cats.length ? '的这几个分类' : ''}里没找到。` : '各源都没搜到。'}部分源的搜索只按片名匹配，不认演员。${scoped && cats.length ? ' <a href="#" id="sNoCat"><u>不限分类再找</u></a>' : ''}${scoped ? ' <a href="#" id="sAll"><u>改成在全部源里找</u></a>' : ''}</p>`;
   const first = cards();
   view.innerHTML = `<div class="page">${head}
-    <div class="stool">
-      <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>当前源</span></button></div>
-      <label class="swt" title="同名同年的影片只显示一张，点开后在「其他源」里切换"><input type="checkbox" id="sMerge" ${searchMerge.on() ? 'checked' : ''}><i></i><span>合并同名资源</span></label>
-      <span class="lan" id="sStatus">${status(first.shown)}</span>
-    </div>
-    ${j.list.length ? `<div class="grid" id="sGrid">${first.html}</div>`
-      : `<p class="empty">${scoped ? `「${esc(scoped.name)}」里没找到。` : '各源都没搜到。'}部分源的搜索只按片名匹配，不认演员。${scoped ? ' <a href="#" id="sAll"><u>改成在全部源里找</u></a>' : ''}</p>`}</div>`;
-  const go = sc => { searchScope.set(sc); location.hash = personHash(role, name, sc); };
-  $$('.sseg [data-sc]', view).forEach(b => b.onclick = () => { if ((b.dataset.sc === 'site') !== !!scoped) go(b.dataset.sc); });
-  const all = $('#sAll', view); if (all) all.onclick = e => { e.preventDefault(); go('all'); };
+    ${toolbarHtml({ scoped, curName, cats, merge, status: status(first.shown) })}
+    <div id="sBody">${j.list.length ? `<div class="grid" id="sGrid">${first.html}</div>` : emptyMsg()}</div></div>`;
+  const go = sc => { searchScope.set(sc); location.replace(personHash(role, name, sc)); };
+  const bindEmpty = () => {
+    const all = $('#sAll', view); if (all) all.onclick = e => { e.preventDefault(); go('all'); };
+    const nc = $('#sNoCat', view); if (nc) nc.onclick = e => { e.preventDefault(); applyCats([]); };
+  };
+  bindScope(view, scoped, go);
+  bindEmpty();
+  let applying = 0;
+  async function applyCats(next) {
+    cats = next; syncCatBtn(view, scoped.key, cats); bindCatBtn(view, scoped.key, () => cats, applyCats);
+    const me = ++applying;
+    $('#sStatus', view).textContent = '查找中…'; $('#sBody', view).classList.add('busy');
+    try { j = await ask(); } catch (e) { if (isAbort(e) || me !== applying) return; toast(e.message); }
+    if (me !== applying) return;
+    const c = cards();
+    $('#sBody', view).classList.remove('busy');
+    $('#sBody', view).innerHTML = j.list.length ? `<div class="grid" id="sGrid">${c.html}</div>` : emptyMsg();
+    $('#sStatus', view).innerHTML = status(c.shown);
+    bindEmpty(); observeRatings(view);
+  }
+  if (scoped) bindCatBtn(view, scoped.key, () => cats, applyCats);
   $('#sMerge', view).onchange = e => {
-    searchMerge.set(e.target.checked);
+    merge = e.target.checked; searchMerge.set(merge); setQuery({ m: merge ? '' : '0' });
     const c = cards(); const g = $('#sGrid', view); if (g) g.innerHTML = c.html;
     $('#sStatus', view).innerHTML = status(c.shown);
     observeRatings(view);
@@ -1537,7 +1761,7 @@ const catSort = sortPref('catSort', ['time', 'year', 'name']);
 async function renderCategory(t, name, siteKey) {
   const site = state.sites.some(x => x.key === siteKey) ? siteKey : state.site;
   const other = site !== state.site ? state.sites.find(x => x.key === site)?.name : '';
-  let mode = catSort.get();
+  let mode = ['time', 'year', 'name'].includes(hashParams().get('s')) ? hashParams().get('s') : catSort.get();
   const base = [];                                         // everything loaded so far, in load order
   const order = list => mode ? [...list].sort(SORTS[mode][1]) : list;
   const head = `<div class="page"><div class="pagehead"><h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><button class="small ibs feedgo" data-feed="cat" data-t="${esc(t || '')}" data-name="${esc(name || '全部')}" data-site="${esc(site)}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button></div><div class="stool">${sortSelect('cSort', mode, '默认', ['time', 'year', 'name'], '只对已加载的内容排序；继续下滑加载的新内容在各自这一批里排序')}</div><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
@@ -1580,7 +1804,7 @@ async function renderCategory(t, name, siteKey) {
     if (tailEl && pg < count && tailEl.getBoundingClientRect().top < innerHeight + 600) setTimeout(() => more().catch(() => { busy = false; }), 0);
   };
   $('#cSort', view).onchange = e => {
-    mode = e.target.value; catSort.set(mode);
+    mode = e.target.value; catSort.set(mode); setQuery({ s: mode });
     const g = $('#grid'); if (!g) return;
     g.innerHTML = order(base).map(it => card(it)).join('');
     observeRatings(g); observeJav(g);
@@ -1632,31 +1856,116 @@ function mergeDupes(list) {
   }
   return out;
 }
+// ---- 分类筛选 (搜索页 · 当前源): 二级树 (一级分类 → 它下面的分类), 勾选后只搜这些分类 ----
+// 电脑上是按钮下面的浮层, 小屏是底部上拉浮窗 (和排序 / 长按菜单同一套遮罩)。选中的分类 id 放在地址的 ?c= 里。
+// 服务端给了二级树 (groups) 就用, 没有 (旧缓存 / 旧服务) 就把叶子分类平铺成一组
+const catGroups = j => j.groups?.length ? j.groups : j.categories?.length ? [{ id: '', name: '', children: j.categories.map(c => ({ id: c.id, name: c.name })) }] : [];
+function openCatPick(btn, groups, sel, onApply) {
+  const all = groups.flatMap(g => g.children), pick = new Set([...sel].filter(id => all.some(c => c.id === id)));
+  const open = new Set(groups.filter(g => g.id && g.children.some(c => pick.has(c.id))).map(g => g.id));
+  if (groups.filter(g => g.id).length === 1) open.add(groups.find(g => g.id).id);
+  const chip = c => `<button type="button" class="chip${pick.has(c.id) ? ' on' : ''}" data-c="${esc(c.id)}">${esc(c.name)}</button>`;
+  let P = null;
+  const draw = () => {
+    const q = ($('.cpq', P.el)?.value || '').trim().toLowerCase();
+    const hit = c => !q || c.name.toLowerCase().includes(q);
+    const body = groups.map(g => {
+      const kids = g.children.filter(c => hit(c) || (g.name && g.name.toLowerCase().includes(q)));
+      if (!kids.length) return '';
+      if (!g.id) return `<div class="cp-flat">${kids.map(chip).join('')}</div>`;
+      const n = g.children.filter(c => pick.has(c.id)).length, st = n === 0 ? '' : n === g.children.length ? ' on' : ' part';
+      return `<div class="cp-group${open.has(g.id) || q ? ' open' : ''}"><div class="cp-head"><button type="button" class="cp-box${st}" data-g="${esc(g.id)}" aria-label="选择「${esc(g.name)}」下的全部分类"></button><button type="button" class="cp-name" data-x="${esc(g.id)}">${esc(g.name)}<em>${n ? `${n} / ` : ''}${g.children.length}</em><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+        <div class="cp-kids">${kids.map(chip).join('')}</div></div>`;
+    }).join('');
+    // 搜索框在 p-body 之外 (不随列表重画), 列表放在里面的 .cp-list
+    $('.cp-list', P.el).innerHTML = body || '<p class="cp-empty">没有匹配的分类</p>';
+    $('.cp-ok', P.el).textContent = pick.size ? `只搜这 ${pick.size} 个分类` : '搜全部分类';
+  };
+  P = Pop.open({
+    anchor: btn, cls: 'catpick',
+    head: `<div class="p-head"><b>筛选分类</b><span class="p-act"><button type="button" class="cp-all">全选</button><button type="button" class="cp-none">清空</button></span><button type="button" class="p-x" aria-label="关闭">✕</button></div>`,
+    body: `${all.length > 14 ? '<input class="cpq" type="search" placeholder="找分类" autocomplete="off">' : ''}<div class="cp-list"></div>`,
+    foot: '<button type="button" class="cp-ok"></button>',
+    onInput: e => { if (e.target.classList.contains('cpq')) draw(); },
+    onClick: (e, close) => {
+      const t = e.target;
+      if (t.closest('.p-x')) return close();
+      if (t.closest('.cp-all')) { all.forEach(c => pick.add(c.id)); return draw(); }
+      if (t.closest('.cp-none')) { pick.clear(); return draw(); }
+      if (t.closest('.cp-ok')) { close(); return onApply([...pick]); }
+      const x = t.closest('[data-x]'); if (x) { open.has(x.dataset.x) ? open.delete(x.dataset.x) : open.add(x.dataset.x); return draw(); }
+      const g = t.closest('[data-g]');
+      if (g) { const kids = groups.find(k => k.id === g.dataset.g).children, full = kids.every(c => pick.has(c.id)); kids.forEach(c => full ? pick.delete(c.id) : pick.add(c.id)); open.add(g.dataset.g); return draw(); }
+      const c = t.closest('[data-c]'); if (c) { pick.has(c.dataset.c) ? pick.delete(c.dataset.c) : pick.add(c.dataset.c); draw(); }
+    },
+  });
+  if (P) draw();
+}
+
+// 搜索页 / 演员导演页共用的「分类」按钮: 当前源下才有; 点开是二级树多选 (openCatPick), 选好后 apply(新的分类 id 数组)
+const catBtnHtml = cats => `<button type="button" class="catbtn${cats.length ? ' on' : ''}" id="sCats" data-catpick aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18M6 12h12M10 19h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span id="sCatsL">${cats.length ? `${cats.length}<span class="lg"> 个分类</span>` : '分类<span class="lg">：全部</span>'}</span>${cats.length ? '<i class="catx" id="sCatsX" title="不限分类" aria-label="不限分类">✕</i>' : ''}</button>`;
+function bindCatBtn(root, site, getCats, apply) {
+  const cb = $('#sCats', root); if (!cb) return;
+  cb.onclick = async e => {
+    if (e.target.closest('#sCatsX')) { e.stopPropagation(); return apply([]); }
+    if (Pop.openFor(cb)) return Pop.close();
+    let groups = [];
+    try { groups = catGroups(await api('categories', { site })); } catch (err) { if (!isAbort(err)) toast('分类加载失败：' + err.message); return; }
+    if (!groups.length) return toast('这个源没有分类');
+    openCatPick(cb, groups, getCats(), apply);
+  };
+}
+// 换了分类: 按钮外观、地址 ?c=、记住的选择一起更新
+function syncCatBtn(root, site, cats) {
+  setQuery({ c: cats.join(',') }); searchCats.set(cats, site);
+  const btn = $('#sCats', root); if (!btn) return;
+  btn.outerHTML = catBtnHtml(cats);
+}
+
+// 搜索页 / 演员导演页共用的工具栏: 范围 (全部源 | 当前源) · 分类 (当前源才有) · 合并同名 · [排序] · 状态文字
+const toolbarHtml = ({ scoped, curName, cats, merge, sortHtml = '', status }) => `<div class="stool">
+      ${segHtml([['all', '全部源'], ['site', '当前源', curName]], { attr: 'data-sc', cur: scoped ? 'site' : 'all', label: '搜索范围' })}
+      ${scoped ? catBtnHtml(cats) : ''}
+      ${switchHtml('sMerge', merge, '合并同名<span class="lg">资源</span>', '同名同年的影片只显示一张，点开后在「其他源」里切换')}
+      ${sortHtml}<span class="lan" id="sStatus">${status}</span>
+    </div>`;
+// 点「全部源 / 当前源」: 范围变了才跳转 (go(新范围))
+const bindScope = (root, scoped, go) => $$('.seg [data-sc]', root).forEach(b => b.onclick = () => { if ((b.dataset.sc === 'site') !== !!scoped) go(b.dataset.sc); });
+
 async function renderSearch(q, scopeKey = '') {
   $('#q').value = q;
   const scoped = scopeKey ? state.sites.find(s => s.key === scopeKey) : null;
   const nSrc = scoped ? (scoped.members?.length || 1) : searchableCount();
-  view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1><p class="lan">${scoped ? `正在「${esc(scoped.name)}」里搜索` : `正在搜索全部 ${nSrc} 个源`}（片名 / 演员 / 导演）…</p>${spinner}</div>`;
-  const j = await api('search', { wd: q, ...(scoped ? { site: scoped.key } : {}) });
+  const hp = hashParams();
+  let cats = scoped ? (hp.get('c') || '').split(',').filter(Boolean) : [];            // 选中的分类 id (只在「当前源」里有)
+  if (scoped) searchCats.set(cats, scoped.key);
+  view.innerHTML = `<div class="page"><h1>“${esc(q)}”</h1><p class="lan">${scoped ? `正在「${esc(scoped.name)}」里搜索` : `正在搜索全部 ${nSrc} 个源`}${cats.length ? `（${cats.length} 个分类）` : ''}（片名 / 演员 / 导演）…</p>${spinner}</div>`;
+  const ask = () => api('search', { wd: q, ...(scoped ? { site: scoped.key } : {}), ...(cats.length ? { t: cats.join(',') } : {}) });
+  let j = await ask();
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
   const order = Object.fromEntries(state.sites.map((s, i) => [s.key, i]));
   const nq = normName(q);
   const rank = it => it.name === q ? 0 : normName(it.name).includes(nq) ? 1 : 2;
-  const res = j.results.sort((a, b) => rank(a) - rank(b) || order[a.site] - order[b.site]);
-  const people = [...(j.actor || []).map(p => ({ ...p, role: 'actor', label: '演员' })), ...(j.director || []).map(p => ({ ...p, role: 'director', label: '导演' }))]
-    .sort((a, b) => (b.name === q) - (a.name === q) || (b.count ?? b.list?.length ?? 0) - (a.count ?? a.list?.length ?? 0));
+  let res = [], people = [];
+  const derive = () => {
+    res = j.results.sort((a, b) => rank(a) - rank(b) || order[a.site] - order[b.site]);
+    people = [...(j.actor || []).map(p => ({ ...p, role: 'actor', label: '演员' })), ...(j.director || []).map(p => ({ ...p, role: 'director', label: '导演' }))]
+      .sort((a, b) => (b.name === q) - (a.name === q) || (b.count ?? b.list?.length ?? 0) - (a.count ?? a.list?.length ?? 0));
+  };
+  derive();
   const curName = names[scoped ? scoped.key : state.site] || '当前源';
   const sub = g => {
     const sites = [...new Set(g.srcs.map(x => names[x.site] || x.siteName))];
     return sites.length > 1 ? `${sites.length} 个源` : sites[0];
   };
-  const searchSort = sortPref('searchSort', ['time', 'year', 'quality', 'name']);
+  const urlSort = hp.get('s'), prefSort = sortPref('searchSort', ['time', 'year', 'quality', 'name']);
+  let sortMode = ['time', 'year', 'quality', 'name'].includes(urlSort) ? urlSort : prefSort.get();
+  let merge = hp.has('m') ? hp.get('m') !== '0' : searchMerge.on();
   const cards = () => {
-    let groups = searchMerge.on() ? mergeDupes(res) : res.map(it => ({ main: it, srcs: [it] }));
-    const mode = searchSort.get();
-    if (mode) {                                            // a merged title is as new as its newest source
+    let groups = merge ? mergeDupes(res) : res.map(it => ({ main: it, srcs: [it] }));
+    if (sortMode) {                                        // a merged title is as new as its newest source
       const rep = g => ({ ...g.main, time: g.srcs.reduce((m, x) => (x.time || '') > m ? x.time : m, '') });
-      groups = groups.map(g => [g, rep(g)]).sort((a, b) => SORTS[mode][1](a[1], b[1])).map(x => x[0]);
+      groups = groups.map(g => [g, rep(g)]).sort((a, b) => SORTS[sortMode][1](a[1], b[1])).map(x => x[0]);
     }
     const html = groups.map(g => {
       const n = new Set(g.srcs.map(x => x.site)).size;
@@ -1666,28 +1975,47 @@ async function renderSearch(q, scopeKey = '') {
   };
   const status = shown => [`${shown} 部影片`, people.length ? `${people.length} 位演职员` : '', j.failed.length ? `<span title="${esc(j.failed.join('、'))}">${j.failed.length} 个源未响应</span>` : ''].filter(Boolean).join(' · ');
   const first = cards();
-  view.innerHTML = `<div class="page"><div class="pagehead"><h1>“${esc(q)}”</h1>${res.length ? `<button class="small ibs feedgo" data-feed="search" data-q="${esc(q)}" data-scope="${esc(scoped ? scoped.key : '')}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button>` : ''}</div>
-    <div class="stool">
-      <div class="sseg" role="group" aria-label="搜索范围"><button type="button" data-sc="all" class="${scoped ? '' : 'on'}">全部源</button><button type="button" data-sc="site" class="${scoped ? 'on' : ''}" title="${esc(curName)}"><span>当前源</span></button></div>
-      <label class="swt" title="同名同年的影片只显示一张，点开后在「其他源」里切换"><input type="checkbox" id="sMerge" ${searchMerge.on() ? 'checked' : ''}><i></i><span>合并同名资源</span></label>
-      ${res.length ? sortSelect('sSort', searchSort.get(), '相关性', ['time', 'year', 'quality', 'name'], '换个顺序看搜索结果') : ''}
-      <span class="lan" id="sStatus">${status(first.shown)}</span>
-    </div>
-    ${res.length ? `<div class="grid" id="sGrid">${first.html}</div>` : `<div class="empty">${scoped ? `「${esc(scoped.name)}」里没有匹配的影片。` : '没有影片匹配，换个关键词（片名、演员或导演）。'}${scoped ? ' <a href="#" id="sAll"><u>改成在全部源里搜</u></a>' : ''}</div>`}
-    ${people.length ? `<h2 class="rtitle">演员 / 导演</h2><div class="ptags">${people.map(p =>
-      `<a class="ptag" href="${personHash(p.role, p.name, scoped ? 'site' : 'all')}"><b>${esc(p.name)}</b><span>${p.label} · ${p.count ?? p.list?.length ?? 0} 部</span></a>`).join('')}</div>` : ''}</div>`;
-  $$('.sseg [data-sc]', view).forEach(b => b.onclick = () => {
-    const sc = b.dataset.sc; if ((sc === 'site') === !!scoped) return;
-    searchScope.set(sc); location.hash = searchHash(q, sc);
-  });
-  const all = $('#sAll', view); if (all) all.onclick = e => { e.preventDefault(); searchScope.set('all'); location.hash = searchHash(q, 'all'); };
+  const emptyMsg = () => `<div class="empty">${scoped ? `「${esc(scoped.name)}」${cats.length ? '的这几个分类' : ''}里没有匹配的影片。` : '没有影片匹配，换个关键词（片名、演员或导演）。'}${scoped && cats.length ? ' <a href="#" id="sNoCat"><u>不限分类再搜</u></a>' : ''}${scoped ? ' <a href="#" id="sAll"><u>改成在全部源里搜</u></a>' : ''}</div>`;
+  const head = () => `<div class="pagehead"><h1>“${esc(q)}”</h1>${res.length ? `<button class="small ibs feedgo" data-feed="search" data-q="${esc(q)}" data-scope="${esc(scoped ? scoped.key : '')}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button>` : ''}</div>`;
+  view.innerHTML = `<div class="page"><div id="sHead">${head()}</div>
+    ${toolbarHtml({ scoped, curName, cats, merge, status: status(first.shown), sortHtml: sortSelect('sSort', sortMode, '相关性', ['time', 'year', 'quality', 'name'], '换个顺序看搜索结果') })}
+    <div id="sBody">${res.length ? `<div class="grid" id="sGrid">${first.html}</div>` : emptyMsg()}</div>
+    <div id="sPeople">${peopleHtml()}</div></div>`;
+  function peopleHtml() {
+    return people.length ? `<h2 class="rtitle">演员 / 导演</h2><div class="ptags">${people.map(p =>
+      `<a class="chip lg" href="${personHash(p.role, p.name, scoped ? 'site' : 'all')}"><b>${esc(p.name)}</b><span>${p.label} · ${p.count ?? p.list?.length ?? 0} 部</span></a>`).join('')}</div>` : '';
+  }
+  const bindEmpty = () => {
+    const all = $('#sAll', view); if (all) all.onclick = e => { e.preventDefault(); searchScope.set('all'); location.replace(searchHash(q, 'all')); };
+    const nc = $('#sNoCat', view); if (nc) nc.onclick = e => { e.preventDefault(); applyCats([]); };
+  };
+  bindScope(view, scoped, sc => { searchScope.set(sc); location.replace(searchHash(q, sc)); });
+  bindEmpty();
   const refresh = () => {
     const c = cards(); const g = $('#sGrid', view); if (g) g.innerHTML = c.html;
     $('#sStatus', view).innerHTML = status(c.shown);
     observeRatings(view); observeJav(view);
   };
-  $('#sMerge', view).onchange = e => { searchMerge.set(e.target.checked); refresh(); };
-  const ss = $('#sSort', view); if (ss) ss.onchange = e => { searchSort.set(e.target.value); refresh(); };
+  // 换了分类: 带着 t 重新搜一遍 (源支持按分类搜的话命中更全), 页面不整个重画, 地址 ?c= 跟着变
+  let applying = 0;
+  async function applyCats(next) {
+    cats = next; syncCatBtn(view, scoped.key, cats); bindCatBtn(view, scoped.key, () => cats, applyCats);
+    const me = ++applying;
+    $('#sStatus', view).textContent = '搜索中…'; $('#sBody', view).classList.add('busy');
+    try { j = await ask(); } catch (e) { if (isAbort(e) || me !== applying) return; toast(e.message); }
+    if (me !== applying) return;
+    derive();
+    $('#sHead', view).innerHTML = head();
+    const c = cards();
+    $('#sBody', view).classList.remove('busy');
+    $('#sBody', view).innerHTML = res.length ? `<div class="grid" id="sGrid">${c.html}</div>` : emptyMsg();
+    $('#sPeople', view).innerHTML = peopleHtml();
+    $('#sStatus', view).innerHTML = status(c.shown);
+    bindEmpty(); observeRatings(view); observeJav(view);
+  }
+  if (scoped) bindCatBtn(view, scoped.key, () => cats, applyCats);
+  $('#sMerge', view).onchange = e => { merge = e.target.checked; searchMerge.set(merge); setQuery({ m: merge ? '' : '0' }); refresh(); };
+  const ss = $('#sSort', view); if (ss) ss.onchange = e => { sortMode = e.target.value; prefSort.set(sortMode); setQuery({ s: sortMode }); refresh(); };
   observeRatings(view);
   observeJav(view);
 }
@@ -1754,7 +2082,7 @@ function filterRow(label, opts) {
 
 async function renderCharts() {
   if (kidsMode()) { view.innerHTML = '<div class="page"><h1>榜单</h1><p class="empty">儿童模式下榜单不可用。</p></div>'; return; }
-  const [, , tab = '', ...p] = location.hash.split('/').map(s => { try { return decodeURIComponent(s); } catch { return s; } });
+  const [, , tab = '', ...p] = routeHash.split('?')[0].split('/').map(s => { try { return decodeURIComponent(s); } catch { return s; } });
   view.innerHTML = `<div class="page">${spinner}</div>`;
   if (!chartCat) chartCat = await api('douban/charts');
   const C = chartCat;
@@ -1836,6 +2164,7 @@ const IC = {
   play: svgI('M7 4.5v15l12-7.5z'),
   retry: svgI('M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5'),
   feed: svgI('M5 3h14v18H5zM10 9.2v5.6l4.5-2.8z'),
+  win: svgI('M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'),
   share: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2"/></svg>',
   trash: svgI('M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3'),
   clear: svgI('M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3'),
@@ -1857,7 +2186,7 @@ async function renderDownloads() {
   const draw = async () => {
     const j = await api('downloads');
     state.downloads = j.jobs;
-    if (!location.hash.startsWith('#/downloads')) return;
+    if (!onPage('#/downloads')) return;
     const total = j.jobs.reduce((s, x) => s + (x.bytes || 0), 0);
     const anyActive = j.jobs.some(x => ACTIVE.includes(x.status)), anyPaused = j.jobs.some(x => ['paused', 'error'].includes(x.status));
     const totalSpeed = j.jobs.reduce((n, x) => n + (x.speed || 0), 0);
@@ -1924,11 +2253,11 @@ async function renderDownloads() {
 }
 
 // ---------- detail modal ----------
-async function openDetail(site, id, autoplay = false, replace = false) {
+async function openDetail(site, id, autoplay = false, replace = false, quiet = false) {   // quiet: 这条历史记录本来就是它 (刷新 / 前进恢复), 不再 push
   replace = replace && !!$('#modal');
   closeDetail();
   const m = document.createElement('div');
-  m.className = 'modal'; m.id = 'modal';
+  m.className = 'modal'; m.id = 'modal'; m.dataset.key = site + '|' + id;
   // The card that was clicked already has its picture loaded: show it at once (cover + title) instead of a bare spinner, and keep
   // that very node when the details arrive, so the cover never blinks out and back in.
   const known = cardItems.get(site + '|' + id);
@@ -1936,15 +2265,15 @@ async function openDetail(site, id, autoplay = false, replace = false) {
     ? `<div class="sheet"><div class="top"><div class="bg" style="${bg(dbSize(known.pic, 's') || known.pic)}"></div><div class="poster sk" style="${bgHi(known.pic, 'm')}"></div>
         <button class="close">✕</button><div class="info"><h1>${esc(known.name || '')}</h1></div></div><div class="body">${spinner}</div></div>`
     : `<div class="sheet">${spinner}</div>`;
-  m.querySelector('.close') && (m.querySelector('.close').onclick = () => history.back());
+  m.querySelector('.close') && (m.querySelector('.close').onclick = () => closeOverlay());
   const skPoster = m.querySelector('.poster.sk');
-  m.onclick = e => { if (e.target === m) history.back(); };
+  m.onclick = e => { if (e.target === m) closeOverlay(); };
   m.ctl = new AbortController();
   document.body.append(m); document.body.style.overflow = 'hidden';
-  if (!replace) history.pushState({ modal: 1 }, '');
+  if (replace) setOverlayUrl(vodHref(site, id)); else if (!quiet) pushOverlay('modal', vodHref(site, id));
   let d;
   try { [d] = await Promise.all([api('detail', { site, id }, m.ctl.signal), refreshDownloads(m.ctl.signal)]); }
-  catch (e) { if (isAbort(e)) return; m.firstChild.innerHTML = `<button class="close">✕</button><div class="body"><div class="err">详情加载失败：${esc(e.message)}</div></div>`; m.querySelector('.close').onclick = () => history.back(); return; }
+  catch (e) { if (isAbort(e)) return; m.firstChild.innerHTML = `<button class="close">✕</button><div class="body"><div class="err">详情加载失败：${esc(e.message)}</div></div>`; m.querySelector('.close').onclick = () => closeOverlay(); return; }
   const canOpen = d.local && !!(await infoP().catch(() => ({}))).loopback;
   const h0 = hist.get(site, id);
   let line = h0 && d.lines[h0.line] ? h0.line : 0, dlMode = false, alts = null, dbPic = '';
@@ -1982,7 +2311,7 @@ async function openDetail(site, id, autoplay = false, replace = false) {
           : '<p class="err">这个源没有可直接播放的地址，看看下面的其他源。</p>'}
         <h3>其他源</h3><div class="alts" id="alts"><span class="lan">在所有源里搜索中…</span></div>
       </div>`;
-    m.querySelector('.close').onclick = () => history.back();
+    m.querySelector('.close').onclick = () => closeOverlay();
     // The cover node lives for the whole sheet: the skeleton's node (already painted from the card) is moved into every render,
     // so opening a card never shows the picture blinking out and back in.
     { const np = $('.top .poster', m);
@@ -2136,8 +2465,8 @@ async function openDetail(site, id, autoplay = false, replace = false) {
 function people(label, role, list, max = 99) {
   if (!list?.length) return '';
   return `<div class="people ${list.length > max ? '' : 'all'}"><span class="plabel">${label}</span>${list.map((n, i) =>
-    `<a class="pchip ${i >= max ? 'extra' : ''}" data-nav href="${personHash(role, n)}">${esc(n)}</a>`).join('')}
-    ${list.length > max ? `<button class="pchip more" data-more-people>+${list.length - max}</button>` : ''}</div>`;
+    `<a class="chip ${i >= max ? 'extra' : ''}" data-nav href="${personHash(role, n)}">${esc(n)}</a>`).join('')}
+    ${list.length > max ? `<button class="chip more" data-more-people>+${list.length - max}</button>` : ''}</div>`;
 }
 // Links inside the detail sheet: a plain click leaves the sheet and goes there (replacing the sheet's
 // history entry, so Back returns to the page underneath); modifier clicks open a new tab as usual.
@@ -2145,6 +2474,7 @@ document.addEventListener('click', e => {
   const a = e.target.closest('#modal a[data-nav]'); if (!a || !plainClick(e)) return;
   e.preventDefault();
   closeDetail();
+  window.closeFeedQuiet?.();                                  // 沉浸页里点开的详情: 去别的页面时沉浸页也收起 (返回会回到它)
   history.replaceState(null, '', a.getAttribute('href'));
   route();
 });
@@ -2155,9 +2485,10 @@ function closeDetail() {
   m.remove(); document.body.style.overflow = '';
 }
 addEventListener('popstate', () => {
-  if (pipSkip) { pipSkip = false; return; }  // our own back() when the player went into 画中画
-  if (playerOpen()) return closePlayer();
-  closeDetail();
+  const P = hashPage(location.hash);
+  // 回到哪一层的地址, 就关掉它上面的: 播放器 → 详情 (只关播放器), 详情 → 页面 (关详情)
+  if (playerOpen() && P !== 'play' && P !== 'tv') closePlayer();
+  if ($('#modal') && P !== 'v' && P !== 'play') closeDetail();
 });
 
 // ---------- player ----------
@@ -2165,21 +2496,21 @@ const player = $('#player'), video = $('#video'), sysPanel = $('.psyspanel');
 let hls, cur = null, idleTimer;
 // 画中画: the small window keeps playing while the full-screen player steps aside and the page underneath
 // comes back. "Back to tab" brings the player back; closing the small window stops playback.
-let pipOn = false, pipSkip = false;
+let pipOn = false;
 const playerOpen = () => !player.hidden && !pipOn;
 const onEnterPip = () => {
   if (pipOn) return;
   pipOn = true;
   player.classList.add('pip'); togglePlist(false);
   if (!$('#modal')) document.body.style.overflow = '';
-  if (history.state?.player) { pipSkip = true; history.back(); }
+  if (history.state?.player) closeOverlay(true);   // 小窗播放: 全屏播放器让位, 地址回到下面一层 (播放器 pipOn 时不算打开)
 };
 const onLeavePip = () => {
   if (!pipOn) return;
   pipOn = false;
   player.classList.remove('pip');
   if (video.paused) return closePlayer();
-  history.pushState({ player: 1 }, ''); document.body.style.overflow = 'hidden'; poke();
+  pushOverlay('player', playUrl()); document.body.style.overflow = 'hidden'; poke();
 };
 video.addEventListener('enterpictureinpicture', onEnterPip);
 video.addEventListener('leavepictureinpicture', onLeavePip);
@@ -2244,7 +2575,8 @@ function playLive(channels, idx) {
 function openPlayer(startAt) {
   const e = cur.eps[cur.ep];
   if (pipOn) { pipOn = false; player.classList.remove('pip'); document.exitPictureInPicture?.().catch(() => {}); }
-  if (!playerOpen() || !history.state?.player) { player.hidden = false; history.pushState({ player: 1 }, ''); document.body.style.overflow = 'hidden'; }
+  if (!playerOpen() || !history.state?.player) { player.hidden = false; if (!restoring) pushOverlay('player', playUrl()); document.body.style.overflow = 'hidden'; }
+  else setOverlayUrl(playUrl());                           // 换集 / 换台: 地址跟着变, 不新增历史记录
   $('.ptitle').textContent = cur.kind === 'live' ? e.name : (cur.eps.length > 1 ? `${cur.title} · ${e.name}` : cur.title);
   const live = cur.kind === 'live';
   setL('next', live ? '下一台' : '下一集'); setL('list', live ? '频道' : '选集');
@@ -2567,10 +2899,11 @@ function paintSkip() { const b = $('[data-act=skipt]'); if (!b) return; const on
 function skipInit() {
   skipStop();
   const e = cur.eps[cur.ep], n = cur.eps[cur.ep + 1] || cur.eps[cur.ep - 1];
-  const ok = cur.kind === 'vod' && !cur.d.local && /^https?:/.test(e.url);
-  const fp = ok && cur.eps.length >= 3 && n && /^https?:/.test(n.url);
+  const okUrl = x => /^https?:/.test(x) || x.startsWith('/media/f/');       // 网络地址, 或本地媒体的原文件 (服务端换成磁盘路径再取音频)
+  const ok = cur.kind === 'vod' && okUrl(e.url);
+  const fp = ok && cur.eps.length >= 3 && n && okUrl(n.url);
   $('[data-act=skipt]').hidden = !ok;
-  ask = ok ? { tok: Math.random(), u: e.url, n: fp ? n.url : '', head: [], tail: [], mid: [], done: new Set(), adGot: false, adBusy: false, adTries: 0, adT: 0, fpGot: false, peeked: false, tries: 0, timer: 0, t0: Date.now() } : null;
+  ask = ok ? skipNew(e.url, fp ? n.url : '', () => paintMarks()) : null;
   if (ok) { paintSkip(); skipKick(); }
 }
 // 自动跳过设置: 顶栏一个按钮, 点开浮窗 (大屏在右侧, 小屏从底部上拉), 里面两个开关。复用选集 / 换源用的 .plist 面板, 样式和关闭方式都一致
@@ -2601,32 +2934,36 @@ function openSkipSheet() {
   if (skipUiOpen()) return togglePlist(false);
   drawSkip(); togglePlist(true);
 }
-function skipStopFp() { if (ask) { clearTimeout(ask.timer); ask.timer = 0; } }
-function skipStop() { if (ask) { skipStopFp(); clearTimeout(ask.adT); ask.adT = 0; } }
-function skipKick() {
-  if (!ask) return;
-  const A = ask, tok = A.tok;
+// 取数据的引擎对「一个 ask 对象」工作 (ask = 这一集要问的东西 + 问到的结果), 普通播放器和沉浸播放各有自己的: 普通播放器的叫 ask (全局), 沉浸的挂在每一屏上。
+// A.paint: 数据到了要重画进度条标记; A.dead: 这一集已经离开, 迟到的回答直接丢掉。
+function skipNew(u, n, paint) {
+  return { u, n, head: [], tail: [], mid: [], done: new Set(), adGot: false, adBusy: false, adTries: 0, adT: 0, fpGot: false, peeked: false, tries: 0, timer: 0, t0: Date.now(), dead: false, paint };
+}
+function skipStopFp(A = ask) { if (A) { clearTimeout(A.timer); A.timer = 0; } }
+function skipStop(A = ask) { if (A) { skipStopFp(A); clearTimeout(A.adT); A.adT = 0; A.dead = true; } }
+function skipKick(A = ask) {
+  if (!A || A.dead) return;
   if (!A.adGot && !A.adBusy) {
     A.adBusy = true;
-    api('adsegs', { u: A.u }, null).then(r => { if (ask?.tok === tok) { A.mid = r?.ads || []; A.adGot = !r?.err; paintMarks(); } }, () => {})
-      .finally(() => { A.adBusy = false; if (ask?.tok === tok && !A.adGot && ++A.adTries < 3 && !A.adT) A.adT = setTimeout(() => { A.adT = 0; skipKick(); }, 5000); });
+    api('adsegs', { u: A.u }, null).then(r => { if (!A.dead) { A.mid = r?.ads || []; A.adGot = !r?.err; A.paint?.(); } }, () => {})
+      .finally(() => { A.adBusy = false; if (!A.dead && !A.adGot && ++A.adTries < 3 && !A.adT) A.adT = setTimeout(() => { A.adT = 0; skipKick(A); }, 5000); });
   }
   if (!A.n || A.fpGot) return;
   if (!skipHT()) {                                    // 关着: 只看服务端有没有现成的, 没有就算了, 绝不触发计算
-    if (!A.peeked) { A.peeked = true; api('skipmarks', { u: A.u, n: A.n, peek: 1 }, null).then(r => { if (ask?.tok === tok && r?.status === 'ready') { A.head = r.head || []; A.tail = r.tail || []; A.fpGot = true; paintMarks(); } }, () => {}); }
+    if (!A.peeked) { A.peeked = true; api('skipmarks', { u: A.u, n: A.n, peek: 1 }, null).then(r => { if (!A.dead && r?.status === 'ready') { A.head = r.head || []; A.tail = r.tail || []; A.fpGot = true; A.paint?.(); } }, () => {}); }
     return;
   }
-  if (!A.timer && A.tries < 40) A.timer = setTimeout(() => skipFetch(tok), Math.max(0, 8000 - (Date.now() - A.t0)));   // 先让正片稳稳播起来, 再去问
+  if (!A.timer && A.tries < 40) A.timer = setTimeout(() => skipFetch(A), Math.max(0, 8000 - (Date.now() - A.t0)));   // 先让正片稳稳播起来, 再去问
 }
-function skipFetch(tok) {
-  const A = ask; if (!A || A.tok !== tok) return;
+function skipFetch(A) {
+  if (!A || A.dead) return;
   A.timer = 0;
   if (!skipHT()) return;
   api('skipmarks', { u: A.u, n: A.n }, null).then(r => {
-    if (ask?.tok !== tok) return;
-    if (r.status === 'ready') { A.head = r.head || []; A.tail = r.tail || []; A.fpGot = true; paintMarks(); }
-    else if (r.status === 'none') { A.fpGot = true; if (skipUiOpen()) drawSkip(); }     // 算不了 (太短 / 没音轨 / 排队满): 不再追问
-    else if (r.status === 'pending' && ++A.tries < 40 && skipHT()) A.timer = setTimeout(() => skipFetch(tok), 15000);
+    if (A.dead) return;
+    if (r.status === 'ready') { A.head = r.head || []; A.tail = r.tail || []; A.fpGot = true; A.paint?.(); }
+    else if (r.status === 'none') { A.fpGot = true; if (A === ask && skipUiOpen()) drawSkip(); }     // 算不了 (太短 / 没音轨 / 排队满): 不再追问
+    else if (r.status === 'pending' && ++A.tries < 40 && skipHT()) A.timer = setTimeout(() => skipFetch(A), 15000);
   }).catch(() => {});
 }
 // 把声音指纹的结果 (片头 / 片尾) 和播放列表里认出的广告对起来:
@@ -2634,12 +2971,12 @@ function skipFetch(tok) {
 //  2. 片头最多留 2 段 (最长的), 片尾 1 段
 //  3. 片尾后面的广告并进片尾: 紧跟着 (间隔 ≤ 30 秒) 或者是视频最后的那条广告 (间隔 ≤ 120 秒, 中间多半是下集预告) 都并入, 一起标、一起跳到结尾
 // 返回 { head, tail, mid (画标记用, 已并入片尾的不再单画), ads (跳过用, 全部) }
-function marksOf(d = vdur(video)) {
-  const ads = (ask.mid || []).map(r => [...r]).sort((x, y) => x[0] - y[0]);
+function marksOf(d = vdur(video), A = ask) {
+  const ads = (A.mid || []).map(r => [...r]).sort((x, y) => x[0] - y[0]);
   const isAd = r => ads.some(x => Math.min(r[1], x[1]) - Math.max(r[0], x[0]) >= (r[1] - r[0]) * .5);
   const longest = (l, n) => l.slice().sort((x, y) => (y[1] - y[0]) - (x[1] - x[0])).slice(0, n).sort((x, y) => x[0] - y[0]);
-  const head = longest((ask.head || []).filter(r => !isAd(r)), 2);
-  const tail = longest((ask.tail || []).filter(r => !isAd(r)), 1).map(r => [...r]);
+  const head = longest((A.head || []).filter(r => !isAd(r)), 2);
+  const tail = longest((A.tail || []).filter(r => !isAd(r)), 1).map(r => [...r]);
   for (const t of tail) for (const x of ads) {
     if (x[0] < t[0] - 1 || x[1] <= t[1]) continue;
     const gap = x[0] - t[1], last = isFinite(d) && x[1] >= d - 3;
@@ -2659,22 +2996,30 @@ function paintMarks(d = vdur(video)) {
   marksEl.innerHTML = list.flatMap(([k, l]) => l.map(r => `<i class="${k}" style="left:${Math.max(0, r[0] / d * 100)}%;width:${Math.max(0.4, (Math.min(r[1], d) - r[0]) / d * 100)}%"></i>`)).join('');
 }
 // t 秒落在哪类段里 (预览浮层的时间后面带上类型)
-function markAt(t) {
-  if (!ask) return '';
-  const M = marksOf();
+function markAt(t, A = ask, v = video) {
+  if (!A) return '';
+  const M = marksOf(vdur(v), A);
   for (const [name, list] of [['片头', M.head], ['广告', M.mid], ['片尾', M.tail]]) if (list.some(r => t >= r[0] && t < r[1])) return name;
   return '';
 }
-video.addEventListener('timeupdate', () => {
-  if (!ask || (!ask.head.length && !ask.tail.length && !ask.mid.length) || scrubbing || video.seeking) return;
-  const t = video.currentTime, d = vdur(video), M = marksOf();
+// 现在播到的位置落在要跳过的段里吗: 是就返回 { name, to } (每一段只跳一次, 跳完想回看不会再拦)。普通播放器和沉浸播放共用。
+function skipDue(A, v) {
+  if (!A || A.dead || (!A.head.length && !A.tail.length && !A.mid.length) || v.seeking) return null;
+  const t = v.currentTime, d = vdur(v), M = marksOf(d, A);
   for (const [name, list] of [['片头', skipHT() ? M.head : []], ['广告', skipAd() ? M.ads : []], ['片尾', skipHT() ? M.tail : []]]) for (const r of list) {
     const id = name + r[0];
-    if (ask.done.has(id) || t < r[0] - 0.3 || t >= r[1] - 2) continue;
-    ask.done.add(id);
-    duckFlash(); video.currentTime = r[1] >= d - 1 ? d : r[1];   // 跳的瞬间先静音一小会儿, 不要「啪」一声
-    return toast('已跳过' + name);
+    if (A.done.has(id) || t < r[0] - 0.3 || t >= r[1] - 2) continue;
+    A.done.add(id);
+    return { name, to: r[1] >= d - 1 ? d : r[1] };
   }
+  return null;
+}
+video.addEventListener('timeupdate', () => {
+  if (scrubbing) return;
+  const hit = skipDue(ask, video);
+  if (!hit) return;
+  duckFlash(); video.currentTime = hit.to;   // 跳的瞬间先静音一小会儿, 不要「啪」一声
+  toast('已跳过' + hit.name);
 });
 
 function step(n) { cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(0); }
@@ -2723,7 +3068,7 @@ function closePlayer() {
 }
 player.addEventListener('click', e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
-  if (act === 'close') history.back();
+  if (act === 'close') closeOverlay();
   if (act === 'next') step(1);
   if (act === 'pip') togglePip();
   if (act === 'src') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSrcSheet(); }
@@ -2778,8 +3123,8 @@ if (!fineCursor) {
   ctrl.append(pacts);
   const wrap = document.createElement('div'); wrap.className = 'pmorewrap';
   wrap.append($('[data-act=more]'), $('.pmore'));
-  $('.pbar').append(wrap);
-  $('.pmore').prepend($('[data-act=vfav]'), $('[data-act=star]'), $('[data-act=dl]'));
+  $('.pbar').append($('[data-act=vfav]'), wrap);   // 点播的收藏爱心留在右上角 (已收藏也在, 只是变红), 在「更多」左边
+  $('.pmore').prepend($('[data-act=star]'), $('[data-act=dl]'));
   $('.pmore').append($('[data-act=pip]'));
   pacts.insertBefore($('[data-act=rate]'), $('[data-act=fs]'));
 }
@@ -3194,7 +3539,7 @@ addEventListener('keydown', e => {
   if (e.key === 'Escape' && !player.hidden && !sysPanel.hidden) { e.preventDefault(); return sysClose(); }
   if (e.key === 'Escape' && !player.hidden && !$('.plist').hidden) { e.preventDefault(); return togglePlist(false); }
   if (e.target.matches?.('input, textarea')) return;
-  if (e.key === 'Escape' && (playerOpen() || $('#modal'))) history.back();
+  if (e.key === 'Escape' && (playerOpen() || $('#modal'))) closeOverlay();
   if (!playerOpen()) return;
   if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
   if (e.key === 'ArrowRight') video.currentTime += 10;
@@ -3205,6 +3550,13 @@ addEventListener('keydown', e => {
   if (e.key === 'm') video.muted = !video.muted;
   if (cur?.kind === 'live' && e.key === 'ArrowDown') { e.preventDefault(); step(1); }
   if (cur?.kind === 'live' && e.key === 'ArrowUp') { e.preventDefault(); step(-1); }
+  // 点播 / 本地: ↑ ↓ 调音量 (每次 5%), 和手机右侧上下滑一样弹出音量条
+  if (cur?.kind !== 'live' && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && $('.plist').hidden && sysPanel.hidden) {
+    e.preventDefault();
+    video._unduck?.(); video.muted = false;
+    video.volume = clamp01(Math.round((video.volume + (e.key === 'ArrowUp' ? .05 : -.05)) * 100) / 100);
+    showHud('vol', video.volume); poke();
+  }
 });
 
 // ---------- live ----------
@@ -3218,9 +3570,16 @@ function thumbPump() {
     const el = thumbQueue.shift();
     if (!el.isConnected) continue;
     thumbActive++;
+    const t0 = performance.now();
     fetch('/api/live/thumb?u=' + encodeURIComponent(el.dataset.u), { signal: pageCtl.signal })
       .then(r => r.ok ? r.blob() : null)
-      .then(b => { if (b && el.isConnected) { el.style.backgroundImage = `url('${URL.createObjectURL(b)}')`; el.classList.add('has'); } })
+      .then(b => {
+        if (!b || !el.isConnected) return;
+        el.style.backgroundImage = `url('${URL.createObjectURL(b)}')`;
+        // 封面是缓存里现成的 (很快就回来): 台标直接就位, 不做缩小到左下角的动画; 现截的 (等了一会儿) 才有动画
+        if (performance.now() - t0 < 350) el.classList.add('snap');
+        el.classList.add('has');
+      })
       .catch(() => {})
       .finally(() => { thumbActive--; thumbPump(); });
   }
@@ -3275,7 +3634,7 @@ async function lmSave(mutate) {
   localStorage.live = String(i >= 0 ? i : 0);
   $('#lmName').textContent = state.lives.find(l => l.key === localStorage.live)?.name || '无直播源';
   lmRender();
-  if (i < 0 && location.hash.startsWith('#/live')) loadLiveBody();
+  if (i < 0 && onPage('#/live')) loadLiveBody();
 }
 const LIVE_TTL = 5 * 60e3;
 let lmEpoch = 0; // set whenever the live menu opens: only passing results are cached, a failure is retried then
@@ -3334,13 +3693,6 @@ function lmWatch() {
   lmIO = new IntersectionObserver(es => es.forEach(en => en.isIntersecting ? lmQueue(en.target.dataset.k) : lmUnqueue(en.target.dataset.k)), { root: $('#llist') });
   $$('#llist .lpr').forEach(r => lmIO.observe(r));
 }
-document.addEventListener('click', e => {
-  const m = $('#liveMenu'); if (!m || m.hidden) return;
-  // composedPath: a row that was re-rendered during the click is already detached, closest() would miss it
-  if (e.composedPath().some(n => n === m || n.classList?.contains('lpick'))) return;
-  m.hidden = true; $('#liveBtn')?.classList.remove('open');
-});
-
 let liveSrc = '';
 async function renderLive() {
   if (!state.lives.length) {
@@ -3363,8 +3715,11 @@ async function renderLive() {
       <div id="liveBody"></div></div>`;
     $('#liveBtn').onclick = async e => {
       e.stopPropagation();
-      const m = $('#liveMenu'); if (m.hidden) lm.tab = state.lives.find(l => l.key === localStorage.live)?.hidden ? 'hid' : 'vis'; m.hidden = !m.hidden; if (!m.hidden) lmEpoch = Date.now(); $('#liveBtn').classList.toggle('open', !m.hidden);
-      if (!m.hidden) { lmRender(); await lmRefresh().catch(() => {}); lmRender(); $('.lpr.on', m)?.scrollIntoView({ block: 'nearest' }); }
+      const m = $('#liveMenu');
+      if (!Pop.isOpen(m)) lm.tab = state.lives.find(l => l.key === localStorage.live)?.hidden ? 'hid' : 'vis';
+      if (!Pop.attach(m, { anchor: $('#liveBtn') })) return;
+      lmEpoch = Date.now();
+      lmRender(); await lmRefresh().catch(() => {}); lmRender(); $('.lpr.on', m)?.scrollIntoView({ block: 'nearest' });
     };
     $('#lmq').oninput = e => { lm.q = e.target.value.trim(); lmRender(); };
     $('#liveMenu').onclick = e => {
@@ -3379,8 +3734,8 @@ async function renderLive() {
         return;
       }
       const row = e.target.closest('.lpr'); if (!row) return;
-      localStorage.live = row.dataset.k;
-      $('#liveMenu').hidden = true; $('#liveBtn').classList.remove('open');
+      localStorage.live = row.dataset.k; setQuery({ g: '', q: '' });
+      Pop.close();
       $('#lmName').textContent = l2name(); newPage(); loadLiveBody();
     };
     lmRefresh().catch(() => {});
@@ -3400,6 +3755,11 @@ async function renderLiveBody(src) {
   if (src !== liveSrc || !$('#liveBody')) return groups;
   // gi = -1 is the ★ 收藏 group (channels starred from any live source).
   let gi = liveFavs.all().length ? -1 : 0;
+  // 分组 / 频道搜索在地址里 (#/live?g=分组名&q=关键词): 刷新 / 分享后还是这一组
+  const hp = hashParams(), wg = hp.get('g'), wq = hp.get('q');
+  if (wg === '★') gi = liveFavs.all().length ? -1 : 0;
+  else if (wg) { const k = groups.findIndex(g => g.name === wg); if (k >= 0) gi = k; }
+  if (wq) $('#chq').value = wq;
   const paint = () => {
     const q = $('#chq').value.trim().toLowerCase();
     const fav = liveFavs.all();
@@ -3410,7 +3770,7 @@ async function renderLiveBody(src) {
           <div class="cover" data-u="${esc(c.url)}"><div class="logo2" style="${bg(c.logo)}">${c.logo ? '' : '📺'}</div><span class="live-dot">LIVE</span>
             <button class="star ${liveFavs.has(c.url) ? 'on' : ''}" data-star="${i}" title="${liveFavs.has(c.url) ? '取消收藏' : '收藏'}">${liveFavs.has(c.url) ? '★' : '☆'}</button></div>
           <span class="chname">${esc(c.name)}</span></a>`).join('') || '<div class="empty">没有频道</div>'}</div></div>`;
-    $$('[data-g]', $('#liveBody')).forEach(b => b.onclick = () => { gi = +b.dataset.g; $('#chq').value = ''; paint(); });
+    $$('[data-g]', $('#liveBody')).forEach(b => b.onclick = () => { gi = +b.dataset.g; $('#chq').value = ''; setQuery({ g: gi === -1 ? '★' : groups[gi].name, q: '' }); paint(); });
     $$('.ch', $('#liveBody')).forEach(b => {
       b.onclick = e => {
         const st = e.target.closest('[data-star]');
@@ -3422,7 +3782,7 @@ async function renderLiveBody(src) {
     });
     $$('.cover', $('#liveBody')).forEach(el => thumbIO.observe(el));
   };
-  $('#chq').oninput = paint;
+  $('#chq').oninput = () => { setQuery({ q: $('#chq').value.trim() }); paint(); };
   paint();
   return groups;
 }
@@ -3599,20 +3959,8 @@ function multiPick({ box, rows, box_, changed }) {
   });
 }
 // Small dropdown for the bulk bars ("分类" / "更多"): fixed-position so the bars' own scrolling never clips it.
-function toggleBulkMenu(btn) {
-  const menu = btn.nextElementSibling, open = menu.hidden;
-  closeBulkMenus();
-  if (!open) return;
-  const r = btn.getBoundingClientRect();
-  menu.hidden = false;
-  const room = innerHeight - r.bottom - 12, h = menu.offsetHeight;
-  menu.style.maxHeight = Math.max(160, innerHeight - 24) + 'px'; menu.style.overflowY = 'auto';
-  menu.style.top = (h <= room ? r.bottom + 4 : Math.max(8, Math.min(r.top - h - 4, innerHeight - 8 - Math.min(h, innerHeight - 24)))) + 'px';
-  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8)) + 'px';
-}
-function closeBulkMenus() { $$('.bmenu').forEach(m => { m.hidden = true; }); }
-document.addEventListener('click', e => { if (!e.target.closest('.bmenu, [data-bulk=more], [data-bulk=cat], [data-bulk=vis], [data-cbulk=more], [data-cbulk=cat]')) closeBulkMenus(); });
-addEventListener('scroll', closeBulkMenus, { passive: true });
+function toggleBulkMenu(btn) { Pop.attach(btn.nextElementSibling, { anchor: btn, sheet: false, fixed: true, cls: 'pop-menu' }); }
+const closeBulkMenus = () => Pop.close();
 
 // ---------- text editor: Monaco (the open-source editor core of VS Code), loaded on first use ----------
 // textEditor(host, { value, language }) → { get value / set value, onchange, focus(), dispose() } — the same small surface as a <textarea>,
@@ -4854,7 +5202,7 @@ function openClipSession(lazy = false) {
       const j = await req('POST', '/api/config/add', { sites: pick.filter(x => x.kind === 'site'), lives: pick.filter(x => x.kind === 'live') });
       saving = false; close(); await loadSites();
       toast(`已添加 ${j.added.sites} 个点播源（成人 ${j.added.adult || 0}、少儿 ${j.added.kids || 0}）、${j.added.lives} 个直播源${j.added.skippedEmpty ? `（跳过 ${j.added.skippedEmpty} 个 0 部内容的）` : ''}`);
-      if (location.hash.startsWith('#/settings')) renderSettings();
+      if (onPage('#/settings')) renderSettings();
     } catch (e) { lock(false); toast(e.message); }
   };
   render();
@@ -4897,21 +5245,18 @@ setInterval(() => { if (cur?.kind === 'vod' && !player.hidden && state.downloads
 
 // ---------- 小屏底部「我的」: 收藏 / 下载 / 设置收进一个菜单 (二级菜单再进入各页) ----------
 {
-  const tab = $('#mineTab'); let menu = null;
-  const close = () => { menu?.remove(); menu = null; tab.setAttribute('aria-expanded', 'false'); };
-  const ICONS = { favorites: tab.ownerDocument.querySelector('[data-nav=favorites] svg').outerHTML, downloads: $('[data-nav=downloads] svg').outerHTML, settings: $('[data-nav=settings] svg').outerHTML };
+  const tab = $('#mineTab');
+  const ICONS = { favorites: $('[data-nav=favorites] svg').outerHTML, downloads: $('[data-nav=downloads] svg').outerHTML, settings: $('[data-nav=settings] svg').outerHTML };
   tab.addEventListener('click', e => {
     e.preventDefault(); e.stopPropagation();
-    if (menu) return close();
     const kids = document.documentElement.classList.contains('kidslevel');
     const rows = [['downloads', '下载'], ['settings', '设置']]; if (!kids) rows.unshift(['favorites', '收藏']);
-    menu = document.createElement('div'); menu.className = 'minemenu'; menu.setAttribute('role', 'menu');
-    menu.innerHTML = rows.map(([k, t]) => `<a href="#/${k}" role="menuitem" class="${location.hash.startsWith('#/' + k) ? 'on' : ''}">${ICONS[k]}<span>${t}</span></a>`).join('')
-      + (ACCT.me || localStorage.tvbox_acct_on ? `<a href="#/settings/account" role="menuitem">${tab.querySelector('svg').outerHTML}<span>账号：${esc(ACCT.me ? ACCT.me.name : '访客')}</span></a>` : '');
-    document.body.append(menu); tab.setAttribute('aria-expanded', 'true');
-    menu.addEventListener('click', () => setTimeout(close, 0));
+    const pageNow = hashPage(pageHash ?? location.hash);
+    Pop.open({
+      anchor: tab, sheet: false, x: innerWidth, cls: 'pop-menu minemenu', role: 'menu',
+      body: rows.map(([k, t]) => `<a href="#/${k}" role="menuitem" class="${pageNow === k ? 'on' : ''}">${ICONS[k]}<span>${t}</span></a>`).join('')
+        + (ACCT.me || localStorage.tvbox_acct_on ? `<a href="#/settings/account" role="menuitem">${tab.querySelector('svg').outerHTML}<span>账号：${esc(ACCT.me ? ACCT.me.name : '访客')}</span></a>` : ''),
+      onClick: (ev, close) => { if (ev.target.closest('a')) setTimeout(close, 0); },
+    });
   });
-  document.addEventListener('click', e => { if (menu && !menu.contains(e.target)) close(); });
-  addEventListener('hashchange', close);
-  matchMedia('(max-width: 760px)').addEventListener('change', close);
 }

@@ -230,28 +230,18 @@ function mountHeader() {
   right.append(wrap);
   btn = wrap.querySelector('button'); menu = wrap.querySelector('.menu');
   paintBtn();
-  // 小屏：和点播源菜单一样，从底部上拉的面板 + 遮罩；大屏：头像下面的浮窗
-  const scrim = document.getElementById('sheetScrim'), small = matchMedia('(max-width: 760px)');
-  const close = () => { menu.hidden = true; btn.classList.remove('open'); if (scrim && !scrim.hidden && scrim._acct) { scrim._acct = 0; scrim.hidden = true; document.body.classList.remove('sheet-open'); } };
-  scrim?.addEventListener('click', () => { if (!menu.hidden) close(); });
-  small.addEventListener('change', () => { if (!menu.hidden) close(); });
-  addEventListener('hashchange', close);
+  // 小屏从底部上拉 + 遮罩, 大屏头像下面的浮窗: 都由 app.js 的 Pop 统一处理 (点外面 / 遮罩 / Esc / 换页 / 再点一次按钮 都会收起)
   btn.onclick = e => {
     e.stopPropagation();
-    if (menu.hidden) {
-      const sm = document.getElementById('siteMenu'); if (sm && !sm.hidden) sm.hidden = true;   // 点播源菜单开着就先收起 (它的遮罩同步逻辑在 app.js 里，已经隐藏的不要再碰)
-      paintMenu(); menu.hidden = false; btn.classList.add('open');
-      if (small.matches && scrim) { const on = () => { if (menu.hidden) return; scrim._acct = 1; scrim.hidden = false; document.body.classList.add('sheet-open'); }; on(); setTimeout(on, 0); }
-    } else close();
+    if (!Pop.isOpen(menu)) paintMenu();
+    Pop.attach(menu, { anchor: btn });
   };
   menu.onclick = e => {
     const b = e.target.closest('button'); if (!b) return;
-    close();
+    Pop.close();
     const id = Number(b.dataset.id);
     if ((me ? me.id : 0) !== id) switchTo(id);
   };
-  document.addEventListener('click', e => { if (!menu.hidden && !wrap.contains(e.target)) close(); });
-  addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
   status().then(s => { wrap.hidden = !s.enabled; });
   if (ls.getItem(ON) === '1' || accts.length) wrap.hidden = false;
 }
