@@ -1347,10 +1347,14 @@ function openCardMenu(c, x, y, sheet) {
     onClick: (e, close) => {
       const b = e.target.closest('[data-ctx]'); if (!b) return;
       e.stopPropagation(); close();
-      if (b.dataset.ctx === 'play') playDirect(c);
-      else if (b.dataset.ctx === 'newwin') openInNewWindow(c);
-      else if (b.dataset.ctx === 'share') shareNow(c.getAttribute('href'), name);
-      else feedFromCard(c);
+      // 先让浮窗 + 遮罩真正从画面上撤掉 (两帧), 再打开播放器 / 沉浸页: 否则 iOS 在全屏层盖住时不重绘下面的层, 返回时浮窗会残留一下
+      const k = b.dataset.ctx, run = () => {
+        if (k === 'play') playDirect(c);
+        else if (k === 'newwin') openInNewWindow(c);
+        else if (k === 'share') shareNow(c.getAttribute('href'), name);
+        else feedFromCard(c);
+      };
+      if (sheet || matchMedia('(max-width: 760px)').matches) requestAnimationFrame(() => requestAnimationFrame(run)); else run();
     },
   });
 }
