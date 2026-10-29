@@ -58,7 +58,7 @@ const slidesBox = q('.fd-slides'), prog = q('.fd-prog'), marksEl = q('.fd-prog .
 // ---------- taste profile ----------
 // Flat map tag → score. Tags: t:类型 a:地区 y:年代 p:演员. Likes / long watches raise, quick skips / 不想看 lower.
 const JUNK = /解说|资讯|新闻|预告|花絮|写真|福利/;
-const sat = v => 4 * Math.tanh(v / 4);
+const sat = v => 3 * Math.tanh(v / 3);
 const loadJson = (k, d) => UD.json(k, d);   // 推荐偏好 / 已看 / 喜欢 属于当前账号 (UD, 见 acct.js)
 let P = null, evt = 0, saveT = 0;
 const tagsOf = (it, d) => {
@@ -81,7 +81,7 @@ function profile() {
 }
 function bump(it, d, w) {
   const p = profile();
-  for (const [k, m] of tagsOf(it, d)) p[k] = Math.max(-8, Math.min(14, (p[k] || 0) + w * m));
+  for (const [k, m] of tagsOf(it, d)) p[k] = Math.max(-8, Math.min(10, (p[k] || 0) + w * m));
   if (++evt % 25 === 0) for (const k of Object.keys(p)) { p[k] *= .9; if (Math.abs(p[k]) < .2) delete p[k]; }
   clearTimeout(saveT); saveT = setTimeout(() => { UD.set('feedProf', JSON.stringify(p)); }, 800);
 }
@@ -96,7 +96,7 @@ const saveLikes = () => { UD.set('feedLikes', JSON.stringify([...likes].slice(-5
 
 // ---------- state ----------
 const F = { recN: 0, names: new Set(), gen: 0, mode: 'rec', extra: null, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
-  visited: new Set(), pool: [], pcount: {}, cats: null, catsSite: '', catUsed: new Set(), catCount: 1, once: false, dir: 1,
+  visited: new Set(), pool: [], pcount: {}, cats: null, catsSite: '', catUsed: new Set(), catCount: 1, once: false, dir: 1, lastCats: new Set(),
   muted: localStorage.feedMuted === '1', autoMuted: false, userPaused: false };   // autoMuted: the browser refused sound-on autoplay, muted for now only
 const AHEAD = 6;                                    // titles kept validated (detail fetched) beyond the current one
 
@@ -495,22 +495,57 @@ const wpick = (list, n, w) => {
   }
   return out;
 };
-// 推荐 = random play with taste mixed in. Every batch of 6 is: 3 plain random titles (random categories, random pages, nothing
-// weighs on them), 2 picked by taste (types / regions / eras you liked, saved or watched long) and 1 "more like what you
-// saved" — a title with an actor you liked or saved. The order is interleaved so a liked kind never comes twice in a row.
+// 推荐 = mostly random play, taste is only a light seasoning. Every batch of 6 is: 4 plain random titles, 1 taste-weighted pick
+// (itself random 30% of the time) and 1 actor title (50%) or another random one. On top of that every pick is de-clustered:
+// the closer a candidate is to what was just shown / just picked (same type, region, era, actor, same series), the less likely it
+// is drawn, so a liked kind never comes twice in a row and the feed keeps moving between kinds.
 const takeAt = (list, k) => list.splice(k, 1)[0];
-const takeRandom = list => list.length ? takeAt(list, Math.floor(Math.random() * list.length)) : null;
-const takeBest = list => {
+const stemOf = it => {                                 // 同一系列 (第二季 / 2 / II …) 视为同一部
+  const n = normName(it.name).replace(/第?[0-9一二三四五六七八九十]+[季部期章]?$/, '').replace(/(ii|iii|iv)$/, '');
+  return n.length >= 2 ? n : normName(it.name);
+};
+const refOf = it => ({ m: new Map(tagsOf(it, it._d || it)), s: stemOf(it) });
+const recentRefs = () => [...F.items.slice(-10), ...F.cand].map(refOf);    // oldest → newest
+// 0 = nothing like it was shown lately, ~3+ = a pile of the same kind
+const crowd = (it, refs) => {
+  if (!refs.length) return 0;
+  const tg = tagsOf(it), st = stemOf(it);
+  let c = 0;
+  refs.forEach((r, i) => {
+    let s = 0;
+    for (const [k, m] of tg) if (r.m.has(k)) s += m;
+    if (r.s === st) s += 3;
+    c += (.5 + .5 * (i + 1) / refs.length) * s;
+  });
+  return c / 3;
+};
+// random, but out of a few random draws the one least like the recent ones wins
+const takeDiverse = (list, refs, n = 4) => {
   if (!list.length) return null;
-  let k = 0, best = -1e9;
-  list.forEach((it, i) => { const sc = scoreOf(it) + Math.random() * .8; if (sc > best) { best = sc; k = i; } });
+  let k = 0, best = -Infinity;
+  for (let j = 0; j < Math.min(n, list.length); j++) {
+    const i = Math.floor(Math.random() * list.length), sc = -crowd(list[i], refs) + Math.random() * .8;
+    if (sc > best) { best = sc; k = i; }
+  }
   return takeAt(list, k);
 };
+// taste-weighted: a soft-max over the taste score (flat temperature, so liked kinds are only somewhat more likely), minus the crowding
+const takeTaste = (list, refs) => {
+  if (!list.length) return null;
+  if (Math.random() < .3) return takeDiverse(list, refs);
+  const T = 3, ws = list.map(it => Math.exp(Math.max(-8, Math.min(8, (scoreOf(it) - crowd(it, refs) * 1.5) / T))));
+  let r = Math.random() * ws.reduce((a, b) => a + b, 0), k = 0;
+  while (k < list.length - 1 && (r -= ws[k]) > 0) k++;
+  return takeAt(list, k);
+};
+const takeRandom = list => takeDiverse(list, []);
+const takeBest = list => takeTaste(list, recentRefs());
 // Actors (from 收藏 / 喜欢 / long watches) are searched by name across the sources: their other titles join the pool as 'fav'.
 async function actorCands(gen) {
-  const tops = Object.entries(profile()).filter(([k, v]) => k.startsWith('p:') && v >= 1.5).sort((x, y) => y[1] - x[1]).slice(0, 8);
+  const recent = new Set(F.items.slice(-12).flatMap(it => (it._d?.actors || it.actors || []).slice(0, 3)).map(a => 'p:' + a));
+  const tops = Object.entries(profile()).filter(([k, v]) => k.startsWith('p:') && v >= 1.5 && !recent.has(k)).sort((x, y) => y[1] - x[1]).slice(0, 12);
   if (!tops.length) return [];
-  const name = wpick(tops, 1, ([, v]) => v)[0][0].slice(2);
+  const name = wpick(tops, 1, ([, v]) => Math.sqrt(v))[0][0].slice(2);
   const j = await api('person', { role: 'actor', name }, null).catch(() => null);
   if (!j || gen !== F.gen) return [];
   // 演员作品: the server keeps only titles whose credits really list the actor
@@ -523,27 +558,33 @@ async function recMore(gen) {
     F.cats = (r.categories || []).filter(c => !JUNK.test(c.name)); F.catsSite = site;
     if (!F.cats.length) F.cats = [{ id: '', name: '最新' }];
   }
-  // 3 uniformly random categories + 1 taken from the liked types (weighted by how much they are liked; random when nothing is
-  // liked yet); page numbers are uniform too.
+  // 4 uniformly random categories (not the ones the previous batch used) + a 60% chance of one more from the liked types
+  // (sqrt-weighted, random when nothing is liked yet); page numbers are uniform too.
   const liked = F.cats.filter(c => (profile()['t:' + c.name] || 0) >= 1);
-  const picks = [...wpick(F.cats, 3, () => 1), ...(liked.length ? wpick(liked, 1, c => profile()['t:' + c.name]) : wpick(F.cats, 1, () => 1))];
+  let from = F.cats.filter(c => !F.lastCats.has(c.id)); if (from.length < 4) from = F.cats;
+  const picks = wpick(from, 4, () => 1);
+  if (Math.random() < .6) { const x = (liked.length ? wpick(liked, 1, c => Math.sqrt(profile()['t:' + c.name])) : wpick(F.cats, 1, () => 1))[0]; if (x && !picks.includes(x)) picks.push(x); }
+  F.lastCats = new Set(picks.map(c => c.id));
   const res = await Promise.all([...picks.map(c => {
     const pk = site + '|' + c.id, n = F.pcount[pk];
-    const pg = n ? 1 + Math.floor(Math.random() * Math.min(n, 40)) : 1;
+    const pg = n ? 1 + Math.floor(Math.random() * Math.min(n, 60)) : 1;
     return api('list', { site, t: c.id, pg }, null).then(j => { F.pcount[pk] = j.pagecount; return j.list; }).catch(() => []);
   }), F.recN++ % 3 === 0 ? actorCands(gen) : []]);
   if (gen !== F.gen) return [];
   const inPool = new Set(F.pool.map(keyOf)), poolNames = new Set(F.pool.map(nameOf));
   for (const it of res.flat()) if (!seen.has(keyOf(it)) && !F.keys.has(keyOf(it)) && !inPool.has(keyOf(it)) && !F.names.has(nameOf(it)) && !poolNames.has(nameOf(it))) { F.pool.push(it); inPool.add(keyOf(it)); poolNames.add(nameOf(it)); }
   if (F.pool.length > 160) F.pool.splice(0, F.pool.length - 160);
-  const plain = F.pool.filter(it => !it._fav), fav = F.pool.filter(it => it._fav), out = [];
-  const take = it => { if (!it) return; F.pool.splice(F.pool.indexOf(it), 1); out.push(it); };
-  const rest = () => F.pool.filter(it => !out.includes(it) && !it._fav);
-  // R T R T R F  (any slot that cannot be filled falls back to a random one)
-  take(takeRandom(plain)); take(takeBest(rest()));
-  take(takeRandom(plain.filter(it => !out.includes(it)))); take(takeBest(rest()));
-  take(takeRandom(plain.filter(it => !out.includes(it)))); take(fav.length ? takeRandom(fav) : takeRandom(rest()));
-  fav.forEach(it => { if (!out.includes(it) && Math.random() < .5) F.pool.splice(F.pool.indexOf(it), 1); });   // unused actor titles do not pile up
+  const fav = F.pool.filter(it => it._fav), out = [], refs = recentRefs();
+  const take = it => { if (!it) return; F.pool.splice(F.pool.indexOf(it), 1); out.push(it); refs.push(refOf(it)); };
+  const plain = () => F.pool.filter(it => !out.includes(it) && !it._fav);
+  // R R T R R F  (any slot that cannot be filled falls back to a random one)
+  take(takeDiverse(plain(), refs)); take(takeDiverse(plain(), refs));
+  take(takeTaste(plain(), refs));
+  take(takeDiverse(plain(), refs)); take(takeDiverse(plain(), refs));
+  const fv = fav.filter(it => !out.includes(it));
+  take(fv.length && Math.random() < .5 ? takeDiverse(fv, refs) : takeDiverse(plain(), refs));
+  while (out.length < 6 && F.pool.some(it => !out.includes(it))) take(takeDiverse(F.pool.filter(it => !out.includes(it)), refs));
+  fav.forEach(it => { if (!out.includes(it) && Math.random() < .7) F.pool.splice(F.pool.indexOf(it), 1); });   // unused actor titles do not pile up
   if (!out.length && seen.size) { seen.clear(); UD.set('feedSeen', '[]'); }   // everything seen: start over
   return out;
 }
@@ -649,6 +690,7 @@ function go(dir) {
   if (t < 0) return bounce();
   if (t >= F.items.length) { if (F.done) toast('没有更多了'); else { toast('正在加载…'); pump(); } return bounce(); }
   leave(cur());
+  seekCancel();
   F.dir = dir; F.idx = t;
   root.classList.add('moving'); clearTimeout(go.mt); go.mt = setTimeout(() => { root.classList.remove('moving'); paintSpin(); }, 380);
   const recycled = dir > 0 ? ring[0] : ring[2];
@@ -676,7 +718,7 @@ function startMode(mode, extra) {
   F.names = new Set();
   ring.forEach(s => { teardown(s); Object.assign(s, { i: -1, it: null, d: null }); s.el.classList.add('empty'); });
   Object.assign(F, { gen: F.gen + 1, mode, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
-    pool: [], once: false, catUsed: new Set(), catCount: 1, userPaused: false, visited: new Set(), dir: 1 });
+    pool: [], once: false, catUsed: new Set(), catCount: 1, userPaused: false, visited: new Set(), dir: 1, lastCats: new Set() });
   if (extra) F.extra = extra;
   root.classList.add('booting'); bootEl.classList.remove('empty'); bootEl.querySelector('span').textContent = '正在为你挑选…';
   closeOverlays();
@@ -844,7 +886,7 @@ function endGesture(e, cancelled) {
   }
   if (x.axis === 'x') {
     root.classList.remove('scrubbing'); tipEl.hidden = true;
-    seekWant = null;
+    seekCancel();
     if (x.target) cur().video.currentTime = cancelled ? x.t0 : x.target;
     return;
   }
@@ -866,16 +908,30 @@ let guardUntil = 0;
 const touching = () => !!(scrub || (g && g.low)) || performance.now() < guardUntil;   // 只有底部那一带的拖动才防误触返回；其它位置的系统返回照常生效
 const armGuard = () => { guardUntil = performance.now() + 800; };
 let scrub = null;
-// 拖动时画面跟着实时跳转: 节流 (上一次 seek 没完成就不再发), 手指抬起时再精确落到最终位置
-let seekBusy = false, seekWant = null;
+// 拖动时画面跟着实时跳转。每一次 seek 都会让 hls.js 重新定位、清缓冲、重新拉分片, 连发 (长按 ←→ 的按键重复 / 手指快速横拖 / 拖进度条)
+// 会把解码器和内存冲垮 —— iOS 上整个页面会被系统杀掉重载 (表现为「应用崩溃」)。所以:
+//   · 目标在已缓冲范围内: 便宜, 实时跳, 但两次之间至少隔 160ms;
+//   · 目标在缓冲外: 要等手指 / 按键停住 220ms 才跳, 只发最后一个;
+//   · 上一次 seek 没完成 (seeked 没来) 不发下一个, 完成后再取最新的目标。
+// 手指抬起 / 松开按键时再精确落到最终位置 (seekCancel 掐掉还没发出的)。
+let seekBusy = false, seekWant = null, seekAt = 0, seekTimer = 0;
+const inBuf = (v, t) => { for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= t && t <= v.buffered.end(i) - .3) return true; return false; };
+const seekCancel = () => { clearTimeout(seekTimer); seekTimer = 0; seekWant = null; };
+function seekPump(v) {
+  seekTimer = 0;
+  if (seekWant == null || v !== cur()?.video) return;
+  const x = seekWant; seekWant = null; seekBusy = true; seekAt = performance.now();
+  v.currentTime = x;
+  const done = () => { v.removeEventListener('seeked', done); clearTimeout(tm); seekBusy = false; if (seekWant != null) liveSeek(seekWant); };
+  const tm = setTimeout(done, 1500);                         // seeked 一直不来 (源卡住): 别让后面的全被堵死
+  v.addEventListener('seeked', done);
+}
 function liveSeek(t) {
   const v = cur()?.video; if (!v) return;
   seekWant = t;
   if (seekBusy) return;
-  const go = () => { if (seekWant == null) return; seekBusy = true; const x = seekWant; seekWant = null; v.currentTime = x;
-    const done = () => { v.removeEventListener('seeked', done); clearTimeout(tm); seekBusy = false; go(); };
-    const tm = setTimeout(done, 400); v.addEventListener('seeked', done); };
-  go();
+  if (inBuf(v, t)) { if (!seekTimer) seekTimer = setTimeout(() => seekPump(v), Math.max(0, 160 - (performance.now() - seekAt))); return; }
+  clearTimeout(seekTimer); seekTimer = setTimeout(() => seekPump(v), 220);
 }
 const fracOf = e => { const r = prog.querySelector('.rail').getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
 function scrubTo(e) {
@@ -892,7 +948,7 @@ prog.addEventListener('pointerdown', e => {
 prog.addEventListener('pointermove', e => { if (scrub && e.pointerId === scrub.id) scrubTo(e); });
 const scrubEnd = (e, ok) => {
   if (!scrub || e.pointerId !== scrub.id) return;
-  const v = cur().video; seekWant = null; v.currentTime = ok ? scrub.frac * vdur(v) : scrub.t0;
+  const v = cur().video; seekCancel(); v.currentTime = ok ? scrub.frac * vdur(v) : scrub.t0;
   scrub = null; root.classList.remove('scrubbing'); tipEl.hidden = true;
 };
 prog.addEventListener('pointerup', e => { armGuard(); scrubEnd(e, true); });
@@ -926,7 +982,7 @@ function keySeek(v, d) {
 }
 function keySeekEnd() {
   if (!ks) return;
-  const { v, t } = ks; ks = null; seekWant = null;
+  const { v, t } = ks; ks = null; seekCancel();
   v.currentTime = t;
   root.classList.remove('scrubbing'); tipEl.hidden = true;
 }
@@ -1010,7 +1066,7 @@ function hideFeed() {
   F.gen++;
   ring.forEach(s => { teardown(s); Object.assign(s, { i: -1, it: null, d: null }); s.el.classList.add('empty'); });
   root.hidden = true; closeOverlays(); tipEl.hidden = true; rateEl.hidden = true;
-  ks = null; root.classList.remove('scrubbing', 'dragging');
+  ks = null; seekCancel(); root.classList.remove('scrubbing', 'dragging');
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   if (!$('#modal') && player.hidden) document.body.style.overflow = '';
   cancelAnimationFrame(raf);

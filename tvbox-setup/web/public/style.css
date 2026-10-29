@@ -99,7 +99,9 @@ nav a:hover { color: #b3b3b3; }
 .row { margin: 0 0 3vw; }
 .row h2 { margin: 0 4% 8px; font-size: clamp(16px, 1.5vw, 22px); }
 .track { position: relative; }
-.scroller { display: flex; gap: 8px; overflow-x: auto; scroll-behavior: smooth; padding: 0 4% 10px; scrollbar-width: none; }
+/* overflow-y 必须显式 hidden: 只写 overflow-x:auto 时 overflow-y 会被算成 auto, 卡片悬停放大 (scale) 撑出的几像素就成了纵向可滚动区域,
+   鼠标滚轮落在横栏上会被它先吃掉, 页面纵向滚不动。顶部留 8px 给放大的卡片, 用负的 margin 抵回去, 版面不变 */
+.scroller { display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden; scroll-behavior: smooth; padding: 8px 4% 10px; margin-top: -8px; scrollbar-width: none; overscroll-behavior-x: contain; }
 .scroller::-webkit-scrollbar { display: none; }
 .arrow { position: absolute; top: 0; bottom: 10px; width: 4%; z-index: 4; border: 0; background: #14141499; color: #fff; font-size: 34px; opacity: 0; transition: opacity .2s; }
 .track:hover .arrow { opacity: 1; }

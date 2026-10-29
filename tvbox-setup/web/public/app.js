@@ -1156,6 +1156,11 @@ function pushOverlay(kind, url) {
 let pipSkip = false, backAnim = false, lastBackAt = 0;     // backAnim: 这次返回是页面自己发起的 (返回按钮 / 自己的左滑), 详情页要播退出动画; 系统手势发起的返回系统已经有过渡了, 直接收起
 // 返回锁: 自己发起的返回 450ms 内、或子页面正在滑出 / 详情页正在换回来时, 所有「返回」入口 (按钮 / 左边缘滑动 / 遮罩 / Esc) 一律不再处理
 const backLocked = () => Date.now() - lastBackAt < 450 || subLeaving || document.body.classList.contains('detail-wait');
+// 系统自己发起的后退 (iOS 边缘返回手势 / 浏览器的左滑返回) 也会触发 popstate: 记下最近一次的时间。
+// 自己的边缘拖动手势在「拖动期间系统已经退过一层」或「触摸被系统接管 (touchcancel)」时, 不能再补一次 history.back,
+// 否则一次左滑退两层 (连下面那一层也被退掉); 点「返回」按钮不经过手势, 所以不受影响。
+let lastPopAt = 0;
+addEventListener('popstate', () => { lastPopAt = Date.now(); }, true);
 function closeOverlay(quiet) {
   if (!quiet && backLocked()) return;            // 上一次返回还在转场 / 刚发出: 这次不再处理, 免得连下面不可见的那一层也一起退掉
   if (quiet) pipSkip = true; backAnim = true; lastBackAt = Date.now(); history.back();
@@ -2419,13 +2424,14 @@ function enableEdgeBack(m) {
     if (!g.on) { g.on = true; document.body.classList.add('edge-drag'); m.style.animation = 'none'; m.style.transition = 'none'; }
     m.style.transform = `translate3d(${g.dx}px,0,0)`;
   }, { passive: false });
-  const end = () => {
+  const end = e => {
     if (!g) return;
     const d = g; g = null;
     if (d.lock !== 'x') return;
     const v = d.dx / Math.max(1, Date.now() - d.t);
     m.style.transition = 'transform .25s cubic-bezier(.32,.72,0,1)';
-    if (d.dx > innerWidth / 3 || v > .5) { m.style.transform = 'translate3d(100%,0,0)'; closeOverlay(); }
+    const sys = e?.type === 'touchcancel' || lastPopAt >= d.t;      // 触摸被系统接管 / 系统已经退过一层: 只还原手势, 不再自己后退
+    if (!sys && (d.dx > innerWidth / 3 || v > .5)) { m.style.transform = 'translate3d(100%,0,0)'; closeOverlay(); }
     else { m.style.transform = 'translate3d(0,0,0)'; setTimeout(() => document.body.classList.remove('edge-drag'), 260); }
   };
   m.addEventListener('touchend', end); m.addEventListener('touchcancel', end);
@@ -5548,6 +5554,7 @@ function hideUnder(fade) {
 }
 function leaveSub() {
   if (backLocked()) return; subLeaving = true; lastBackAt = Date.now();
+  const pop0 = lastPopAt;
   showUnder();
   const info = curInfo(), toDetail = !!info?.snap;      // 下面是一页详情: 真正的详情页画好之前一直留着那份拷贝垫着 (不然会闪一下骨架屏)
   view.classList.add('subleave');
@@ -5566,7 +5573,8 @@ function leaveSub() {
     if (toDetail) document.body.classList.add('detail-wait');
     const from = location.hash, seq0 = routeSeq, want = info?.snap?.dataset.key;
     lastBackAt = Date.now();
-    if (history.length > 1 && history.state) history.back(); else location.hash = catOrigin === 'charts' ? '#/charts' : '#/';
+    if (lastPopAt !== pop0) { /* 这 250ms 里系统已经退了一层 (边缘返回): 不再多退一层, 下面照常等页面画好 */ }
+    else if (history.length > 1 && history.state) history.back(); else location.hash = catOrigin === 'charts' ? '#/charts' : '#/';
     // 不靠固定的延时: 一直垫着, 直到后退真的完成、目标页面 (和详情) 都画好了才撤掉 —— 页面大 / 路由慢 (榜单这种几百行的页面) 时不会提前露出黑底。
     // 目标是详情: 下面那页被详情整个盖住, 只等详情; 目标是页面: 等路由重画 (routeSeq 变了) 并完成 (readyHash)。后退后什么都没变 (同一地址) 就别干等
     const t0 = Date.now();
@@ -5606,12 +5614,13 @@ document.addEventListener('click', e => {
     g.dx = Math.max(0, dx);
     showUnder(); view.classList.add('subleave'); view.style.transition = 'none'; view.style.transform = `translate3d(${g.dx}px,0,0)`;
   }, { passive: false });
-  const end = () => {
+  const end = e => {
     if (!g) return;
     const d = g; g = null;
     if (d.lock !== 'x') return;
     const v = d.dx / Math.max(1, Date.now() - d.t);
-    if (d.dx > innerWidth / 3 || v > .5) leaveSub();
+    const sys = e?.type === 'touchcancel' || lastPopAt >= d.t;      // 同详情页: 系统接管 / 已经退过一层时只还原, 不再 leaveSub
+    if (!sys && (d.dx > innerWidth / 3 || v > .5)) leaveSub();
     else { view.style.transition = 'transform .25s cubic-bezier(.32,.72,0,1)'; view.style.transform = 'translate3d(0,0,0)'; setTimeout(() => { view.style.transition = view.style.transform = ''; view.classList.remove('subleave'); hideUnder(); }, 270); }
   };
   view.addEventListener('touchend', end); view.addEventListener('touchcancel', end);
