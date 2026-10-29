@@ -910,9 +910,8 @@ const armGuard = () => { guardUntil = performance.now() + 800; };
 let scrub = null;
 // 拖动时画面跟着实时跳转。每一次 seek 都会让 hls.js 重新定位、清缓冲、重新拉分片, 连发 (长按 ←→ 的按键重复 / 手指快速横拖 / 拖进度条)
 // 会把解码器和内存冲垮 —— iOS 上整个页面会被系统杀掉重载 (表现为「应用崩溃」)。所以:
-//   · 目标在已缓冲范围内: 便宜, 实时跳, 但两次之间至少隔 160ms;
-//   · 目标在缓冲外: 要等手指 / 按键停住 220ms 才跳, 只发最后一个;
-//   · 上一次 seek 没完成 (seeked 没来) 不发下一个, 完成后再取最新的目标。
+//   · 节流而不是防抖: 持续拖动 / 按住时, 画面每隔一小会儿就跳到最新位置 (目标在已缓冲范围内 160ms, 缓冲外 380ms), 中间的位置丢掉;
+//   · 上一次 seek 没完成 (seeked 没来) 不发下一个, 完成后再取最新的目标 (seeked 超时 1500ms 兜底)。
 // 手指抬起 / 松开按键时再精确落到最终位置 (seekCancel 掐掉还没发出的)。
 let seekBusy = false, seekWant = null, seekAt = 0, seekTimer = 0;
 const inBuf = (v, t) => { for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= t && t <= v.buffered.end(i) - .3) return true; return false; };
@@ -929,9 +928,9 @@ function seekPump(v) {
 function liveSeek(t) {
   const v = cur()?.video; if (!v) return;
   seekWant = t;
-  if (seekBusy) return;
-  if (inBuf(v, t)) { if (!seekTimer) seekTimer = setTimeout(() => seekPump(v), Math.max(0, 160 - (performance.now() - seekAt))); return; }
-  clearTimeout(seekTimer); seekTimer = setTimeout(() => seekPump(v), 220);
+  if (seekBusy || seekTimer) return;                        // 已经排好了 / 正在跳: 它发出时会取最新的目标
+  const gap = inBuf(v, t) ? 160 : 380;                      // 缓冲外的跳转更贵, 间隔拉长, 但持续按住 / 拖动时画面仍然隔一会儿就刷新一次
+  seekTimer = setTimeout(() => seekPump(v), Math.max(0, gap - (performance.now() - seekAt)));
 }
 const fracOf = e => { const r = prog.querySelector('.rail').getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
 function scrubTo(e) {
