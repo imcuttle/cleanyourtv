@@ -86,6 +86,7 @@ nav a:hover { color: #b3b3b3; }
 .btns { display: flex; gap: 12px; flex-wrap: wrap; }
 .btn { border: 0; border-radius: 4px; padding: 10px 26px; font-size: 17px; font-weight: 700; display: inline-flex; gap: 8px; align-items: center; }
 .btn.play { background: #fff; color: #000; }
+.btn.play .pt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn.play:hover { background: #fffc; }
 .btn.more { background: #6d6d6eb3; color: #fff; }
 .btn.more:hover { background: #6d6d6e66; }
@@ -416,8 +417,8 @@ a.ch { color: inherit; }
 .tl .hov { width: var(--h); background: #ffffff40; }
 .tl .played { width: var(--p); background: var(--red); }
 .tl .marks { position: absolute; inset: 0; pointer-events: none; }
-.tl .marks i { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 1px; background: #4fd1c5; box-shadow: 0 0 0 1px #0006; }
-.tl .marks i.a { background: #fbbf24; }
+.tl .marks i { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 1px; background: #4fd1c566; }
+.tl .marks i.a { background: #fbbf2466; }
 .tl .knob { position: absolute; left: var(--p); width: 15px; height: 15px; margin-left: -7.5px; border-radius: 50%; background: var(--red); transform: scale(0); transition: transform .12s; }
 .tl:hover .knob, .tl.drag .knob { transform: scale(1); }
 .tip { position: absolute; bottom: 26px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
@@ -1185,7 +1186,7 @@ input::placeholder, textarea::placeholder { color: #ffffff80; opacity: 1; }
 @media (display-mode: standalone) { html, body { height: 100lvh; } body { position: relative; } }
 
 /* 锁定 / 解锁按钮: 同一个位置同一个大小, 切换时不抖动 */
-.plock, html.touchui .plockbtn { left: max(2px, env(safe-area-inset-left)); top: 50%; margin-top: -24px; width: 48px; height: 48px; border-radius: 50%; }
+.plock, html.touchui .plockbtn { left: calc(env(safe-area-inset-left) + 8px); top: 50%; margin-top: -24px; width: 48px; height: 48px; border-radius: 50%; }
 .plock svg, html.touchui .plockbtn svg { width: 24px; height: 24px; }
 .plock, html.touchui .plockbtn { background: none; filter: drop-shadow(0 2px 6px #000a); }
 
@@ -1679,6 +1680,7 @@ html.touchui .plist.srcs .pitems button { min-height: 58px; }
 
 /* ===== 兜底横屏：手机竖着拿、横屏视频、拿不到真横屏时，播放器自己顺时针转 90° 铺满屏幕 (app.js 的 syncRot) ===== */
 #player.rot { inset: auto; top: 0; left: var(--rw); width: var(--rh); height: var(--rw); transform-origin: 0 0; transform: rotate(90deg); overscroll-behavior: contain; }
+#player.rot .plock, html.touchui #player.rot .plockbtn { left: calc(max(0px, env(safe-area-inset-top)) + 10px); }   /* 竖屏转 90° 的全屏: 视觉上的「左边」是竖屏的上边, 刘海 / 灵动岛在那里, 锁要躲开它 */
 #player.rot .pbar { padding: 10px max(18px, env(safe-area-inset-bottom)) 6px max(18px, env(safe-area-inset-top)); }
 html.touchui #player.rot .ctrl { padding: 30px max(24px, env(safe-area-inset-bottom)) 6px max(24px, env(safe-area-inset-top)); }
 html #player.rot .plist { height: min(72%, 300px); max-height: none; }
@@ -1746,9 +1748,9 @@ html.touchui .plist.skipset .pitems button { min-height: 62px; font-size: 15px; 
 
 /* ---------- 沉浸播放: 进度条上的自动跳过标记 (青色 = 片头 / 片尾, 琥珀色 = 广告) 和「已跳过」提示 ---------- */
 .fd-prog .marks { position: absolute; inset: 0; pointer-events: none; }
-.fd-prog .marks i { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 2px; background: #4fd1c5; opacity: .92; box-shadow: 0 0 0 .5px #0008; }
-.fd-prog .marks i.a { background: #fbbf24; }
-.fd-prog .marks i::after { content: ""; position: absolute; left: 0; right: 0; top: -3px; height: 3px; border-radius: 2px 2px 0 0; background: inherit; opacity: .55; }
+.fd-prog .marks i { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 2px; background: #4fd1c566; }
+.fd-prog .marks i.a { background: #fbbf2466; }
+.fd-prog .marks i::after { content: ""; position: absolute; left: 0; right: 0; top: -3px; height: 3px; border-radius: 2px 2px 0 0; background: inherit; opacity: .6; }
 .fd-prog .knob { z-index: 1; }
 #feed.live .fd-skipnote { display: none; }
 .fd-skipnote { position: absolute; z-index: 5; left: 50%; bottom: calc(46px + var(--sb, 0px)); transform: translateX(-50%); padding: 7px 15px 7px 12px; border-radius: 999px; background: #000b; color: #fff; font-size: 13px; font-weight: 600; letter-spacing: .3px; white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
@@ -2061,4 +2063,47 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
   .alts { gap: 7px; }
   .alts a, .alts button { padding: 5px 10px; font-size: 13px; line-height: 1.35; border-radius: 6px; }
   .alts small { font-size: 10px; }
+}
+
+
+/* ---------- 下拉刷新: 垫在上面的旧画面 (新页面画好之前不让人看到清空 / 重长的过程) ---------- */
+.ptrsnap { position: fixed; inset: 0; z-index: 17; overflow: hidden; background: var(--bg); pointer-events: none; transition: opacity .28s ease-out; }
+.ptrsnap > .page { min-height: 100%; }
+@media (max-width: 760px) { .ptrsnap { padding-bottom: calc(var(--tab) + var(--sab)); } }
+
+/* ---------- 多选 (下载 / 收藏) ---------- */
+.cathead .selok, .selok { flex: none; height: 34px; padding: 0 8px; border: 0; background: none; color: var(--red); font-size: 16px; font-weight: 600; white-space: nowrap; }
+#selbar { position: fixed; z-index: 26; left: 0; right: 0; bottom: 0; height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left)); background: #1c1c1cf5; border-top: .5px solid #ffffff26; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+#selbar button { border: 0; background: none; color: #fff; font-size: 16px; padding: 8px 4px; min-width: 64px; white-space: nowrap; }
+#selbar .sa { text-align: left; }
+#selbar .sn { flex: 1; text-align: center; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#selbar .sd { color: #ff453a; font-weight: 600; text-align: right; }
+#selbar .sd:disabled { color: #ffffff4d; }
+@media (max-width: 760px) { #selbar { height: calc(var(--tab) + var(--sab)); padding-bottom: var(--sab); } html.vshort #selbar { position: absolute; bottom: auto; top: calc(100lvh - var(--tab) - var(--sab)); } }
+
+/* 勾选圈: 下载行在左边, 收藏卡片在封面右上角 */
+.dl .chk { display: none; }
+.dls.sel .dl { padding-left: 46px; }
+.dls.sel .dops, .dls.sel .dlx { display: none; }
+.dls.sel .dl .chk, .selmode .card .selchk { display: block; width: 22px; height: 22px; border-radius: 50%; border: 2px solid #ffffffb3; background: #0006; box-shadow: 0 1px 4px #0008; }
+.dls.sel .dl .chk { position: absolute; left: 14px; top: 50%; margin-top: -11px; }
+.selmode .card .selchk { position: absolute; z-index: 3; right: 6px; top: 6px; }
+.selchk { display: none; }
+.dls.sel .dl.picked .chk, .selmode .card.picked .selchk { background: var(--red) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 12.5l4 4 8-9'/%3E%3C/svg%3E") center/16px no-repeat; border-color: var(--red); }
+.selmode .card.picked .img { outline: 2px solid var(--red); outline-offset: -2px; }
+.selmode .card { cursor: pointer; }
+.selmode .card:hover { transform: none; }
+.selmode .card .img img { pointer-events: none; }
+
+/* 下载行: 外面包一层, 左滑露出红色删除 (只在小屏) */
+.dlw { position: relative; border-radius: 8px; overflow: hidden; }
+.dlx { display: none; }
+.dl { position: relative; }
+@media (max-width: 760px) {
+  .dlx { display: flex; position: absolute; z-index: 0; right: 0; top: 0; bottom: 0; width: 80px; align-items: center; justify-content: center; border: 0; background: #e5484d; color: #fff; font-size: 15px; font-weight: 600; }
+  .dls .dl { z-index: 1; touch-action: pan-y; transition: transform .24s cubic-bezier(.32,.72,0,1); will-change: transform; }
+  .dls .dl.drag { transition: none; }
+  .dlw.open .dl { transform: translateX(-80px); }
+  .dops [data-op=del] { display: none; }
 }

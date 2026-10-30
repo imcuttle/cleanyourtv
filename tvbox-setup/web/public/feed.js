@@ -427,7 +427,7 @@ function skEnsure(s) {
   if (s.sk && !s.sk.dead && s.sk.u === e.url) return;
   skStop(s);
   const n = s.eps[s.ep + 1] || s.eps[s.ep - 1];
-  const okUrl = x => /^https?:/.test(x) || x.startsWith('/media/f/');       // 本地媒体的原文件也行
+  const okUrl = skipOkUrl;       // 本地媒体 (原文件 / 转码列表) 和已下载的文件也行
   const ok = okUrl(e.url);
   const fp = ok && s.eps.length >= 3 && n && okUrl(n.url);
   const A = s.sk = ok ? skipNew(e.url, fp ? n.url : '', () => { if (s === cur() && s.sk === A) feedMarks(); }) : null;

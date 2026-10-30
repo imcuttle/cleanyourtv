@@ -3272,10 +3272,17 @@ async function api(route, q, res, req) {
   // 自动识别片头 / 片尾 / 每集重复的广告: 立刻返回，没算完是 pending，客户端过一会儿再问
   if (route === 'skipmarks') {
     // 本地媒体: /media/f/<id>.<ext> 换成磁盘上的文件路径给 ffmpeg (和 /media/f 一样要求这个文件当前看得到)
+    // 转码播放的 /media/h/<id>/index.m3u8 也一样 (取原文件的声音, 不取正在边转边写的列表); 已下载的 /dl/<任务>/index.m3u8 | video.mp4 换成下载目录里的文件
     const local = u => {
-      const m = /^\/media\/f\/([^/?#]+?)(?:\.\w+)?$/.exec(u || ''); if (!m) return u || '';
-      const snap = localIndex(), f = snap.byFile.get(m[1]);
-      return f && localCfg.enabled && localCatOk(snap.catById.get(f.item.cat)) ? f.path : '';
+      u = u || '';
+      const m = /^\/media\/f\/([^/?#]+?)(?:\.\w+)?$/.exec(u) || /^\/media\/h\/([^/?#]+)\/index\.m3u8$/.exec(u);
+      if (m) {
+        const snap = localIndex(), f = snap.byFile.get(m[1]);
+        return f && localCfg.enabled && localCatOk(snap.catById.get(f.item.cat)) ? f.path : '';
+      }
+      const d = /^\/dl\/([\w-]+)\/(index\.m3u8|video\.mp4)$/.exec(u);
+      if (d) { const fp = path.join(DL, d[1], d[2]); return fs.existsSync(fp) ? fp : ''; }
+      return u;
     };
     return send(res, 200, await rpc('skipmarks', { u: local(q.get('u')), n: local(q.get('n')), peek: q.get('peek') === '1' }, 5000).catch(() => ({ status: 'none' })));
   }
