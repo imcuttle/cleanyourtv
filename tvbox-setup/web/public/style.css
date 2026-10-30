@@ -1748,9 +1748,8 @@ html.touchui .plist.skipset .pitems button { min-height: 62px; font-size: 15px; 
 
 /* ---------- 沉浸播放: 进度条上的自动跳过标记 (青色 = 片头 / 片尾, 琥珀色 = 广告) 和「已跳过」提示 ---------- */
 .fd-prog .marks { position: absolute; inset: 0; pointer-events: none; }
-.fd-prog .marks i { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 2px; background: #4fd1c566; }
+.fd-prog .marks i { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 0; background: #4fd1c566; }   /* 和进度条同高, 不往上凸 */
 .fd-prog .marks i.a { background: #fbbf2466; }
-.fd-prog .marks i::after { content: ""; position: absolute; left: 0; right: 0; top: -3px; height: 3px; border-radius: 2px 2px 0 0; background: inherit; opacity: .6; }
 .fd-prog .knob { z-index: 1; }
 #feed.live .fd-skipnote { display: none; }
 .fd-skipnote { position: absolute; z-index: 5; left: 50%; bottom: calc(46px + var(--sb, 0px)); transform: translateX(-50%); padding: 7px 15px 7px 12px; border-radius: 999px; background: #000b; color: #fff; font-size: 13px; font-weight: 600; letter-spacing: .3px; white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
