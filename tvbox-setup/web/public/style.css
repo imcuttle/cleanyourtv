@@ -2116,3 +2116,9 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
   .sheet .top .btns .btn.more { min-width: 40px; }   /* 本机浏览器上本地资源有 5 个图标按钮 (播放器 / 文件夹 / 分享 / 收藏 / 删除), 别把播放按钮挤成「…」 */
   .sheet .top .btns .btn.play { min-width: 96px; }
 }
+
+/* 移到回收站时的等待遮罩: 盖住一切 (播放页 z 50 / 搜索页 z 70 / 菜单 z 90 之上), 同时挡掉重复点击 */
+#trashBusy { position: fixed; inset: 0; z-index: 200; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: #000b; color: #fff; text-align: center; padding: 20px; touch-action: none; }
+#trashBusy b { font-size: 16px; }
+#trashBusy small { min-height: 18px; color: #ffffffb3; font-size: 13px; }
+#trashBusy .spinner { position: static; margin: 0; }

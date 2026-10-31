@@ -3956,12 +3956,32 @@ async function trashLocal(ids, what) {
   ids = ids.filter(Boolean);
   if (!ids.length) { toast('找不到这个文件'); return false; }
   if (!confirm(`${what}\n\n文件会移到回收站（连同同名的 nfo / 字幕 / 海报），可以从回收站找回。`)) return false;
-  try {
-    const r = await req('POST', '/api/local/trash', { ids });
-    apiMemo.clear(); tabKeep.clear();
-    toast(r.failed ? `已移到回收站 ${r.trashed} 个，${r.failed} 个失败` : '已移到回收站');
-    return true;
-  } catch (e) { if (/管理员/.test(e.message)) ADMIN.on = false; toast(e.message); return false; }
+  const post = async body => { const busy = trashBusy(body.permanent ? '正在永久删除…' : '正在移到回收站…'); try { return await req('POST', '/api/local/trash', body); } finally { busy.done(); } };
+  const fail = e => { if (/管理员/.test(e.message)) ADMIN.on = false; const t = toast(e.message, true); t.onclick = () => t.remove(); setTimeout(() => t.remove(), 12000); };
+  let r;
+  try { r = await post({ ids }); } catch (e) { fail(e); return false; }
+  apiMemo.clear(); tabKeep.clear();
+  let trashed = r.trashed, bad = r.failed;
+  // 回收站放不下 (文件太大 / 这个盘没有回收站): 第二次确认, 同意了才永久删除, 不可恢复
+  if (r.noBinIds?.length) {
+    const n = r.noBinIds.length;
+    if (confirm(`回收站放不下${n > 1 ? `这 ${n} 个文件` : '这个文件'}（文件太大，或它所在的磁盘没有回收站）。\n\n要直接永久删除吗？\n⚠️ 永久删除后无法恢复！`)) {
+      try { const r2 = await post({ ids: r.noBinIds, permanent: true }); trashed += r2.trashed; bad += r2.failed; apiMemo.clear(); tabKeep.clear(); toast(bad ? `已删除 ${trashed} 个，${bad} 个失败` : '已永久删除'); }
+      catch (e) { fail(e); }
+    } else toast(trashed ? `已移到回收站 ${trashed} 个，其余保留` : '已取消，文件保留');
+    return trashed > 0;
+  }
+  toast(bad ? `已移到回收站 ${trashed} 个，${bad} 个失败` : '已移到回收站');
+  return trashed > 0;
+}
+// 点了确认以后立刻盖一层「正在移到回收站…」(带转圈, 同时挡住重复点击): 服务端要先停掉占着文件的转码 / 分析进程再删, 可能要几秒; 久了追加说明
+function trashBusy(text = '正在移到回收站…') {
+  const el = document.createElement('div'); el.id = 'trashBusy';
+  el.innerHTML = `${spinner}<b>${text}</b><small></small>`;
+  document.body.append(el);
+  const sm = $('small', el), t0 = Date.now();
+  const tick = setInterval(() => { const n = Math.round((Date.now() - t0) / 1000); sm.textContent = n >= 4 ? `已等待 ${n} 秒${n >= 8 ? '：正在释放被占用的文件，Windows 上可能要几秒' : ''}` : ''; }, 1000);
+  return { done() { clearInterval(tick); el.remove(); } };
 }
 // 一集删掉以后: 观看记录里指着它的去掉, 排在它后面的集号减一
 function dropEpHist(d, line, idx) {

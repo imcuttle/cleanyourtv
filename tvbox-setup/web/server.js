@@ -2603,15 +2603,26 @@ rpcHandlers.localSave = b => {
 // ---- 管理员删除本地资源: 文件(连同同名的 nfo / 字幕 / 海报)移到系统回收站, 不是直接删除 ----
 // 系统回收站调不起来时宁可失败也不硬删。返回仍留在原地的路径。
 const SIDECAR_EXT = new Set(['nfo', 'srt', 'ass', 'ssa', 'vtt', 'sub', 'idx', 'jpg', 'jpeg', 'png', 'webp']);
-let trashErr = '';
+let trashErr = '', trashNoBin = false;
 async function trashPaths(list) {
   const left = () => list.filter(f => fs.existsSync(f));
-  const run = (cmd, args, env) => new Promise(ok => {
-    let p, err = ''; try { p = spawnRaw(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: env ? { ...process.env, ...env } : process.env }); } catch (e) { trashErr = e.message; return ok(); }
-    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} trashErr = '系统回收站 30 秒没有响应'; }, 30000);
+  // Windows 的 SHFileOperation 返回码 → 人话
+  const hint = c => ({ 0x20: '文件正被别的程序占用', 0x21: '文件正被别的程序占用', 0x5: '没有权限（被拒绝访问）', 0x78: '没有权限（被拒绝访问）', 0x7C: '路径无效（可能太长）', 0x75: '回收站放不下这个文件（太大，或这个盘没有回收站）',
+    0x74: '不能删除根目录', 0x402: '未知错误', 0x71: '源和目标相同', 0x76: '路径太长' })[c] || '系统错误';
+  const run = (cmd, args, env, pipeOut) => new Promise(ok => {
+    let p, out = '', err = ''; try { p = spawnRaw(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: env ? { ...process.env, ...env } : process.env }); } catch (e) { trashErr = e.message; return ok(); }
+    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} trashErr = '系统回收站 25 秒没有响应（可能弹出了需要确认的窗口，或这个盘的回收站放不下该文件）'; }, 25000);
+    p.stdout.on('data', d => { if (out.length < 4000) out += d; });
     p.stderr.on('data', d => { if (err.length < 2000) err += d; });
     p.on('error', e => { clearTimeout(t); trashErr = e.message; ok(); });
-    p.on('close', () => { clearTimeout(t); if (err.trim()) trashErr = err.trim().slice(0, 300); ok(); });
+    p.on('close', () => {
+      clearTimeout(t);
+      const lines = out.split(/\r?\n/).filter(l => l.startsWith('TVERR '));
+      if (lines.some(l => /^TVERR CODE 117\b/.test(l))) trashNoBin = true;     // 0x75: 回收站放不下 (太大 / 这个盘没有回收站), WANTNUKEWARNING 把「永久删除」拦下来了
+      if (lines.length) trashErr = lines.map(l => { const m = /^TVERR CODE (\d+)/.exec(l); return m ? `系统回收站返回 0x${(+m[1]).toString(16).toUpperCase()}：${hint(+m[1])}` : l.slice(6); }).join('；').slice(0, 300);
+      else if (!pipeOut && err.trim() && !/^#< CLIXML/.test(err.trim())) trashErr = err.trim().slice(0, 300);
+      ok();
+    });
   });
   if (!left().length) return [];
   if (process.platform === 'darwin') {
@@ -2632,10 +2643,15 @@ async function trashPaths(list) {
       + '[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode,Pack=1)]struct F32{public IntPtr h;public uint fn;public string src;public string to;public ushort fl;public int ab;public IntPtr nm;public string tt;}'
       + '[DllImport("shell32.dll",CharSet=CharSet.Unicode,EntryPoint="SHFileOperationW")]static extern int O64(ref F64 f);'
       + '[DllImport("shell32.dll",CharSet=CharSet.Unicode,EntryPoint="SHFileOperationW")]static extern int O32(ref F32 f);'
-      + 'public static int Trash(string p){string src=p+"\\0\\0";ushort fl=0x40|0x10|0x4|0x400;'
+      // ALLOWUNDO 0x40 | SILENT 0x4 | NOERRORUI 0x400 | NOCONFIRMATION 0x10 | WANTNUKEWARNING 0x4000:
+      // 回收站放不下 (文件太大 / 这个盘没有回收站) 时, NOCONFIRMATION 会让系统不问就永久删除; WANTNUKEWARNING 把这种情况拦下来 (不会静默硬删)
+      + 'public static int Trash(string p){string src=p+"\\0\\0";ushort fl=0x40|0x10|0x4|0x400|0x4000;'
       + 'if(IntPtr.Size==8){var f=new F64();f.fn=3;f.src=src;f.fl=fl;return O64(ref f);}else{var f=new F32();f.fn=3;f.src=src;f.fl=fl;return O32(ref f);}}}';
-    const ps = `$ErrorActionPreference='Stop'; Add-Type -TypeDefinition @'\n${cs}\n'@; foreach ($p in ($env:TVBOX_TRASH -split '\\|')) { if ($p -and (Test-Path -LiteralPath $p)) { $r = [TvTrash]::Trash($p); if ($r -ne 0) { [Console]::Error.WriteLine('SHFileOperation 返回 0x' + $r.ToString('X') + ': ' + $p) } } }`;
-    await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], { TVBOX_TRASH: left().join('|') });
+    // 输出全走 stdout 的 TVERR 行; $ProgressPreference + -OutputFormat Text 去掉 PowerShell 往 stderr 吐的 CLIXML 进度噪音 ("#< CLIXML <Objs …")
+    const ps = `$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; `
+      + `try { Add-Type -TypeDefinition @'\n${cs}\n'@ } catch { [Console]::Out.WriteLine('TVERR 编译回收站组件失败: ' + $_.Exception.Message); exit 1 } `
+      + `foreach ($p in ($env:TVBOX_TRASH -split '\\|')) { if ($p -and (Test-Path -LiteralPath $p)) { try { $r = [TvTrash]::Trash($p); if ($r -ne 0) { [Console]::Out.WriteLine('TVERR CODE ' + $r) } } catch { [Console]::Out.WriteLine('TVERR ' + $_.Exception.Message) } } }`;
+    await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-OutputFormat', 'Text', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], { TVBOX_TRASH: left().join('|') }, true);
   } else {
     await run('gio', ['trash', '--', ...left()]);
     if (left().length) await run('trash-put', ['--', ...left()]);
@@ -2646,23 +2662,39 @@ function sidecarsOf(file) {
   const dir = path.dirname(file), base = path.basename(file, path.extname(file)).toLowerCase();
   try { return fs.readdirSync(dir).filter(n => SIDECAR_EXT.has(path.extname(n).slice(1).toLowerCase()) && path.basename(n, path.extname(n)).toLowerCase() === base).map(n => path.join(dir, n)); } catch { return []; }
 }
-rpcHandlers.localTrash = async ({ ids }) => {
-  const snap = localIndex(), done = [], failed = []; let lastErr = '';
+// permanent: 回收站放不下、管理员第二次确认以后才会传 true —— 直接永久删除 (文件 + 同名 nfo / 字幕 / 海报), 不可恢复
+async function deleteForever(files) {
+  for (const f of files) {
+    for (let k = 0; k < 4; k++) {
+      try { await fsp.unlink(f); break; }
+      catch (e) { if (e.code === 'ENOENT') break; if (k === 3 || !/^(EBUSY|EPERM|EACCES)$/.test(e.code)) { trashErr = `${e.code === 'EBUSY' || e.code === 'EPERM' ? '文件正被别的程序占用' : e.message}`; break; } await new Promise(ok => setTimeout(ok, 500 * (k + 1))); }
+    }
+  }
+  return files.filter(f => fs.existsSync(f));
+}
+rpcHandlers.localTrash = async ({ ids, permanent }) => {
+  const snap = localIndex(), done = [], failed = [], noBin = []; let lastErr = '';
   for (const id of ids) {
     const f = snap.byFile.get(id); if (!f) continue;
     const files = [f.path, ...sidecarsOf(f.path)];
-    let left = files;
+    let left = files; trashNoBin = false;
     // 还有 ffmpeg 在读它 (边转边播 / 封面 / 自动跳过分析) 时 Windows 不让删: 先停掉它们, 删不掉就再试几次 (进程退出到句柄放开有一点延迟)
-    for (let k = 0; k < 4; k++) {
+    for (let k = 0; k < 3; k++) {
       try { hlsJobs.get(id)?.proc?.kill('SIGKILL'); } catch {}
       await releaseFiles(files);
       await rpc('skipRelease', { files }, 5000).catch(() => {});
       if (k) await new Promise(ok => setTimeout(ok, 700 * k));
       trashErr = '';
-      left = await trashPaths(files);
+      left = permanent ? await deleteForever(files) : await trashPaths(files);
       if (!left.includes(f.path)) break;
+      if (permanent || trashNoBin) break;
+      if (trashErr && !/占用|0x20|0x21|没有响应/.test(trashErr)) break;      // 不是「被占用」: 再试也一样, 直接报原因
     }
-    if (left.includes(f.path)) { failed.push(id); lastErr = trashErr; } else done.push(id);
+    if (!left.includes(f.path)) { done.push(id); continue; }
+    lastErr = trashErr;
+    // 回收站放不下: Windows 明确告诉了 (0x75); 其他系统只能看「回收站没成功、但文件所在目录能写」(NAS / 网络盘 / U 盘常见)
+    const canWrite = (() => { try { fs.accessSync(path.dirname(f.path), fs.constants.W_OK); return true; } catch { return false; } })();
+    if (!permanent && (trashNoBin || (process.platform !== 'win32' && canWrite && !/占用/.test(trashErr)))) noBin.push(id); else failed.push(id);
   }
   if (done.length) {
     const gone = new Set(done), idx = readJson(LOCAL_INDEX, null);
@@ -2679,7 +2711,7 @@ rpcHandlers.localTrash = async ({ ids }) => {
     }
     if (localScan.running) scanQueued = true;    // 正在扫描的那一遍可能带着旧结果, 跑完再扫一遍
   }
-  return { done, failed, error: lastErr };
+  return { done, failed, noBin, error: lastErr };
 };
 if (IS_MEDIA) {
   setTimeout(() => { if (localCfg.enabled && localCfg.dirs.length) scanLocal(); }, 1500).unref();
@@ -3368,9 +3400,10 @@ async function api(route, q, res, req) {
     const b = await readBody(req), snap = localIndex();
     const ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).map(str))].filter(id => { const f = snap.byFile.get(id); return f && localCfg.enabled && localCatOk(snap.catById.get(f.item.cat)); }).slice(0, 500);
     if (!ids.length) return send(res, 404, { error: '找不到文件，可能已经被删除，重新扫描一下' });
-    const r = await rpc('localTrash', { ids }, 120000).catch(e => ({ done: [], failed: ids, error: e.message }));
-    if (!r.done.length) return send(res, 500, { error: '移到回收站失败' + (r.error ? '：' + r.error : '（文件可能正被别的程序占用，或没有权限）') });
-    return send(res, 200, { ok: true, trashed: r.done.length, failed: r.failed.length });
+    const r = await rpc('localTrash', { ids, permanent: b.permanent === true }, 120000).catch(e => ({ done: [], failed: ids, noBin: [], error: e.message }));
+    if (!r.done.length && !r.noBin.length) return send(res, 500, { error: (b.permanent === true ? '删除失败' : '移到回收站失败') + (r.error ? '：' + r.error : '（文件可能正被别的程序占用，或没有权限）') });
+    // noBinIds: 回收站放不下的那些 —— 页面再向管理员确认一次, 同意了才带 permanent:true 回来永久删除
+    return send(res, 200, { ok: true, trashed: r.done.length, failed: r.failed.length, noBinIds: r.noBin, ...(r.error && !r.done.length ? { error: r.error } : {}) });
   }
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
   if (route === 'speed') return send(res, 200, await speedOf(q.get('u') || '', q.get('fresh') === '1'));
