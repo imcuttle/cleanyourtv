@@ -202,7 +202,7 @@ function saveHist(s) {
   const d = s.d;
   hist.put({ site: d.site, adult: d.adult ? 1 : 0, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
     line: s.line, ep: s.ep, epName: s.eps[s.ep]?.name || '', t: s.video.currentTime, dur: vdur(s.video) });
-  prog.put(d.site, d.id, s.ep, s.video.currentTime, vdur(s.video));
+  epProg.put(d.site, d.id, s.ep, s.video.currentTime, vdur(s.video));
 }
 
 function teardown(s) {
@@ -220,7 +220,7 @@ function pickStart(s) {
   s.line = h && d.lines[h.line] ? h.line : 0;
   s.eps = d.lines[s.line].episodes;
   s.ep = h && h.line === s.line && s.eps[h.ep] ? h.ep : 0;
-  s.startAt = prog.resume(d, s.line, s.ep);
+  s.startAt = epProg.resume(d, s.line, s.ep);
 }
 function paintInfo(s) {
   const { it, d } = s;
@@ -415,7 +415,7 @@ function onEnded(s) {
 function switchEp(s, line, ep, startAt) {
   saveHist(s);
   s.line = line; s.eps = s.d.lines[line].episodes; s.ep = Math.max(0, Math.min(ep, s.eps.length - 1));
-  s.startAt = startAt ?? prog.resume(s.d, line, s.ep);   // 没指定就接着这一集上次看到的地方
+  s.startAt = startAt ?? epProg.resume(s.d, line, s.ep);   // 没指定就接着这一集上次看到的地方
   s.watched = 0; s.judged = false; s.stage = 0; s.compat = false; s.tried = null;
   paintInfo(s); attach(s);
   if (!sheetEl.hidden) renderSheet();
@@ -698,7 +698,7 @@ function go(dir) {
   if (t < 0) return bounce();
   if (t >= F.items.length) { if (F.done) toast('没有更多了'); else { toast('正在加载…'); pump(); } return bounce(); }
   leave(cur());
-  seekCancel();
+  seekCancel(); Z.reset(true);
   F.dir = dir; F.idx = t;
   root.classList.add('moving'); clearTimeout(go.mt); go.mt = setTimeout(() => { root.classList.remove('moving'); paintSpin(); }, 380);
   const recycled = dir > 0 ? ring[0] : ring[2];
@@ -1001,6 +1001,17 @@ root.addEventListener('wheel', e => {
   if (Math.abs(wAcc) >= 40) { wLocked = true; wLockAt = performance.now(); go(wAcc > 0 ? 1 : -1); wAcc = 0; }
 }, { passive: false });
 
+// 双指捏合缩放 / 放大后拖动平移 / 双击还原 (zoom.js，和普通播放器共用)。没放大时的单指手势原样走上面那套；
+// 放大后单击暂停 / 继续，双击还原 (不点赞)；翻到别的片、关沉浸、换片源都会还原。
+const Z = VZoom({
+  box: root, el: () => cur()?.video,
+  enabled: () => !root.hidden && !covered() && menuEl.hidden && sheetEl.hidden,
+  ignore: 'input, .fd-prog, .fd-sheet, .fd-menu, .fd-top, .fd-rail, .fd-nav',
+  onTap: () => togglePause(),
+});
+for (const s of slides) for (const ev of ['emptied', 'loadstart']) s.video.addEventListener(ev, () => Z.resetFor(s.video));
+addEventListener('resize', () => Z.refit());
+
 // 长按 ← → 连续快进快退 (和普通播放器一致: 每个按键事件 ±10 秒): 画面和进度条实时跟着走, 松开 / 失焦时落到最终位置
 let ks = null;
 function keySeek(v, d) {
@@ -1094,6 +1105,7 @@ function openFeed(o = {}, restore = false) {
 }
 function hideFeed() {
   if (root.hidden) return;
+  Z.reset(true);
   leave(cur());
   F.gen++;
   ring.forEach(s => { teardown(s); Object.assign(s, { i: -1, it: null, d: null }); s.el.classList.add('empty'); });

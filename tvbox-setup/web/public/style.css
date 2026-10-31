@@ -2268,3 +2268,10 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 /* 注册时选安全级别 */
 .acct-lv { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .acct-lv .seg { display: inline-flex; }
+
+/* 画面缩放 (zoom.js): 右上的倍数标签, 点一下还原; 沉浸里放大后淡出文字和遮罩, 画面干净 */
+.zoomtag { position: absolute; z-index: 6; left: 50%; top: calc(104px + env(safe-area-inset-top)); transform: translateX(-50%); padding: 6px 14px; border-radius: 16px; border: 0; background: #000a; color: #fff; font: 600 13px/1.2 inherit; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer; -webkit-tap-highlight-color: transparent; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.zoomtag[hidden] { display: none; }
+.zoomtag:active { background: #000d; }
+#feed .fd-info, #feed .fd-shade { transition: opacity .2s; }
+#feed.zoomed .fd-info, #feed.zoomed .fd-shade { opacity: 0; }

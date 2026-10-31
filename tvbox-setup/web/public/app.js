@@ -463,6 +463,8 @@ const prog = {
   pct(p) { return !p ? null : p.done ? 100 : Math.max(2, Math.min(99, Math.round(p.t / p.dur * 100))); },
 };
 
+window.epProg = prog;   // 沉浸看片 (feed.js 在自己的作用域里，那里 prog 是进度条元素) 通过它用同一套分集进度
+
 // 成人 entries (history / favorites): a title is 成人 when it was saved with the flag, its source is a 成人 source, or it is
 // a local title that is not explicitly flagged clean (legacy entries). They appear nowhere in 儿童 / 标准 mode, and in
 // 全部 mode only while the current source is itself a 成人 source (or the local one) — never on an ordinary source's home.
@@ -3735,6 +3737,7 @@ function togglePlist(open = $('.plist').hidden) {
   }
 }
 function closePlayer() {
+  Z.resetFor(video);
   saveWatch();
   skipStop(); ask = null;
   if (hls) { hls.destroy(); hls = null; }
@@ -4157,6 +4160,23 @@ if (!fineCursor) {
     }
   });
 }
+
+// 双指捏合缩放 / 放大后拖动平移 / 双击还原 (zoom.js，沉浸看片共用)。没放大时单指手势原样走上面那套；
+// 放大后单击只显隐控制条 (和没放大时一样)，双击还原。换片源、关播放器、转屏都会还原 / 重新贴边。
+const Z = VZoom({
+  box: player, el: () => video, point: rotP, rect: () => rotR(player), nativeClick: true,
+  enabled: () => !player.hidden && !player.classList.contains('locked') && $('.plist').hidden && !player.classList.contains('pip'),
+  ignore: '.pbar, .ctrl, .plist, .psys, .psyspanel, .plock, .plockbtn, .pmore, input',
+  onStart: () => { clearTimeout(idleTimer); player.classList.add('idle'); },                  // 捏合时收起控制条, 不挡画面
+  onTap: type => {
+    if (type !== 'mouse' && fineCursor) { togglePlay(); poke(); return; }
+    if (player.classList.contains('idle') || video.paused) poke(); else { clearTimeout(idleTimer); player.classList.add('idle'); }
+  },
+});
+for (const ev of ['emptied', 'loadstart']) video.addEventListener(ev, () => Z.resetFor(video));
+addEventListener('resize', () => Z.refit());
+document.addEventListener('fullscreenchange', () => Z.refit());
+{ let rot0 = false; new MutationObserver(() => { const r = player.classList.contains('rot'); if (r !== rot0) { rot0 = r; Z.refit(); } }).observe(player, { attributes: true, attributeFilter: ['class'] }); }   // 竖屏转 90° 的全屏换了坐标系: 重新贴边
 
 // The preview copy: same source the player ended up using (direct or relayed), lowest level, tiny buffer.
 function previewAt(t) {
