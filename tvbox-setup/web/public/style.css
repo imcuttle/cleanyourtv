@@ -2106,3 +2106,13 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
   .dlw.open .dl { transform: translateX(-80px); }
   .dops [data-op=del] { display: none; }
 }
+
+/* ---------- 管理员删除 (本地资源) ---------- */
+#delBtn svg { stroke: #ff6b6b; }
+.pill.danger { color: #ff6b6b; }
+.fd-rail [data-a=del] svg { fill: #ff8a8a; }
+@media (max-width: 760px) {
+  .sheet .top .btns { gap: 8px; }
+  .sheet .top .btns .btn.more { min-width: 40px; }   /* 本机浏览器上本地资源有 5 个图标按钮 (播放器 / 文件夹 / 分享 / 收藏 / 删除), 别把播放按钮挤成「…」 */
+  .sheet .top .btns .btn.play { min-width: 96px; }
+}

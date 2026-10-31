@@ -2617,6 +2617,7 @@ async function openDetail(site, id, autoplay = false, replace = false, quiet = f
           ${canOpen && eps.length ? `<button class="btn more ico ib" id="extPlay" aria-label="用系统播放器打开" title="用系统默认播放器打开${eps.length > 1 ? ' ' + esc(eps[resumeIdx].name) : ''}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></button><button class="btn more ico ib" id="extReveal" aria-label="在文件夹中显示" title="在文件夹中显示这个文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.7c.4 0 .8.2 1.1.5L11.8 7h7.7A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg></button>` : ''}
           <button class="btn more ico" id="shareBtn" title="分享" aria-label="分享"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2"/></svg></button>
           ${kidsMode() ? '' : `<button class="btn more ico ib fav ${favs.has(site, id) ? 'on' : ''}" id="favBtn" title="${favs.has(site, id) ? '取消收藏' : '收藏'}" aria-label="收藏">${IC.heart}</button>`}
+          ${d.local ? `<button class="btn more ico ib" id="delBtn" ${ADMIN.on ? '' : 'hidden'} title="删除（移到回收站）" aria-label="删除">${IC.trash}</button>` : ''}
         </div></div></div>
       <div class="body">
         ${small ? '' : metaHtml}
@@ -2665,6 +2666,15 @@ async function openDetail(site, id, autoplay = false, replace = false, quiet = f
     if ($('#dlAllPause', m)) $('#dlAllPause', m).onclick = () => Promise.all(state.downloads.filter(j => j.site === site && j.vid === id && ACTIVE.includes(j.status)).map(j => req('PATCH', `/api/downloads?id=${j.id}&action=pause`))).then(() => refreshDownloads(m.ctl.signal)).then(paintDl);
     try { paintDl(); } catch (err) { console.error('paintDl', err); }
     fitPlay(m);
+    if ($('#delBtn', m)) {
+      adminCheck().then(on => { const b = $('#delBtn', m); if (b) b.hidden = !on; });
+      $('#delBtn', m).onclick = async () => {
+        if (!(await adminCheck(true))) return toast('需要先在设置里登录管理员');
+        const all = d.lines.flatMap(l => l.episodes), n = all.length;
+        if (!await trashLocal(all.map(e => fileIdOf(e.url)), n > 1 ? `把「${d.name}」的全部 ${n} 集移到回收站？` : `把「${d.name}」移到回收站？`)) return;
+        localGone(d); closeOverlay();
+      };
+    }
     if ($('#extPlay', m)) {
       $('#extPlay', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'play');
       $('#extReveal', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'reveal');
@@ -2929,7 +2939,7 @@ function openPlayer(startAt) {
   syncMedia();
   $('[data-act=star]').hidden = !live;
   $('[data-act=share]').hidden = cur.kind === 'local';   // 下载列表里的本地文件没有可分享的页面
-  paintVodActs();
+  paintVodActs(); paintDelAct();
   srcAlts = []; syncSrcAct();                       // 先不显示「切换源」, 查到别的源再出现
   if (cur.kind === 'vod' && !cur.d.local) {
     const nm = cur.d.name;
@@ -2964,6 +2974,26 @@ function paintVodActs() {
   const j = dlFor(cur.d.site, cur.d.id, cur.eps[cur.ep].url);
   setL('dl', !j ? '下载' : j.status === 'done' ? '已下载' : ACTIVE.includes(j.status) ? `${j.pct || 0}%` : j.status === 'paused' ? '继续' : '重试');
   dl.classList.toggle('on', j?.status === 'done');
+}
+// 「删除」(更多里): 管理员 + 本地资源才有。删的是正在播的这一集 (单集的片子就是整部)
+function paintDelAct() {
+  const b = $('[data-act=del]'); if (!b) return;
+  const mine = cur?.kind === 'vod' && cur.d.local;
+  b.hidden = !(mine && ADMIN.on);
+  if (mine && !ADMIN.on) adminCheck().then(on => { if (on && cur?.kind === 'vod' && cur.d.local) { b.hidden = false; syncMore(); } });
+  syncMore?.();
+}
+async function playerTrash(quiet) {
+  if (!cur || cur.kind !== 'vod' || !cur.d.local) return;
+  if (!(await adminCheck(true))) return quiet || toast('需要先在设置里登录管理员');
+  const d = cur.d, line = cur.line, idx = cur.ep, e = cur.eps[idx], many = cur.eps.length > 1, was = !video.paused;
+  $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false);
+  video.pause();
+  if (!await trashLocal([fileIdOf(e.url)], many ? `把「${d.name} · ${e.name}」移到回收站？` : `把「${d.name}」移到回收站？`)) { if (was) video.play().catch(() => {}); return; }
+  dropEpHist(d, line, idx);
+  cur.eps.splice(idx, 1);                      // 和 d.lines[line].episodes 是同一个数组
+  if (cur.eps.length) { cur.ep = Math.min(idx, cur.eps.length - 1); openPlayer(0); $('#modal')?.refresh?.(); return; }
+  localGone(d); closeAllOverlays();
 }
 // The player's buttons are an icon plus a small label (shown on touch screens, a tooltip on desktop).
 function setL(act, text) { const b = $(`[data-act=${act}]`); if (!b) return; const l = $('.l', b); if (l) l.textContent = text; b.title = text; }
@@ -3435,6 +3465,7 @@ player.addEventListener('click', e => {
   }
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); paintStar(liveFavs.has(c.url)); return; }
   if (act === 'more') { sysClose(); const m = $('.pmore'); m.hidden = !m.hidden; e.target.closest('[data-act]').setAttribute('aria-expanded', !m.hidden); return; }
+  if (act === 'del') return playerTrash();
   if (act === 'rate') return cycleRate();
   if (act === 'skipt') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSkipSheet(); }
   if (act === 'fs') return toggleFs();
@@ -3891,6 +3922,7 @@ addEventListener('keydown', e => {
   if (e.key === 'n' || e.key === 'PageDown') step(1);
   if (e.key === 'p' || e.key === 'PageUp') step(-1);
   if (e.key === 'f' && !hideFs()) toggleFs();
+  if ((e.key === 'Delete' || e.key === 'Backspace') && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && cur?.kind === 'vod' && cur.d.local) { e.preventDefault(); playerTrash(true); }   // 管理员 + 本地资源: 移到回收站 (有二次确认); Mac 键盘的「delete」是 Backspace
   if (e.key === 'm') video.muted = !video.muted;
   if (cur?.kind === 'live' && e.key === 'ArrowDown') { e.preventDefault(); step(1); }
   if (cur?.kind === 'live' && e.key === 'ArrowUp') { e.preventDefault(); step(-1); }
@@ -3906,6 +3938,43 @@ addEventListener('keydown', e => {
 // ---------- live ----------
 let serverInfo = null;
 const infoP = () => serverInfo ? Promise.resolve(serverInfo) : get('/api/info', null).then(j => (serverInfo = j), () => ({ urls: [], ffmpeg: false }));
+// ---------- 管理员删除本地资源: 文件移到服务器的回收站 (不是硬删), 一律先二次确认 ----------
+// 管理员身份是 HttpOnly 的 Cookie, 页面读不到, 只能问服务端 (/api/info 的 admin); 结果记 15 秒。
+const ADMIN = { on: false, at: 0, p: null };
+function adminCheck(force) {
+  if (!force && Date.now() - ADMIN.at < 15e3) return Promise.resolve(ADMIN.on);
+  return ADMIN.p || (ADMIN.p = get('/api/info', null).then(j => (ADMIN.on = !!j.admin), () => ADMIN.on).finally(() => { ADMIN.at = Date.now(); ADMIN.p = null; }));
+}
+const fileIdOf = url => (/\/media\/[fh]\/([0-9a-f]+)/.exec(url || '') || [])[1] || '';
+async function trashLocal(ids, what) {
+  ids = ids.filter(Boolean);
+  if (!ids.length) { toast('找不到这个文件'); return false; }
+  if (!confirm(`${what}\n\n文件会移到回收站（连同同名的 nfo / 字幕 / 海报），可以从回收站找回。`)) return false;
+  try {
+    const r = await req('POST', '/api/local/trash', { ids });
+    apiMemo.clear(); tabKeep.clear();
+    toast(r.failed ? `已移到回收站 ${r.trashed} 个，${r.failed} 个失败` : '已移到回收站');
+    return true;
+  } catch (e) { if (/管理员/.test(e.message)) ADMIN.on = false; toast(e.message); return false; }
+}
+// 一集删掉以后: 观看记录里指着它的去掉, 排在它后面的集号减一
+function dropEpHist(d, line, idx) {
+  const h = hist.get(d.site, d.id); if (!h || h.line !== line) return;
+  if (h.ep === idx) hist.del(d.site, d.id); else if (h.ep > idx) hist.put({ ...h, ep: h.ep - 1 });
+}
+// 整部都没了: 记录 / 收藏 / 页面上的卡片一起清掉
+function localGone(d) {
+  hist.del(d.site, d.id); if (favs.has(d.site, d.id)) favs.del(d.site, d.id);
+  $$(`#view .card[data-site="${CSS.escape(d.site)}"][data-id="${CSS.escape(d.id)}"]`).forEach(c => c.remove());
+  apiMemo.clear(); tabKeep.clear();
+}
+// 播放页 + 详情页一起退掉 (一次 history.back 一层, 隔开转场锁)
+function closeAllOverlays() {
+  let n = 0;
+  const m = $('#modal'); if (m) m.style.visibility = 'hidden';
+  const tick = () => { if ((!playerOpen() && !$('#modal')) || ++n > 4) return; closeOverlay(); setTimeout(tick, 520); };
+  tick();
+}
 infoP().catch(() => {});   // 提前拿局域网地址：分享要同步生成链接再复制（Safari 里 await 之后复制会被拒）
 // Covers: two at a time (ffmpeg can take seconds per channel), dropped when the page changes.
 const thumbQueue = []; let thumbActive = 0;

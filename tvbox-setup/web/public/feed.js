@@ -13,6 +13,7 @@ const I = {
   list: ic('<path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h10v2H4z"/>'),
   share: ic('<circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>'),
   info: ic('<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-6h2zm0-8h-2V7h2z"/>'),
+  trash: ic('<path d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>'),
   ban: ic('<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 0 1 6.3 12.9L7.1 5.7A7.9 7.9 0 0 1 12 4zM5.7 7.1l11.2 11.2A8 8 0 0 1 5.7 7.1z"/>'),
   vol: ic('<path d="M4 9v6h4l5 5V4L8 9z"/><path class="w" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2"/><path class="x" d="M16 9l6 6M22 9l-6 6" stroke="currentColor" stroke-width="2"/>'),
   fs: ic('<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2"/>'),
@@ -41,6 +42,7 @@ root.innerHTML = `
     <button data-a="share" title="分享" aria-label="分享">${I.share}</button>
     <button data-a="detail" title="详情 (i)" aria-label="详情">${I.info}</button>
     <button data-a="dislike" title="不感兴趣 (d)" aria-label="不感兴趣">${I.ban}</button>
+    <button data-a="del" hidden title="删除（移到回收站）" aria-label="删除">${I.trash}</button>
   </div>
   <div class="fd-nav fd-fine"><button data-a="up" title="上一个 (↑)" aria-label="上一个">${I.up}</button><button data-a="down" title="下一个 (↓)" aria-label="下一个">${I.down}</button></div>
   <div class="fd-prog"><div class="rail"><i class="buf"></i><i class="played"></i><span class="marks"></span><b class="knob"></b></div></div>
@@ -764,6 +766,27 @@ sheetEl.addEventListener('click', e => {
   if (n) { switchEp(s, s.line, +n.dataset.se); sheetEl.hidden = true; }
 });
 function closeOverlays() { menuEl.hidden = true; sheetEl.hidden = true; }
+// 管理员删本地资源: 删当前这一集 (单集的片子 = 整部)。还有别的集就接着播下一集, 整部没了就跳到下一部
+async function feedTrash(s) {
+  const d = s.d; if (!d?.local) return;
+  if (!(await adminCheck(true))) return toast('需要先在设置里登录管理员');
+  const idx = s.ep, line = s.line, e = s.eps[idx], many = s.eps.length > 1, was = !s.video.paused;
+  s.video.pause();
+  if (!await trashLocal([fileIdOf(e.url)], many ? `把「${d.name} · ${e.name}」移到回收站？` : `把「${d.name}」移到回收站？`)) { if (was) tryPlay(s); return; }
+  dropEpHist(d, line, idx);
+  s.eps.splice(idx, 1);                          // 和 d.lines[line].episodes 是同一个数组
+  closeOverlays();
+  if (s.eps.length) {
+    Object.assign(s, { ep: Math.min(idx, s.eps.length - 1), startAt: 0, watched: 0, judged: false, stage: 0, compat: false, tried: null });
+    paintInfo(s); attach(s); syncRail(); return;
+  }
+  localGone(d);
+  F.items.splice(F.idx, 1);
+  if (!F.items.length) { toast('没有更多了'); return closeOverlay(); }
+  if (F.idx >= F.items.length) F.idx = F.items.length - 1;
+  sync(); activate(); warm();
+}
+
 
 // ---------- actions ----------
 function syncRail() {
@@ -773,6 +796,9 @@ function syncRail() {
   q('[data-a=fav]').classList.toggle('on', !!d && favs.has(d.site, d.id));
   q('[data-a=fav]').hidden = kidsMode();
   q('[data-a=eps]').hidden = !d || (s.eps.length < 2 && d.lines.length < 2);
+  // 删除: 管理员 + 本地资源 (管理员身份异步问服务端, 问到了再补一次)
+  q('[data-a=del]').hidden = !(d?.local && ADMIN.on);
+  if (d?.local && !ADMIN.on) adminCheck().then(on => { if (on && cur() === s) syncRail(); });
   q('.fd-mode span').textContent = modeLabel();
   paintMute();
 }
@@ -811,6 +837,7 @@ function act(a) {
   if (a === 'eps') { if (!s.d) return; if (sheetEl.hidden) { renderSheet(); sheetEl.hidden = false; menuEl.hidden = true; } else sheetEl.hidden = true; return; }
   if (a === 'share') { if (s.it.site === 'local') return; return shareNow(vodHref(s.it.site, s.it.id), s.it.name || s.d?.name || ''); }
   if (a === 'detail') { s.video.pause(); return openDetail(s.it.site, s.it.id); }
+  if (a === 'del') return feedTrash(s);
   if (a === 'dislike') { bump(s.it, s.d, -3); markSeen(s.it); toast('已减少这类推荐'); s.judged = true; return go(1); }
 }
 root.addEventListener('click', e => {

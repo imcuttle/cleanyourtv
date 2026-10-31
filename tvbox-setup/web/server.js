@@ -2586,6 +2586,66 @@ rpcHandlers.localSave = b => {
   if (localCfg.enabled) scanLocal();
   return { cfg: localCfg, status: localStatus() };
 };
+// ---- 管理员删除本地资源: 文件(连同同名的 nfo / 字幕 / 海报)移到系统回收站, 不是直接删除 ----
+// 系统回收站调不起来时宁可失败也不硬删。返回仍留在原地的路径。
+const SIDECAR_EXT = new Set(['nfo', 'srt', 'ass', 'ssa', 'vtt', 'sub', 'idx', 'jpg', 'jpeg', 'png', 'webp']);
+async function trashPaths(list) {
+  const left = () => list.filter(f => fs.existsSync(f));
+  const run = (cmd, args, env) => new Promise(ok => {
+    let p; try { p = spawn(cmd, args, { stdio: 'ignore', windowsHide: true, env: env ? { ...process.env, ...env } : process.env }); } catch { return ok(); }
+    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} }, 60000);
+    p.on('error', () => { clearTimeout(t); ok(); });
+    p.on('close', () => { clearTimeout(t); ok(); });
+  });
+  if (!left().length) return [];
+  if (process.platform === 'darwin') {
+    // 系统的 NSFileManager.trashItem: 进「废纸篓」、能「放回原处」、跨卷也行, 而且不用弹「允许控制 Finder」的授权
+    await run('osascript', ['-l', 'JavaScript', '-e', 'ObjC.import("Foundation"); function run(argv) { var fm = $.NSFileManager.defaultManager; for (var i = 0; i < argv.length; i++) fm.trashItemAtURLResultingItemURLError($.NSURL.fileURLWithPath(argv[i]), null, null); return ""; }', ...left()]);
+    for (const f of left()) {    // 上面没成: 直接挪进 ~/.Trash (同一个卷上才行)
+      try {
+        const dir = path.join(os.homedir(), '.Trash'); let to = path.join(dir, path.basename(f));
+        if (fs.existsSync(to)) to = path.join(dir, path.basename(f, path.extname(f)) + ' ' + Date.now() + path.extname(f));
+        fs.renameSync(f, to);
+      } catch {}
+    }
+  } else if (process.platform === 'win32') {
+    const ps = "Add-Type -AssemblyName Microsoft.VisualBasic; foreach ($p in (ConvertFrom-Json $env:TVBOX_TRASH)) { try { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($p, 'OnlyErrorDialogs', 'SendToRecycleBin') } catch {} }";
+    await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { TVBOX_TRASH: JSON.stringify(left()) });
+  } else {
+    await run('gio', ['trash', '--', ...left()]);
+    if (left().length) await run('trash-put', ['--', ...left()]);
+  }
+  return left();
+}
+function sidecarsOf(file) {
+  const dir = path.dirname(file), base = path.basename(file, path.extname(file)).toLowerCase();
+  try { return fs.readdirSync(dir).filter(n => SIDECAR_EXT.has(path.extname(n).slice(1).toLowerCase()) && path.basename(n, path.extname(n)).toLowerCase() === base).map(n => path.join(dir, n)); } catch { return []; }
+}
+rpcHandlers.localTrash = async ({ ids }) => {
+  const snap = localIndex(), done = [], failed = [];
+  for (const id of ids) {
+    const f = snap.byFile.get(id); if (!f) continue;
+    try { hlsJobs.get(id)?.proc?.kill('SIGKILL'); } catch {}
+    const left = await trashPaths([f.path, ...sidecarsOf(f.path)]);
+    if (left.includes(f.path)) failed.push(id); else done.push(id);
+  }
+  if (done.length) {
+    const gone = new Set(done), idx = readJson(LOCAL_INDEX, null);
+    if (idx && Array.isArray(idx.items)) {
+      idx.items = idx.items.map(it => it.files.some(f => gone.has(f.id)) ? { ...it, files: it.files.filter(f => !gone.has(f.id)) } : it).filter(it => it.files.length);
+      const used = new Set(idx.items.map(it => it.cat));
+      idx.cats = (idx.cats || []).filter(c => used.has(c.id));
+      fs.writeFileSync(LOCAL_INDEX + '.tmp', JSON.stringify(idx));
+      for (let i = 0; ; i++) {
+        try { fs.renameSync(LOCAL_INDEX + '.tmp', LOCAL_INDEX); break; }
+        catch (e) { if (i >= 8 || !/^(EPERM|EBUSY|EACCES)$/.test(e.code)) throw e; await new Promise(ok => setTimeout(ok, 60 * (i + 1))); }
+      }
+      localSnap.mtime = -2;
+    }
+    if (localScan.running) scanQueued = true;    // 正在扫描的那一遍可能带着旧结果, 跑完再扫一遍
+  }
+  return { done, failed };
+};
 if (IS_MEDIA) {
   setTimeout(() => { if (localCfg.enabled && localCfg.dirs.length) scanLocal(); }, 1500).unref();
   setInterval(() => {
@@ -3246,7 +3306,7 @@ async function api(route, q, res, req) {
   if (process.env.TVBOX_TEST_HOOKS === '1' && route === '_busy') { const t = Date.now() + (Number(q.get('ms')) || 3000); while (Date.now() < t); return send(res, 200, { ok: 1 }); }
   if (process.env.TVBOX_TEST_HOOKS === '1' && route === '_throw') { setTimeout(() => { throw new Error('test boom'); }, 10); return send(res, 200, { ok: 1 }); }
   if (route === 'health') return send(res, 200, { pid: process.pid, uptime: Math.round(process.uptime()), ...GUARD.stats, limits: global.__tvboxGuard?.limits || null });
-  if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ...(TLS?.cert ? { httpsUrls: lanIps().map(ip => `https://${ip}:${HTTPS_PORT}`) } : {}), ffmpeg: !!FFMPEG, loopback: isLoopback(req) });
+  if (route === 'info') return send(res, 200, { urls: lanIps().map(ip => `http://${ip}:${PORT}`), ...(TLS?.cert ? { httpsUrls: lanIps().map(ip => `https://${ip}:${HTTPS_PORT}`) } : {}), ffmpeg: !!FFMPEG, loopback: isLoopback(req), admin: adminAuthed(req) });
 
   // ---- 本地媒体: folders, scan, and the CMS API for TVBox / FongMi ----
   if (route === 'local') {
@@ -3266,6 +3326,16 @@ async function api(route, q, res, req) {
     if (!await fsp.stat(f.path).then(st => st.isFile(), () => false)) return send(res, 404, { error: '文件已不在磁盘上，重新扫描一下' });
     try { await openPath(f.path, b.action === 'reveal'); } catch (e) { return send(res, 500, { error: '打开失败：' + (e.message || e) }); }
     return send(res, 200, { ok: true });
+  }
+  // 管理员把本地资源的文件移到回收站 (不是硬删)。ids = 文件 id (扫描索引里的 files[].id), 不接受路径
+  if (route === 'local/trash' && write) {
+    if (!adminAuthed(req)) return send(res, 403, { error: '需要管理员令牌', admin: true });
+    const b = await readBody(req), snap = localIndex();
+    const ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).map(str))].filter(id => { const f = snap.byFile.get(id); return f && localCfg.enabled && localCatOk(snap.catById.get(f.item.cat)); }).slice(0, 500);
+    if (!ids.length) return send(res, 404, { error: '找不到文件，可能已经被删除，重新扫描一下' });
+    const r = await rpc('localTrash', { ids }, 120000).catch(e => ({ done: [], failed: ids, error: e.message }));
+    if (!r.done.length) return send(res, 500, { error: '移到回收站失败' + (r.error ? '：' + r.error : '，系统回收站没有响应（文件可能正被占用，或没有权限）') });
+    return send(res, 200, { ok: true, trashed: r.done.length, failed: r.failed.length });
   }
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
   if (route === 'speed') return send(res, 200, await speedOf(q.get('u') || '', q.get('fresh') === '1'));
