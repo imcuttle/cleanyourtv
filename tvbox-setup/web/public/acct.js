@@ -16,6 +16,11 @@ const KV = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favC
 const rj = (k, d) => { try { const v = JSON.parse(ls.getItem(k)); return v ?? d; } catch { return d; } };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 账号管理 (登录 / 注册 / 切换 / 退出 / 改密码 / 删号 / 清空 / 导入) 只有安全级别为「全部」时才能操作，和源设置一样；app.js 的 state.level 随时是最新的
+const LV = { kids: '儿童', standard: '标准' };
+const lockedNow = () => typeof state !== 'undefined' && !!state.level && state.level !== 'all';
+const LOCK_MSG = () => `账号管理只能在安全级别「全部」下操作（现在是「${LV[state.level] || state.level}」）`;
+const guard = () => { if (lockedNow()) throw new Error(LOCK_MSG()); };
 
 let accts = rj(LIST, []).filter(a => a && a.id && a.token);
 let me = accts.find(a => a.id === Number(ls.getItem(ACTIVE))) || null;
@@ -162,17 +167,20 @@ const API = {
   op: queue, flush, pull,
   ready: null,
   async register(username, password, withGuest) {
+    guard();
     const r = await call('register', 'POST', { username, password, import: withGuest && guestHasData() ? guestSnapshot() : undefined });
     if (!r.ok) throw new Error(r.j.error || '注册失败');
     return enroll(r.j);
   },
   async login(username, password) {
+    guard();
     const r = await call('login', 'POST', { username, password });
     if (!r.ok) throw new Error(r.j.error || '登录失败');
     return enroll(r.j);
   },
   switchTo,
   async remove(id) {
+    guard();
     const a = accts.find(x => x.id === id); if (!a) return;
     call('logout', 'POST', {}, a.token).catch(() => {});
     accts = accts.filter(x => x.id !== id); saveList(); wipeLocal(id);
@@ -180,20 +188,23 @@ const API = {
   },
   async info() { if (!me) return null; const r = await call('me', 'GET', undefined, me.token); if (r.status === 401 && r.j.session === false) { lost(me); return null; } return r.ok ? r.j : null; },
   async importGuest() {
+    guard();
     if (!me) return null;
     const r = await call('import', 'POST', guestSnapshot(), me.token);
     if (!r.ok) throw new Error(r.j.error || '导入失败');
     box = []; persist(); await pull(); return r.j.stats;
   },
   async clear(what) {
+    guard();
     if (!me) return null;
     await flush();
     const r = await call('clear', 'POST', { what }, me.token);
     if (!r.ok) throw new Error(r.j.error || '清空失败');
     box = []; persist(); await pull(); return r.j.stats;
   },
-  async password(old, next) { const r = await call('password', 'POST', { old, next }, me.token); if (!r.ok) throw new Error(r.j.error || '修改失败'); },
+  async password(old, next) { guard(); const r = await call('password', 'POST', { old, next }, me.token); if (!r.ok) throw new Error(r.j.error || '修改失败'); },
   async destroy(password) {
+    guard();
     const who = me;
     const r = await call('delete', 'POST', { password }, who.token);
     if (!r.ok) throw new Error(r.j.error || '删除失败');
@@ -220,7 +231,7 @@ function paintBtn() {
   btn.title = me ? '账号：' + me.name : '访客（本机）· 点击登录 / 切换账号';
 }
 function paintMenu() {
-  menu.innerHTML = `<div class="mhead">切换账号</div>
+  menu.innerHTML = `<div class="mhead">切换账号${lockedNow() ? ' · 已锁定' : ''}</div>
     <button type="button" data-id="0" class="${me ? '' : 'on'}">${guestAv}<span>访客（本机）</span>${me ? '' : '<i>当前</i>'}</button>
     ${accts.map(a => `<button type="button" data-id="${a.id}" class="${me && me.id === a.id ? 'on' : ''}">${avatar(a.name)}<span>${esc(a.name)}</span>${me && me.id === a.id ? '<i>当前</i>' : ''}</button>`).join('')}`;
 }
@@ -241,6 +252,7 @@ function mountHeader() {
   menu.onclick = e => {
     const b = e.target.closest('button'); if (!b) return;
     Pop.close();
+    if (lockedNow()) return say(LOCK_MSG());
     const id = Number(b.dataset.id);
     if ((me ? me.id : 0) !== id) switchTo(id);
   };
@@ -265,6 +277,14 @@ async function mountSettings(el) {
   if (!el.isConnected) return;
   const render = () => {
     const stats = info && info.stats;
+    if (lockedNow()) {   // 安全级别不是「全部」: 只看得到当前是谁, 一切操作都收起来 (服务端同样拒绝)
+      el.innerHTML = `<h2>账号管理</h2>
+        <div class="acct-now">${me ? avatar(me.name, 'lg') : guestAv.replace('class="av guest"', 'class="av guest lg"')}
+          <div class="nm"><b>${me ? esc(me.name) : '访客（本机）'}</b><small>${me ? '已登录 · 数据在服务端' : '不登录，数据只存在这个浏览器里'}</small></div>
+          ${stats ? `<div class="acct-stats"><span><b>${stats.history}</b>观看记录</span><span><b>${stats.favs}</b>收藏</span><span><b>${stats.liveFavs}</b>直播收藏</span></div>` : ''}</div>
+        <section class="locklote"><h2>账号管理已锁定</h2><p class="hint">当前安全级别是「${esc(LV[state.level] || state.level)}」。登录、注册、切换账号、退出、改密码、删除账号、清空和导入数据只能在「全部」下操作。想改的话，先在上面把安全级别切到「全部」。已登录的账号照常同步观看进度和收藏。</p></section>`;
+      return;
+    }
     const rows = [{ id: 0, name: '访客（本机）', guest: 1 }, ...accts].map(a => `
       <div class="acct-row ${((me ? me.id : 0) === a.id) ? 'cur' : ''}">${a.guest ? guestAv : avatar(a.name)}
         <div class="nm"><b>${esc(a.name)}</b><small>${a.guest ? '不登录，数据只存在这个浏览器里' : '已登录 · 数据在服务端'}</small></div>

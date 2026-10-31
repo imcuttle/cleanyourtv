@@ -3666,7 +3666,8 @@ async function api(route, q, res, req) {
 let usersDb = null;
 rpcHandlers.acct = args => {
   usersDb = usersDb || require('./users')({ file: path.join(DATA, 'users.sqlite'), allowRegister: process.env.TVBOX_ALLOW_REGISTER !== '0' });
-  return usersDb.handle(args);
+  // 账号管理 (注册 / 登录 / 改密码 / 删号 / 清空 / 导入) 只在安全级别「全部」下能操作，和源设置一样；已登录账号的同步照常
+  return usersDb.handle({ ...args, lockAcct: safety.level !== 'all', level: safety.level });
 };
 
 // ======================= leader-side handlers =======================

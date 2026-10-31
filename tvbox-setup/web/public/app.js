@@ -2641,7 +2641,11 @@ async function renderDownloads() {
   };
   const fetchJobs = async () => {
     const j = await api('downloads');
-    state.downloads = jobs = j.jobs; free = j.free; maxJobs = j.maxJobs;
+    state.downloads = j.jobs; free = j.free; maxJobs = j.maxJobs;
+    // 成人下载: 安全级别不是「全部」时一律不显示; 「全部」下只有当前源本身标了成人才显示 (本地源不因为是本地源就算成人, 看它自己有没有标)
+    const curAdult = !!state.sites.find(s => s.key === state.site)?.adult;
+    const isAdult = x => !!x.adult || !!state.sites.find(s => s.key === x.site)?.adult;
+    jobs = j.jobs.filter(x => state.level === 'all' ? !isAdult(x) || curAdult : !isAdult(x) && (x.site === 'local' || state.sites.some(s => s.key === x.site)));
   };
   const draw = async () => { await fetchJobs(); if (!jobs.length) selMode = false; paint(); };
   const tick = async () => {
@@ -2725,7 +2729,10 @@ async function renderDownloads() {
     }
     const op = ob.dataset.op;
     if (op === 'more') return openMore(ob);
-    if (ob.dataset.all !== undefined) { await req('PATCH', `/api/downloads?id=*&action=${op}`); return draw(); }
+    if (ob.dataset.all !== undefined) {   // 只动页面上看得到的 (被隐藏的成人下载不受「全部暂停 / 全部开始」影响)
+      await Promise.all(jobs.filter(x => op === 'pause' ? ACTIVE.includes(x.status) : ['paused', 'error'].includes(x.status)).map(x => req('PATCH', `/api/downloads?id=${x.id}&action=${op}`).catch(() => {})));
+      return draw();
+    }
     const id = ob.closest('.dl, .dlw').dataset.id;
     const x = state.downloads.find(j => j.id === id);
     if (op === 'play') {

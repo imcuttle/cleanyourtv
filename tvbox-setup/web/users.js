@@ -11,6 +11,7 @@
 //   GET  sync                                                  -> { user, history, prog, favs, liveFavs, kv }
 //   POST ops               {ops:[…]}                           -> { ok, applied }   (客户端的改动队列，按顺序执行)
 //   POST import            {history, prog, favs, liveFavs, kv} -> { ok, stats }      (把访客数据并入当前账号)
+// 注册 / 登录 / 改密码 / 删号 / 清空 / 导入 只有安全级别为「全部」时才允许 (handle 的 lockAcct 参数，status 里带 locked)。
 // 分集播放进度 (prog)：每个账号、每部片的每一集各一条 {site,id,ep,t,dur,done}，只记总长超过 3 分钟的视频；
 // 改动走 ops：prog.put {e} / prog.del {site,id,ep?} / prog.dropep {site,id,ep} (删了一集，后面的集号减一) / prog.clear
 //   POST password          {old, next}                         -> { ok }
@@ -221,10 +222,13 @@ module.exports = function createUsers({ file, allowRegister = true }) {
     };
   }
 
-  async function handle({ sub, method, body = {}, session = '', ip = '', ua = '' }) {
+  // 安全级别不是「全部」时不允许的账号操作 (查看 / 同步 / 退出会话不受影响)
+  const MANAGE = new Set(['register', 'login', 'password', 'delete', 'clear', 'import']);
+  async function handle({ sub, method, body = {}, session = '', ip = '', ua = '', lockAcct = false, level = '' }) {
     try { open(); } catch (e) { return fail(500, '账号数据库打不开：' + e.message); }
     const write = method !== 'GET';
-    if (sub === 'status') return { body: { enabled: true, register: allowRegister, users: one('SELECT COUNT(*) n FROM users').n } };
+    if (sub === 'status') return { body: { enabled: true, register: allowRegister, users: one('SELECT COUNT(*) n FROM users').n, locked: lockAcct, level } };
+    if (lockAcct && write && MANAGE.has(sub)) return fail(403, '账号管理只能在安全级别「全部」下操作', { locked: true });
 
     if (sub === 'register' && write) {
       if (!allowRegister) return fail(403, '这台服务器没有开放注册（环境变量 TVBOX_ALLOW_REGISTER=0）');
