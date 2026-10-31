@@ -340,7 +340,7 @@ a.ch { color: inherit; }
 
 /* 榜单 */
 .charts .pagehead { margin-bottom: 14px; }
-.chome, #view > .page.chome { padding-bottom: 0; min-height: 0; }
+.chome, #view > .page.chome, .ptrsnap > .page.chome { padding-bottom: 0; min-height: 0; }
 .srows { padding-bottom: 40px; }
 .srows .row h2 small { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 10px; }
 .rtitle { font-size: 20px; margin: 22px 0 10px; } .rtitle .lan { font-weight: 400; margin-left: 8px; }
@@ -2131,7 +2131,7 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .csum { margin: -4px 0 14px; font-size: 13px; letter-spacing: .02em; }
 
 /* 状态卡: 下载速度 / 进行中 / 已用 / 剩余 */
-.dstats { display: grid; grid-template-columns: repeat(4, 1fr); max-width: 1000px; margin: 2px 0 18px; padding: 14px 6px; border-radius: 16px; background: linear-gradient(180deg, #232326, var(--surface)); border: 1px solid var(--hair); box-shadow: 0 8px 24px #0005; }
+.dstats { display: grid; grid-template-columns: repeat(4, 1fr); margin: 2px 0 18px; padding: 14px 6px; border-radius: 16px; background: linear-gradient(180deg, #232326, var(--surface)); border: 1px solid var(--hair); box-shadow: 0 8px 24px #0005; }
 .dstats > div { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; padding: 0 4px; }
 .dstats > div + div { border-left: 1px solid var(--hair); }
 .dstats small { font-size: 11px; color: var(--muted); letter-spacing: .04em; white-space: nowrap; }
@@ -2140,7 +2140,7 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .dstats b.live { color: #46d369; }
 
 /* 下载列表: 大屏多列, 小屏单列; 封面在左 */
-.dls { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); gap: 12px; max-width: 1000px; }
+.dls { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); gap: 12px; }
 .dlw { position: relative; border-radius: 16px; overflow: hidden; }
 .dlx { display: none; }   /* 左滑删除只在小屏 (下面小屏块里才显示) */
 .dl { position: relative; display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 12px; border-radius: 16px; background: var(--surface); border: 1px solid var(--hair); transition: background .15s, border-color .15s; }
@@ -2190,7 +2190,6 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 @media (min-width: 1100px) { .dl { grid-template-columns: 104px minmax(0, 1fr) auto; } .dl .thumb { width: 104px; } .dstats b { font-size: 19px; } }
 .pop.dlmenu button svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .pop.dlmenu .p-head b { font-weight: 600; font-size: 14px; color: #aeaeb2; display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dlpage > .pagehead { max-width: 1000px; }   /* 下载页内容限宽 1000, 顶栏按钮跟着靠内容右缘 */
 
 
 /* ---------- 收藏合集: 放进合集的浮窗 / 管理合集 / 多选里的「合集」 ---------- */
@@ -2244,3 +2243,18 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .coll.colrows .row { margin-left: -4vw; margin-right: -4vw; }
 .coll.colrows .row h2 { margin-left: 4vw; margin-right: 4vw; }
 .coll.colrows .scroller { padding-left: 4vw; padding-right: 4vw; scroll-padding-left: 4vw; }
+
+/* ---------- 大屏的多选 (下载 / 收藏 / 历史): 不用手机那条底部栏, 操作都在顶栏右侧 ---------- */
+.seltools { display: none; }
+@media (min-width: 761px) {
+  #selbar { display: none !important; }
+  .seltools { display: flex; align-items: center; gap: 8px; }
+  .seltools button, .pagehead.cathead .selok { height: 36px; padding: 0 16px; border: 0; border-radius: 18px; background: var(--surface2); color: #fff; font-size: 14px; font-weight: 600; white-space: nowrap; transition: background .15s, opacity .15s; }
+  .seltools button:hover:not(:disabled), .pagehead.cathead .selok:hover { background: #ffffff2e; }
+  .seltools button.danger { background: #e5484d; }
+  .seltools button.danger:hover:not(:disabled) { background: #f0565b; }
+  .seltools button:disabled { opacity: .4; cursor: default; }
+  .pagehead.cathead .selok { background: #fff; color: #000; }
+  .pagehead.cathead .selok:hover { background: #e8e8ea; }
+  .selmode .card, .dls.sel .dl { user-select: none; }
+}

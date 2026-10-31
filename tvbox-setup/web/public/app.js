@@ -1205,7 +1205,21 @@ function selBarSet(on, o = {}) {
   el.querySelector('.sn').textContent = o.count ? `已选 ${o.count} 项` : '请选择';
   const d = el.querySelector('.sd'); d.textContent = o.delLabel || '删除'; d.disabled = !o.count;
   const c = el.querySelector('.sc'); c.hidden = !o.onCol; c.disabled = !o.count;
+  // 大屏不用底部栏: 同样的操作在顶栏右侧 (全选 / 合集 / 删除 / 完成), 标题里写着已选几项
+  const t = $('.cathead .seltools');
+  if (t) {
+    const all = $('[data-st=all]', t), col = $('[data-st=col]', t), del = $('[data-st=del]', t);
+    all.textContent = o.total && o.count >= o.total ? '取消全选' : '全选'; all.onclick = () => o.onAll();
+    col.hidden = !o.onCol; col.disabled = !o.count; col.onclick = () => o.onCol?.();
+    del.textContent = o.delLabel || '删除'; del.disabled = !o.count; del.onclick = () => o.onDel();
+  }
 }
+const selTools = '<span class="seltools"><button type="button" data-st="all"></button><button type="button" data-st="col" hidden>合集</button><button type="button" data-st="del" class="danger"></button></span>';
+// Esc = 退出多选 (大屏)
+addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !document.getElementById('selbar') || $('#modal') || document.body.classList.contains('pop-open') || !player.hidden || isOverlayHash(location.hash)) return;
+  const b = $('.cathead .selok'); if (b) { e.preventDefault(); b.click(); }
+});
 function newPage() {
   selBarSet(false); view.classList.remove('selmode');
   closeAdminEs();
@@ -1976,7 +1990,7 @@ function renderCollection(kind, focusId = '') {
     const fc = focusCol(), shown = fc ? list.filter(f => favInCol(f, fc.id)) : list;
     const gs = fav && !fc ? groups() : null, rows = gs && gs.length > 1;
     const title = fc ? fc.name : T.name;
-    const head = selMode ? '<div class="hact"><button type="button" class="selok" data-sel="done">完成</button></div>'
+    const head = selMode ? `<div class="hact">${selTools}<button type="button" class="selok" data-sel="done">完成</button></div>`
       : (list.length || (fav && favCols.all().length)) ? `<div class="hact">${list.length ? `<button class="small ibs" data-feed="${kind}" ${fc ? `data-col="${esc(fc.id)}"` : ''} title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button>` : ''}${fav ? `<button class="small ibs" data-colmgr title="管理合集" aria-label="管理合集">${IC.folder}</button>` : ''}${list.length ? `<button class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button>` : ''}</div>` : '';
     const body = !shown.length ? `<p class="empty hempty">${fc ? '这个合集还没有内容。收藏影片时可以放进来，或在多选里选「合集」。' : T.empty}</p>`
       : rows ? gs.map(g => row(g.name, g.items, `#/favorites/${encodeURIComponent(g.id)}`, sub, { removable: 'fav', extra: `<small class="rcount">${g.items.length}</small>` })).join('')
@@ -2563,7 +2577,7 @@ async function renderDownloads() {
     const open = new Set($$('.dlw.open', view).map(w => w.dataset.id));
     const anyActive = jobs.some(x => ACTIVE.includes(x.status)), anyPaused = jobs.some(x => ['paused', 'error'].includes(x.status));
     const head = selMode
-      ? `<div class="hact"><button type="button" class="selok" data-sel="done">完成</button></div>`
+      ? `<div class="hact">${selTools}<button type="button" class="selok" data-sel="done">完成</button></div>`
       : `<div class="hact">
         ${anyActive ? `<button class="small ibs" data-op="pause" data-all title="全部暂停" aria-label="全部暂停">${IC.pause}</button>` : anyPaused ? `<button class="small ibs" data-op="resume" data-all title="全部开始" aria-label="全部开始">${IC.play}</button>` : ''}
         ${jobs.length ? `<button class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button>` : ''}</div>`;
@@ -5907,7 +5921,7 @@ function freezeView() {
   const s = document.createElement('div'); s.className = 'ptrsnap';
   s.append(...[...view.childNodes].map(n => n.cloneNode(true)));
   s.querySelectorAll('video, audio').forEach(v => v.remove());
-  s.querySelectorAll('[id]').forEach(e => e.removeAttribute('id'));
+  // id 不能去掉: 样式里有 #liveHead / #grid … 这类按 id 写的规则, 去掉后垫图的版式和真页面对不上 (直播页右上角的源选择会「跳」一下)。垫图在 <body> 末尾, 按 id 找元素总是先找到真页面里的那个
   s.setAttribute('aria-hidden', 'true');
   document.body.append(s);
   return s;
@@ -5916,6 +5930,10 @@ async function thawView(s, t0) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(Math.max(0, 450 - (Date.now() - t0)));                 // 至少转一会儿, 让人看到刷新了
   // 首屏 (含横向滚动行的可见部分) 的封面要等到真正显出来 (.ok), 不是只等「下载完」: 图片下载完到淡入完成之间还有 0.35 秒, 这段时间卡片只有深色底, 垫图撤掉就是「黑一下」
+  // 页面还在转圈 / 榜单的灰色占位卡还没换成真内容: 先等它 (最多 ~4 秒), 否则垫图一撤就是一片黑 + 一个转圈
+  const inView = el => { const r = el.getBoundingClientRect(); return r.top < innerHeight && r.bottom > 0 && r.left < innerWidth && r.right > 0 && el.isConnected; };
+  const loading = () => $$('#view .spinner').some(inView) || $$('#view .card .name').some(n => !n.textContent.trim() && inView(n));
+  for (let i = 0; i < 65 && loading(); i++) await sleep(60);
   const seen = () => $$('#view img:not(.ok)').filter(im => { const r = im.getBoundingClientRect(); return r.top < innerHeight && r.bottom > 0 && r.left < innerWidth && r.right > 0 && im.isConnected; });
   for (let i = 0; i < 30 && seen().length; i++) await sleep(60);       // 最多再等 ~1.8 秒
   await sleep(380);                                                      // 让 .ok 之后的淡入走完
