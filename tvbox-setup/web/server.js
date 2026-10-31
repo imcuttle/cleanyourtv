@@ -2610,7 +2610,9 @@ async function trashPaths(list) {
   const hint = c => ({ 0x20: '文件正被别的程序占用', 0x21: '文件正被别的程序占用', 0x5: '没有权限（被拒绝访问）', 0x78: '没有权限（被拒绝访问）', 0x7C: '路径无效（可能太长）', 0x75: '回收站放不下这个文件（太大，或这个盘没有回收站）',
     0x74: '不能删除根目录', 0x402: '未知错误', 0x71: '源和目标相同', 0x76: '路径太长' })[c] || '系统错误';
   const run = (cmd, args, env, pipeOut) => new Promise(ok => {
-    let p, out = '', err = ''; try { p = spawnRaw(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: env ? { ...process.env, ...env } : process.env }); } catch (e) { trashErr = e.message; return ok(); }
+    const e0 = env ? { ...process.env, ...env } : { ...process.env };
+    if (/powershell/i.test(cmd)) { delete e0.PSModulePath; delete e0.PSExecutionPolicyPreference; }   // 服务若是从 PowerShell 7 窗口启动的, 它的 PSModulePath 会被 Windows PowerShell 5.1 继承, 5.1 就找不到自己的基础命令 (Add-Type / Test-Path 都「不是 cmdlet」)
+    let p, out = '', err = ''; try { p = spawnRaw(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: e0 }); } catch (e) { trashErr = e.message; return ok(); }
     const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} trashErr = '系统回收站 25 秒没有响应（可能弹出了需要确认的窗口，或这个盘的回收站放不下该文件）'; }, 25000);
     p.stdout.on('data', d => { if (out.length < 4000) out += d; });
     p.stderr.on('data', d => { if (err.length < 2000) err += d; });
@@ -2648,9 +2650,17 @@ async function trashPaths(list) {
       + 'public static int Trash(string p){string src=p+"\\0\\0";ushort fl=0x40|0x10|0x4|0x400|0x4000;'
       + 'if(IntPtr.Size==8){var f=new F64();f.fn=3;f.src=src;f.fl=fl;return O64(ref f);}else{var f=new F32();f.fn=3;f.src=src;f.fl=fl;return O32(ref f);}}}';
     // 输出全走 stdout 的 TVERR 行; $ProgressPreference + -OutputFormat Text 去掉 PowerShell 往 stderr 吐的 CLIXML 进度噪音 ("#< CLIXML <Objs …")
-    const ps = `$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; `
-      + `try { Add-Type -TypeDefinition @'\n${cs}\n'@ } catch { [Console]::Out.WriteLine('TVERR 编译回收站组件失败: ' + $_.Exception.Message); exit 1 } `
-      + `foreach ($p in ($env:TVBOX_TRASH -split '\\|')) { if ($p -and (Test-Path -LiteralPath $p)) { try { $r = [TvTrash]::Trash($p); if ($r -ne 0) { [Console]::Out.WriteLine('TVERR CODE ' + $r) } } catch { [Console]::Out.WriteLine('TVERR ' + $_.Exception.Message) } } }`;
+    // 全程只用 .NET 调用 (不依赖任何 cmdlet): 在命令模块加载不出来的 PowerShell 里也能跑、也能把错误说出来。
+    // 主路径: 编译上面的 SHFileOperation 小类。备用 (Add-Type 不可用 / 编译失败): Microsoft.VisualBasic 的 DeleteFile —— 它遇到「回收站放不下」会不问就永久删除,
+    // 所以备用路径自己先挡: 不是本地固定盘, 或文件超过盘容量的 10% (回收站默认上限), 一律按「回收站放不下」(0x75) 上报, 交给页面做第二次确认。
+    const ps = `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; $ok = $true; `
+      + `try { Add-Type -TypeDefinition @'\n${cs}\n'@ } catch { $ok = $false; $ce = $_.Exception.Message; try { [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.VisualBasic') } catch { [Console]::Out.WriteLine('TVERR 回收站组件不可用: ' + $ce); exit 1 } } `
+      + `foreach ($p in ($env:TVBOX_TRASH -split '\\|')) { if ($p -and [System.IO.File]::Exists($p)) { try { `
+      + `if ($ok) { $r = [TvTrash]::Trash($p); if ($r -ne 0) { [Console]::Out.WriteLine('TVERR CODE ' + $r) } } `
+      + `else { $fi = [System.IO.FileInfo]::new($p); $di = [System.IO.DriveInfo]::new($fi.Directory.Root.FullName); `
+      + `if ($di.DriveType -ne 'Fixed' -or $fi.Length -gt ($di.TotalSize * 0.1)) { [Console]::Out.WriteLine('TVERR CODE 117') } `
+      + `else { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($p, 'OnlyErrorDialogs', 'SendToRecycleBin') } } `
+      + `} catch { [Console]::Out.WriteLine('TVERR ' + $_.Exception.Message) } } }`;
     await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-OutputFormat', 'Text', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], { TVBOX_TRASH: left().join('|') }, true);
   } else {
     await run('gio', ['trash', '--', ...left()]);
