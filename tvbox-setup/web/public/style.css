@@ -2264,3 +2264,7 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .eps a.wp:hover, .pitems button.wp:not(.on):hover { background: linear-gradient(90deg, #ffffff3d var(--wp), #3a3a3a var(--wp)); }
 .eps a.watched, .pitems button.watched:not(.on) { color: #8a8a8a; }
 .eps a.watched::before, .pitems button.watched:not(.on) span::before { content: '✓ '; color: #46d369; font-size: 11px; }
+
+/* 注册时选安全级别 */
+.acct-lv { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.acct-lv .seg { display: inline-flex; }

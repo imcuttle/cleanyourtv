@@ -1,6 +1,6 @@
 // Service worker：PWA 外壳离线可用 + 冷启动不等网络；/api/sites 和批量接口里的首页数据做 stale-while-revalidate。
 // /hls /img /dl /media 永远走网络。所有缓存操作都可能失败（存储空间不足 / 被系统清理 / 缓存损坏）：失败一律退回「直接走网络」，绝不让缓存问题影响页面。
-const CACHE = 'tvbox-shell-v104', API_CACHE = 'tvbox-api-v3';
+const CACHE = 'tvbox-shell-v105', API_CACHE = 'tvbox-api-v3';
 const SHELL = ['./', 'style.css', 'acct.js', 'app.js', 'feed.js', 'vendor/hls.min.js', 'icon.svg', 'icons/icon-192.png'];
 
 // ---------- 过期策略 ----------
@@ -247,6 +247,7 @@ async function afterWrite(r) {
 self.addEventListener('fetch', e => {
   const r = e.request, u = new URL(r.url);
   if (u.origin !== location.origin) return;
+  if (u.pathname === '/admin' || u.pathname.startsWith('/admin/')) return;   // 管理后台: 不缓存, 永远拿最新的
   if (r.method === 'POST' && u.pathname === '/api/batch') { const raw = r.clone(); return e.respondWith(batchSWR(e, r).catch(() => fetch(raw))); }
   if (r.method === 'GET' && u.pathname.startsWith('/__swr/')) return e.respondWith(swrOnly(r));
   if (r.method !== 'GET') { if (WRITES.test(u.pathname)) e.respondWith(afterWrite(r)); return; }

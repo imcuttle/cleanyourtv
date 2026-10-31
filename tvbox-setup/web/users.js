@@ -4,14 +4,16 @@
 //
 // 接口 (都在 /api/acct/ 下，会话令牌放 X-Session 请求头)：
 //   GET  status            -> { enabled, register }            不需要登录
-//   POST register          {username, password, import?}       -> { user, token }
+//   POST register          {username, password, level?, import?} -> { user, token }   (level: kids | standard，默认 standard；「全部」只有管理员账号能用)
+//   POST claim             {}   (服务端校验过管理员令牌后才会带 adminOk)  -> { user }     把当前账号升为管理员
 //   POST login             {username, password}                -> { user, token }
 //   POST logout                                                -> { ok }
 //   GET  me                                                    -> { user, stats }
 //   GET  sync                                                  -> { user, history, prog, favs, liveFavs, kv }
 //   POST ops               {ops:[…]}                           -> { ok, applied }   (客户端的改动队列，按顺序执行)
 //   POST import            {history, prog, favs, liveFavs, kv} -> { ok, stats }      (把访客数据并入当前账号)
-// 注册 / 登录 / 改密码 / 删号 / 清空 / 导入 只有安全级别为「全部」时才允许 (handle 的 lockAcct 参数，status 里带 locked)。
+// 安全级别 (kids / standard / all) 属于账号：访客固定是 standard，注册时可选 kids / standard，只有管理员能改任何账号的级别、也只有管理员账号能是 all。
+// 管理员后台用 admin(op, body, actorId) 管理账号 (list / create / update / password / delete)；who(token) 给服务端按会话查级别和是否管理员。
 // 分集播放进度 (prog)：每个账号、每部片的每一集各一条 {site,id,ep,t,dur,done}，只记总长超过 3 分钟的视频；
 // 改动走 ops：prog.put {e} / prog.del {site,id,ep?} / prog.dropep {site,id,ep} (删了一集，后面的集号减一) / prog.clear
 //   POST password          {old, next}                         -> { ok }
@@ -25,7 +27,8 @@ const NAME_RE = /^[\p{L}\p{N}_-]{2,20}$/u;
 const MIN_PW = 6, MAX_PW = 64;
 const HIST_KEEP = 100, FAV_KEEP = 800, LFAV_KEEP = 800, PROG_KEEP = 3000;
 const PROG_MIN_DUR = 180;   // 总长不到 3 分钟的视频不记进度
-const KV_KEYS = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols']);   // favCols: 收藏合集 [{id,name,at}]; 哪部片在哪些合集里写在收藏条目自己的 cols 字段里
+const KV_KEYS = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols', 'cardMode', 'cardScale']);   // cardMode / cardScale: 封面设置 (竖版 / 横版 + 大小) 跟账号走
+const LEVELS = ['kids', 'standard', 'all'];   // favCols: 收藏合集 [{id,name,at}]; 哪部片在哪些合集里写在收藏条目自己的 cols 字段里
 const KV_MAX = 200e3;
 const ENTRY_MAX = 8e3;
 const SESSION_DAYS = 365;
@@ -46,7 +49,7 @@ module.exports = function createUsers({ file, allowRegister = true }) {
   const sqlite = loadSqlite();
   if (!sqlite) {
     const off = { code: 501, body: { enabled: false, error: '服务端的 Node 太旧（需要 22.13 以上，带 node:sqlite），账号功能没有开启' } };
-    return { enabled: false, handle: async ({ sub }) => (sub === 'status' ? { body: { enabled: false } } : off) };
+    return { enabled: false, handle: async ({ sub }) => (sub === 'status' ? { body: { enabled: false } } : off), who: () => null, admin: async () => off };
   }
   let db = null;
   const open = () => {
@@ -56,7 +59,8 @@ module.exports = function createUsers({ file, allowRegister = true }) {
       PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS users(
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, name_lc TEXT NOT NULL UNIQUE,
-        salt BLOB NOT NULL, hash BLOB NOT NULL, created INTEGER NOT NULL, last_seen INTEGER);
+        salt BLOB NOT NULL, hash BLOB NOT NULL, created INTEGER NOT NULL, last_seen INTEGER,
+        level TEXT NOT NULL DEFAULT 'standard', is_admin INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS sessions(
         token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         created INTEGER NOT NULL, last_used INTEGER NOT NULL, ua TEXT);
@@ -80,6 +84,10 @@ module.exports = function createUsers({ file, allowRegister = true }) {
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, k TEXT NOT NULL, v TEXT NOT NULL,
         at INTEGER NOT NULL, PRIMARY KEY(user_id, k));
     `);
+    // 老库升级: 补上 level / is_admin 两列
+    const cols = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
+    if (!cols.includes('level')) db.exec("ALTER TABLE users ADD COLUMN level TEXT NOT NULL DEFAULT 'standard'");
+    if (!cols.includes('is_admin')) db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');
     return db;
   };
   const q = (sql, ...a) => open().prepare(sql).all(...a);
@@ -88,7 +96,8 @@ module.exports = function createUsers({ file, allowRegister = true }) {
   const tx = fn => { open().exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch {} throw e; } };
 
   const fail = (code, error, extra = {}) => ({ code, body: { error, ...extra } });
-  const userView = u => ({ id: u.id, name: u.name, created: u.created });
+  const effLevel = u => (LEVELS.includes(u.level) ? (u.level === 'all' && !u.is_admin ? 'standard' : u.level) : 'standard');
+  const userView = u => ({ id: u.id, name: u.name, created: u.created, level: effLevel(u), admin: !!u.is_admin });
   const stats = uid => ({
     history: one('SELECT COUNT(*) n FROM history WHERE user_id=?', uid).n,
     favs: one('SELECT COUNT(*) n FROM favorites WHERE user_id=?', uid).n,
@@ -222,17 +231,17 @@ module.exports = function createUsers({ file, allowRegister = true }) {
     };
   }
 
-  // 安全级别不是「全部」时不允许的账号操作 (查看 / 同步 / 退出会话不受影响)
-  const MANAGE = new Set(['register', 'login', 'password', 'delete', 'clear', 'import']);
-  async function handle({ sub, method, body = {}, session = '', ip = '', ua = '', lockAcct = false, level = '' }) {
+  async function handle({ sub, method, body = {}, session = '', ip = '', ua = '', adminOk = false }) {
     try { open(); } catch (e) { return fail(500, '账号数据库打不开：' + e.message); }
     const write = method !== 'GET';
-    if (sub === 'status') return { body: { enabled: true, register: allowRegister, users: one('SELECT COUNT(*) n FROM users').n, locked: lockAcct, level } };
-    if (lockAcct && write && MANAGE.has(sub)) return fail(403, '账号管理只能在安全级别「全部」下操作', { locked: true });
+    if (sub === 'status') return { body: { enabled: true, register: allowRegister, users: one('SELECT COUNT(*) n FROM users').n } };
 
     if (sub === 'register' && write) {
       if (!allowRegister) return fail(403, '这台服务器没有开放注册（环境变量 TVBOX_ALLOW_REGISTER=0）');
       const name = str(body.username).normalize('NFKC').trim(), pw = str(body.password);
+      const lv = body.level === undefined || body.level === '' ? 'standard' : str(body.level);
+      if (!LEVELS.includes(lv)) return fail(400, '安全级别不对');
+      if (lv === 'all') return fail(403, '「全部」只有管理员账号能用，注册时请选儿童或标准');
       if (!NAME_RE.test(name)) return fail(400, '用户名 2~20 个字：中英文、数字、下划线或减号');
       if (pw.length < MIN_PW || pw.length > MAX_PW) return fail(400, `密码 ${MIN_PW}~${MAX_PW} 位`);
       const k = tryKey('reg', ip);
@@ -244,7 +253,7 @@ module.exports = function createUsers({ file, allowRegister = true }) {
       try {
         tx(() => {
           const now = Date.now();
-          uid = Number(run('INSERT INTO users(name, name_lc, salt, hash, created, last_seen) VALUES(?,?,?,?,?,?)', name, name.toLowerCase(), salt, hash, now, now).lastInsertRowid);
+          uid = Number(run('INSERT INTO users(name, name_lc, salt, hash, created, last_seen, level) VALUES(?,?,?,?,?,?,?)', name, name.toLowerCase(), salt, hash, now, now, lv).lastInsertRowid);
           if (body.import && typeof body.import === 'object') importData(uid, body.import);
           token = newSession(uid, ua);
         });
@@ -270,6 +279,11 @@ module.exports = function createUsers({ file, allowRegister = true }) {
 
     if (sub === 'logout' && write) { run('DELETE FROM sessions WHERE token_hash=?', sha(str(session || body.session))); return { body: { ok: true } }; }
     if (sub === 'me') return { body: { user: userView(me), stats: stats(me.id) } };
+    if (sub === 'claim' && write) {   // 服务端已经校验过管理员令牌 (adminOk)，这里只负责把账号升为管理员
+      if (!adminOk) return fail(403, '需要管理员令牌');
+      run('UPDATE users SET is_admin=1 WHERE id=?', me.id);
+      return { body: { user: userView(one('SELECT * FROM users WHERE id=?', me.id)) } };
+    }
     if (sub === 'sync') return { body: { user: userView(me), ...snapshot(me.id), stats: stats(me.id) } };
 
     if (sub === 'ops' && write) {
@@ -310,6 +324,64 @@ module.exports = function createUsers({ file, allowRegister = true }) {
     }
     return fail(404, 'unknown api');
   }
-  return { enabled: true, handle, file };
+
+  // ---- 给服务端用 ----
+  // 会话 -> { id, name, level, admin }；没登录 / 失效返回 null
+  function who(token) {
+    try { open(); } catch { return null; }
+    const u = auth(token);
+    return u ? { id: u.id, name: u.name, level: effLevel(u), admin: !!u.is_admin } : null;
+  }
+  // 管理员后台的账号管理。actor 是操作者的账号 id (0 = 用管理员令牌进来的、没有账号)，用来拦住「把自己降级 / 删掉自己」。
+  async function admin(op, body = {}, actor = 0) {
+    try { open(); } catch (e) { return fail(500, '账号数据库打不开：' + e.message); }
+    if (op === 'list') {
+      const rows = q(`SELECT u.id, u.name, u.created, u.last_seen, u.level, u.is_admin,
+          (SELECT COUNT(*) FROM history h WHERE h.user_id=u.id) hist, (SELECT COUNT(*) FROM favorites f WHERE f.user_id=u.id) favs,
+          (SELECT COUNT(*) FROM sessions s WHERE s.user_id=u.id) sessions FROM users u ORDER BY u.id`);
+      return { body: { register: allowRegister, users: rows.map(r => ({ id: r.id, name: r.name, created: r.created, lastSeen: r.last_seen || 0, level: effLevel(r), admin: !!r.is_admin, history: r.hist, favs: r.favs, sessions: r.sessions })) } };
+    }
+    const id = Number(body.id);
+    const target = Number.isFinite(id) ? one('SELECT * FROM users WHERE id=?', id) : null;
+    if (op === 'create') {
+      const name = str(body.username).normalize('NFKC').trim(), pw = str(body.password);
+      const lv = LEVELS.includes(str(body.level)) ? str(body.level) : 'standard', isAdm = !!body.admin;
+      if (!NAME_RE.test(name)) return fail(400, '用户名 2~20 个字：中英文、数字、下划线或减号');
+      if (pw.length < MIN_PW || pw.length > MAX_PW) return fail(400, `密码 ${MIN_PW}~${MAX_PW} 位`);
+      if (lv === 'all' && !isAdm) return fail(400, '「全部」只有管理员账号能用');
+      if (one('SELECT COUNT(*) n FROM users').n >= MAX_USERS) return fail(403, `账号数量到上限了（${MAX_USERS}）`);
+      if (one('SELECT 1 x FROM users WHERE name_lc=?', name.toLowerCase())) return fail(409, '这个用户名已经有人用了');
+      const { salt, hash } = await hashPw(pw), now = Date.now();
+      const uid = Number(run('INSERT INTO users(name, name_lc, salt, hash, created, last_seen, level, is_admin) VALUES(?,?,?,?,?,?,?,?)', name, name.toLowerCase(), salt, hash, now, now, lv, isAdm ? 1 : 0).lastInsertRowid);
+      return { body: { ok: true, user: userView(one('SELECT * FROM users WHERE id=?', uid)) } };
+    }
+    if (!target) return fail(404, '没有这个账号');
+    if (op === 'update') {
+      let lv = body.level === undefined ? target.level : str(body.level);
+      let isAdm = body.admin === undefined ? !!target.is_admin : !!body.admin;
+      if (!LEVELS.includes(lv)) return fail(400, '安全级别不对');
+      if (target.id === actor && !isAdm) return fail(400, '不能取消自己的管理员身份（换另一个管理员来操作）');
+      if (!isAdm && lv === 'all') { if (body.level === 'all') return fail(400, '「全部」只有管理员账号能用'); lv = 'standard'; }   // 取消管理员时, 原来的「全部」降回标准
+      if (!isAdm && target.is_admin && one('SELECT COUNT(*) n FROM users WHERE is_admin=1').n <= 1) return fail(400, '至少要留一个管理员账号');
+      run('UPDATE users SET level=?, is_admin=? WHERE id=?', lv, isAdm ? 1 : 0, target.id);
+      return { body: { ok: true, user: userView(one('SELECT * FROM users WHERE id=?', target.id)) } };
+    }
+    if (op === 'password') {
+      const pw = str(body.password);
+      if (pw.length < MIN_PW || pw.length > MAX_PW) return fail(400, `密码 ${MIN_PW}~${MAX_PW} 位`);
+      const { salt, hash } = await hashPw(pw);
+      tx(() => { run('UPDATE users SET salt=?, hash=? WHERE id=?', salt, hash, target.id); run('DELETE FROM sessions WHERE user_id=?', target.id); });   // 其它设备要重新登录
+      return { body: { ok: true } };
+    }
+    if (op === 'kick') { run('DELETE FROM sessions WHERE user_id=?', target.id); return { body: { ok: true } }; }
+    if (op === 'delete') {
+      if (target.id === actor) return fail(400, '不能删除自己');
+      if (target.is_admin && one('SELECT COUNT(*) n FROM users WHERE is_admin=1').n <= 1) return fail(400, '至少要留一个管理员账号');
+      run('DELETE FROM users WHERE id=?', target.id);
+      return { body: { ok: true } };
+    }
+    return fail(404, 'unknown op');
+  }
+  return { enabled: true, handle, who, admin, file };
 };
 module.exports.defaultFile = dataDir => path.join(dataDir, 'users.sqlite');

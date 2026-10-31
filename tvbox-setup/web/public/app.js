@@ -98,7 +98,8 @@ const dbRows = () => { try { return { tv: true, movie: true, show: true, anime: 
 
 const state = { sites: [], lives: [], level: 'standard', site: localStorage.site || '', cats: [], downloads: [] };
 // 封面卡片: 竖版 (poster, 2:3) or 宽版 (wide, 16:9). One class on <html> restyles every card, the home banner and the detail sheet.
-const cardMode = () => localStorage.cardMode === 'wide' ? 'wide' : 'poster';
+// 封面设置 (竖版 / 横版 + 大小) 属于账号 (UD, 见 acct.js)：登录后同步到服务端、账号之间互不影响；访客存在本机。
+const cardMode = () => (PV ? localStorage.cardMode : UD.get('cardMode')) === 'wide' ? 'wide' : 'poster';
 const applyCardMode = () => {
   document.documentElement.classList.toggle('wide-cards', cardMode() === 'wide');
   const b = $('#cardBtn'); if (b) { b.classList.toggle('on', cardMode() === 'wide'); b.title = cardMode() === 'wide' ? '当前：横版，点一下换竖版' : '当前：竖版，点一下换横版'; }
@@ -106,7 +107,7 @@ const applyCardMode = () => {
 // 卡片大小: ⌘/Ctrl + / − / 0 (and the − + buttons in the cover menu) scale every card, the grid columns follow. Remembered.
 // The page itself is never zoomed. Past 1.35× the covers switch to the sharp size, so a big card does not look blurry.
 const CS_MIN = 0.6, CS_MAX = 2.2, CS_STEP = 0.1;
-const cardScale = () => { const v = parseFloat(localStorage.cardScale); return Number.isFinite(v) ? Math.min(CS_MAX, Math.max(CS_MIN, v)) : 1; };
+const cardScale = () => { const v = parseFloat(PV ? localStorage.cardScale : UD.get('cardScale')); return Number.isFinite(v) ? Math.min(CS_MAX, Math.max(CS_MIN, v)) : 1; };
 const sharpWanted = () => cardScale() >= 1.35;
 const applyCardScale = () => {
   const v = cardScale();
@@ -118,7 +119,7 @@ let csHiT = 0;
 const setCardScale = (v, quiet) => {
   v = Math.round(Math.min(CS_MAX, Math.max(CS_MIN, v)) * 100) / 100;
   const wasBig = sharpWanted();
-  localStorage.cardScale = String(v); applyCardScale();
+  UD.set('cardScale', String(v)); applyCardScale();
   if (sharpWanted() !== wasBig) { clearTimeout(csHiT); csHiT = setTimeout(upgradeCovers, 120); }
   else if (sharpWanted()) { clearTimeout(csHiT); csHiT = setTimeout(upgradeCovers, 300); }
   if (!quiet) toast('封面大小 ' + Math.round(v * 100) + '%');
@@ -153,7 +154,7 @@ addEventListener('wheel', e => {
   if (Math.abs(csWheel.acc) >= 30) { setCardScale(cardScale() + Math.sign(csWheel.acc) * CS_STEP, true); csWheel.acc = 0; }
 }, { passive: false });
 const csWheel = { t: 0, acc: 0 };
-const setCardMode = m => { localStorage.cardMode = m; applyCardMode(); $$('[data-cardmode]').forEach(x => x.classList.toggle('on', x.dataset.cardmode === m)); };
+const setCardMode = m => { UD.set('cardMode', m); applyCardMode(); $$('[data-cardmode]').forEach(x => x.classList.toggle('on', x.dataset.cardmode === m)); };
 applyCardMode();
 
 // ---------- http ----------
@@ -176,18 +177,10 @@ function previewSource(kind, { url = '', name = '', cats = '', text = '' } = {})
   if (!(kind === 'vod' ? /^https?:\/\/|^local:[\w.-]+\.txt$/ : /^https?:\/\/|^local:[\w.-]+$/).test(url)) return toast('这个地址没法预览');
   window.open(page(kind === 'vod' ? { pvapi: url, ...(cats ? { pvcats: cats } : {}) } : { pvu: url }), '_blank');
 }
-async function req(method, path, body, retried, signal) {
+async function req(method, path, body, _unused, signal) {
   const headers = { 'Content-Type': 'application/json' };
-  if (sessionStorage.pin) headers['X-Pin'] = sessionStorage.pin;
   const r = await fetch(path, { method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body) });
   const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-  if (r.status === 403 && j.pin && !retried) {
-    const pin = prompt('需要家长 PIN');
-    if (pin === null) throw new Error('已取消');
-    sessionStorage.pin = pin;
-    if (body && typeof body === 'object' && 'pin' in body) body.pin = pin;
-    return req(method, path, body, true, signal);
-  }
   if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
 }
@@ -311,7 +304,6 @@ async function swrFresh(key) {
 async function fetchBatch(keys, settle, signal) {
   const requests = keys.map(k => { const q = k.indexOf('?'); return { route: k.slice(0, q), q: Object.fromEntries(new URLSearchParams(k.slice(q + 1))) }; });
   const headers = { 'Content-Type': 'application/json' };
-  if (sessionStorage.pin) headers['X-Pin'] = sessionStorage.pin;
   const r = await fetch('/api/batch', { method: 'POST', headers, signal, body: JSON.stringify({ requests, lvl: state.level }) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const line = t => {
@@ -376,7 +368,7 @@ function toast(msg, sticky) {
 // 详情页 / 播放页的「分享」：复制一个能直接打开这部片（或这一集 / 这个频道）的链接。链接就是现有的深链接
 // （#/v/… 详情、#/play/… 某一集、#/tv/… 直播频道），不新增服务端接口。
 // 在本机用 localhost 打开时，链接里换成局域网地址，不然发给别人是打不开的。
-// 链接里不带访问令牌：对方第一次打开输入一次令牌（深链接会保留，输完直接进到这部片）。
+// 链接里什么口令都不带：对方直接打开就是访客（标准级别）。
 const LOCAL_HOST = /^(localhost|127\.|\[?::1\]?$)/;
 const shareUrl = hash => location.origin + '/' + (PV ? location.search : '') + hash;   // 按当前打开的地址 (host) 生成，不替换成别的网卡地址
 async function copyText(t) {
@@ -389,7 +381,7 @@ async function copyText(t) {
   ta.remove(); return ok;
 }
 // 分享 = 手机上唤起系统分享面板 (微信 / 信息 / 邮件 / AirDrop …)，没有系统分享的环境 (桌面浏览器、http 局域网地址不是安全上下文)
-// 退回复制链接。链接里不含令牌，对方打开后输入一次访问令牌。
+// 退回复制链接。
 // navigator.share 必须在用户手势里同步调用：shareUrl 是同步的，调用前不能 await 任何东西，否则 iOS Safari 会拒绝。
 async function shareNow(hash, title = '') {
   const url = shareUrl(hash);
@@ -770,8 +762,11 @@ async function fetchSites(cache) {
   return j;
 }
 async function loadSites(src) {
-  const boot = bootSites; bootSites = null;
-  const j = PV || !src ? await api('sites', {}, null) : src === 'swr' && boot ? boot : await fetchSites(src === 'net' ? 'no-store' : 'default');
+  let boot = bootSites; bootSites = null;
+  // 服务端写进页面的源列表是按「打开页面时的会话」算的：和现在的账号对不上 (刚切换账号 / 缓存的老页面) 就不用, 重新问
+  if (boot && (boot.u || 0) !== (ACCT.me?.id || 0)) boot = null;
+  // 安全级别按账号算, 源列表的 SW 缓存只有一份, 所以没有现成数据时一律走网络
+  const j = PV || !src ? await api('sites', {}, null) : src === 'swr' && boot ? boot : await fetchSites('no-store');
   state.sites = j.sites; state.lives = j.live; state.level = j.level;
   const sig = j.level + '|' + j.sites.map(s => s.key + '|' + (s.api || '')).join(',');
   if (sig !== memoSig) { memoSig = sig; apiMemo.clear(); altCache.clear(); }
@@ -4799,7 +4794,7 @@ async function initAdmin() {
   const paint = () => {
     if (!alive()) return;
     if (!st || !st.authed) {
-      box.innerHTML = `<h2>管理员</h2><p class="hint">用管理员令牌登录后，可以在网页里重启服务、检查更新、更新并重启、清理缓存。令牌在服务启动窗口里显示，也存在 <code>web/.env</code> 的 <code>TVBOX_ADMIN_TOKEN</code>（第一次启动自动生成）。</p>
+      box.innerHTML = `<h2>管理员</h2><p class="hint">管理员账号不用在这里登录。没有管理员账号时，用管理员令牌登录后，可以在网页里重启服务、检查更新、更新并重启、清理缓存。令牌在服务启动窗口里显示，也存在 <code>web/.env</code> 的 <code>TVBOX_ADMIN_TOKEN</code>（第一次启动自动生成）。要把账号升为管理员，用上面「账号管理」里的「升为管理员」。</p>
         <div class="actions"><input type="password" id="admTok" placeholder="管理员令牌" autocomplete="off" style="max-width:280px"><button class="small" id="admLogin">登录</button></div>`;
       const go = async () => {
         const token = $('#admTok', box).value.trim(); if (!token) return;
@@ -4828,8 +4823,8 @@ async function initAdmin() {
       </div>
       <details class="admmore"><summary>更多：清理缓存 / 换令牌</summary>
         <div class="actions"><button class="small" data-adc="transcode" ${run ? 'disabled' : ''}>清理转码缓存</button><button class="small" data-adc="covers" ${run || !st.canRestart ? 'disabled' : ''} title="清理后会自动重启">清理封面图片缓存（会重启）</button>
-          <button class="small" data-adr="access" ${run || !st.canRestart ? 'disabled' : ''}>换访问令牌</button><button class="small" data-adr="admin" ${run || !st.canRestart ? 'disabled' : ''}>换管理员令牌</button></div>
-        <p class="hint">换访问令牌后所有浏览器要重新输入；换管理员令牌后需要用新的重新登录。</p></details>
+          <button class="small" data-adr="admin" ${run || !st.canRestart ? 'disabled' : ''}>换管理员令牌</button></div>
+        <p class="hint">换管理员令牌后，用令牌登录管理后台 / 升级账号要用新的；已经是管理员的账号不受影响。</p></details>
       ${j && j.progress ? (pg => `<div class="admprog"><div class="bar"><i style="width:${pg.total ? Math.min(100, pg.done / pg.total * 100).toFixed(1) : 100}%" class="${pg.total ? '' : 'ind'}"></i></div><span>${pg.total ? Math.round(pg.done / pg.total * 100) + '% · ' : ''}${(pg.done / 1048576).toFixed(1)}${pg.total ? ' / ' + (pg.total / 1048576).toFixed(1) : ''} MB · ${(pg.speed / 1048576).toFixed(2)} MB/s${pg.total && pg.speed > 0 ? ' · 剩余 ' + Math.max(0, Math.ceil((pg.total - pg.done) / pg.speed)) + ' 秒' : ''} · ${esc(pg.via)}</span></div>`)(j.progress) : ''}
       ${j ? `<pre class="admlog ${j.status}">${jobTxt(j)}${busy ? '\n' + esc(busy) : ''}</pre>` : busy ? `<pre class="admlog">${esc(busy)}</pre>` : ''}${last}`;
     const cn = $('#admCancel', box); if (cn) cn.onclick = async () => { cn.disabled = true; try { await admApi('POST', 'cancel', {}); } catch (e) { toast(e.message); } };
@@ -4848,8 +4843,8 @@ async function initAdmin() {
     $('#admRestart', box).onclick = () => { if (confirm('重启服务？重启期间页面会短暂断开。')) runJob('restart', {}, '重启'); };
     $$('[data-adc]', box).forEach(b => b.onclick = () => { if (confirm(b.dataset.adc === 'covers' ? '清理封面和图片缓存，并重启服务？（封面会按需重新生成）' : '清理转码缓存？正在转码的会停掉，下次播放时重新转。')) runJob('clear', { what: b.dataset.adc }, '清理'); });
     $$('[data-adr]', box).forEach(b => b.onclick = async () => {
-      const acc = b.dataset.adr === 'access';
-      if (!confirm(acc ? '换一个新的访问令牌并重启？所有浏览器都要重新输入新令牌。' : '换一个新的管理员令牌并重启？之后要用新令牌重新登录。')) return;
+      const acc = false;
+      if (!confirm('换一个新的管理员令牌并重启？之后用令牌登录管理后台 / 升级账号要用新令牌。')) return;
       let r;
       try { r = await admApi('POST', 'rotate', { which: b.dataset.adr }); } catch (e) { return toast(e.message); }
       if (!acc) localStorage.adminToken = r.token;   // 换的是管理员令牌: 浏览器记住新的, 重启后自动重新登录
@@ -4919,7 +4914,8 @@ async function renderSettings() {
   const localP = get('/api/local'); // sent together with the rest, so it never queues behind speed tests
   localP.catch(() => {});
   const [cfg, info, safety] = await Promise.all([get('/api/config'), get('/api/info').catch(() => ({ urls: [] })), get('/api/safety')]);
-  const locked = safety.level !== 'all'; // source settings are read-only outside 全部 (the server refuses the writes as well)
+  // 源设置 (点播源 / 直播源 / 导入 / 本地媒体) 只有管理员能改, 而且要在自己的安全级别为「全部」时: 非管理员或别的级别一律只读 (服务端同样拒绝)
+  const locked = !(safety.admin && safety.level === 'all');
   const flags = x => `<label class="flag"><input type="checkbox" class="kids" ${x.kids ? 'checked' : ''}>少儿</label><label class="flag"><input type="checkbox" class="adult" ${x.adult ? 'checked' : ''}>成人</label><label class="flag" title="隐藏后只在点播源 / 直播源菜单的「隐藏」标签里"><input type="checkbox" class="hid" ${x.hidden ? 'checked' : ''}>隐藏</label>`;
   const cacheOf = x => testCache.get(String(x.api || x.url || '').trim());
   const stOf = x => { const t = cacheOf(x); return t ? `<span class="${t.cls}" title="${esc(t.title)}">${esc(t.text)}</span>` : '<span class="status"></span>'; };
@@ -4977,9 +4973,9 @@ async function renderSettings() {
       <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button></div></section>
     <section id="acctSec"><h2>账号管理</h2><p class="lan">加载中…</p></section>
     ${installSection()}
-    <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。${safety.hasPin ? '已设家长 PIN。' : '设了 PIN 后，别人想从儿童 / 标准切到更宽松的级别就必须输入 PIN。'}</p>
-      <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}">${v}</button>`).join('')}</div>
-      <div class="actions"><button class="small" id="setPin">${safety.hasPin ? '修改 / 清除 PIN' : '设置家长 PIN'}</button>${safety.hasPin ? '<span class="lan">切到更宽松的级别、改 PIN 都要输入 PIN；切到更严的级别不用；只有在「全部」下才能清除 PIN。</span>' : ''}</div>
+    <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。安全级别属于账号：${safety.guest ? '访客固定是「标准」，注册账号时可以选「儿童」或「标准」。' : safety.acctAdmin ? '你是管理员，可以把自己调成任意级别，也能在管理后台改别人的级别。' : '由管理员在管理后台设置，自己不能改。'}</p>
+      <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}" ${safety.acctAdmin ? '' : 'disabled'}>${v}</button>`).join('')}</div>
+      ${safety.admin ? '<div class="actions"><a class="btn more" href="/admin/" target="_blank" rel="noopener">打开管理后台</a><span class="lan">账号、安全级别、点播 / 直播源、系统维护</span></div>' : ''}
     </section>
     <section><h2>封面</h2><p class="hint">竖版：2:3 海报；横版：16:9，一屏能放更多标题，详情页和首页大图同步变成横版。</p>
       <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">横版</button></div>
@@ -4987,7 +4983,7 @@ async function renderSettings() {
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
     <section id="adminSec"><h2>管理员</h2><p class="lan">加载中…</p></section>
-    ${locked ? `<section class="locklote"><h2>源设置已锁定</h2><p class="hint">当前安全级别是「${LEVELS[safety.level]}」。点播源、直播源、少儿 / 成人分类、导入和本地媒体文件夹只能在「全部」下修改，免得误改成人分类。想改的话，先在上面把安全级别切到「全部」${safety.hasPin ? '（需要家长 PIN）' : ''}。</p></section>` : ''}
+    ${locked ? `<section class="locklote"><h2>源设置已锁定</h2><p class="hint">${safety.admin ? `点播源、直播源、少儿 / 成人分类、导入和本地媒体文件夹只能在安全级别「全部」下修改（现在是「${LEVELS[safety.level]}」），免得误改成人分类。先在上面把自己调成「全部」，或者直接去管理后台。` : '点播源、直播源、少儿 / 成人分类、导入和本地媒体文件夹只有管理员才能修改。'}</p></section>` : ''}
     <div id="srcWrap" ${locked ? 'hidden' : ''}>
     <section><h2>点播源</h2><p class="hint">苹果CMS 接口（<code>…/api.php/provide/vod</code>，返回 JSON）。需要 spider jar / 解析的 type 3 源浏览器跑不了，导入时会自动跳过。</p>
       ${fold('site', cfg.sites.length)}<div class="foldbox" data-fold="site" ${cfg.sites.length > FOLD_AT && !foldOpen.site ? 'hidden' : ''}>${bulk('site')}<div id="sites">${siteRowsHtml()}</div></div>
@@ -5298,10 +5294,9 @@ async function renderSettings() {
     if (lv) {
       if (!leaveSettingsOk()) return;   // the page is rebuilt with the new level
       try {
-        const looser = ({ kids: 0, standard: 1, all: 2 })[lv] > ({ kids: 0, standard: 1, all: 2 })[safety.level];
-        await req('POST', '/api/safety', { level: lv, pin: sessionStorage.pin || '' });
-        if (safety.hasPin && !looser) delete sessionStorage.pin;   // locking again: the PIN is asked for next time
-        state.cats = []; await loadSites(); toast('安全级别：' + LEVELS[lv]); renderSettings(); }
+        if (!ACCT.me || !safety.acctAdmin) return toast('安全级别由管理员设置');
+        await req('POST', '/api/console/users/update', { id: ACCT.me.id, level: lv });   // 账号级别: 只有管理员能改
+        state.cats = []; await loadSites('net'); toast('安全级别：' + LEVELS[lv]); renderSettings(); }
       catch (err) { toast(err.message); }
       return;
     }
@@ -5521,14 +5516,6 @@ async function renderSettings() {
   view.oninput = e => { if (e.target.closest('.srow:not(.lrow)') && !e.target.classList.contains('sel')) dirty(); };
   view.onchange = e => { if (e.target.closest('.srow:not(.lrow)') && !e.target.classList.contains('sel')) dirty(); };
   settingsSaver = () => persist(current());
-  $('#setPin').onclick = async () => {
-    const newPin = prompt(!safety.hasPin ? '设置家长 PIN（4 位以上数字）' : safety.level === 'all' ? '新 PIN（留空 = 清除 PIN）' : '新 PIN（儿童 / 标准模式下不能清除，只能改）');
-    if (newPin === null) return;
-    if (!leaveSettingsOk()) return;
-    if (safety.hasPin && safety.level !== 'all' && !newPin.trim()) return toast('儿童 / 标准模式下不能清除 PIN');
-    try { await req('POST', '/api/safety', { pin: sessionStorage.pin || '', newPin }); delete sessionStorage.pin; toast(newPin ? 'PIN 已设置，之后放宽级别需要输入它' : 'PIN 已清除'); renderSettings(); }
-    catch (err) { toast(err.message); }
-  };
   if ($('#installBtn')) $('#installBtn').onclick = async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; $('#installBtn').hidden = true; };
   $('#addSite').onclick = () => $('.nm', addRow('site', { name: '', api: '' })).focus();
   $('#addLive').onclick = () => $('.nm', addRow('live', { name: '', url: '' })).focus();
@@ -5724,7 +5711,6 @@ addEventListener('focus', async () => {
 // POST /api/recognize/stream: NDJSON lines {t:'progress'|'ping'|'result'|'error'}; onProgress gets each progress line.
 async function recognizeStream(text, onProgress, signal) {
   const headers = { 'Content-Type': 'application/json' };
-  if (sessionStorage.pin) headers['X-Pin'] = sessionStorage.pin;
   const r = await fetch('/api/recognize/stream', { method: 'POST', headers, body: JSON.stringify({ text }), signal });
   if (!r.ok || !r.body) { const j = await r.json().catch(() => ({})); throw new Error(j.error || `HTTP ${r.status}`); }
   const rd = r.body.getReader(), dec = new TextDecoder();
@@ -5992,7 +5978,7 @@ if (PV) {
     } catch (e) { add.disabled = false; toast(e.message); }
   };
 }
-loadSites('swr').then(() => ACCT.ready).then(() => route({ nav: true }), e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
+loadSites('swr').then(() => ACCT.ready).then(() => { applyCardMode(); applyCardScale(); return route({ nav: true }); }, e => { view.innerHTML = `<div class="page"><div class="err">连不上服务：${esc(e.message)}</div></div>`; });
 
 applyCardMode(); applyCardScale();
 

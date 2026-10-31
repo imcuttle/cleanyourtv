@@ -10,7 +10,7 @@
 // 入口保护 (guard.js): this file, run directly, only starts a watcher that runs itself as a child and restarts it after a crash
 // or a hang. The child (TVBOX_SUPERVISED=1) then forks the cluster workers. TVBOX_NO_SUPERVISOR=1 turns the outer watcher off.
 if (require('cluster').isPrimary && !process.env.TVBOX_SUPERVISED && process.env.TVBOX_NO_SUPERVISOR !== '1' && require.main === module) {
-  require('./auth').ensureToken();                       // token is made once, before any child needs it
+  require('./auth').ensureToken();                       // the admin token is made once, before any child needs it
   require('./guard').supervise(__filename);
   return;
 }
@@ -57,9 +57,9 @@ fs.mkdirSync(DL, { recursive: true });
 const CPUS = (os.availableParallelism ? os.availableParallelism() : os.cpus().length) || 1;
 const WORKERS = Math.max(1, Math.min(Number(process.env.WORKERS) || CPUS, 16));
 const MEDIA_OP = /^(local|hls)/; // rpc ops handled by the media process
-// 访问令牌 (web/.env 的 TVBOX_TOKEN，第一次启动自动生成)。必须在 fork 之前定下来：子进程继承 process.env，用的是同一个。
+// 没有「访问令牌」：打开网页不需要口令，访客就是「标准」级别，账号 (注册 / 登录) 和管理员账号决定其余的一切。
+// 管理员令牌 (web/.env 的 TVBOX_ADMIN_TOKEN，第一次启动自动生成) 只用来把某个账号升为管理员 / 重启更新服务。必须在 fork 之前定下来：子进程继承 process.env，用的是同一个。
 const AUTH = require('./auth');
-const TOKEN = AUTH.ensureToken().token;
 const ADMIN_TOKEN = AUTH.ensureToken().adminToken;   // 管理员令牌 (TVBOX_ADMIN_TOKEN)：设置页「管理员」用，能重启 / 更新服务
 // HTTPS 证书: 主进程先生成 (写到 data/tls)，工作进程之后直接读文件。没有证书 / 没有 openssl 时只提示，http 照常。
 const TLS = HTTPS_PORT ? require('./tls').load() : null;
@@ -154,9 +154,8 @@ function banner(n, ffmpeg, dl) {
     for (const ip of lan) console.log(`    局域网    https://${ip}:${HTTPS_PORT}`);
     if (TLS.source === 'self-signed') console.log('    自签名证书：浏览器第一次会提示不安全，点「继续访问 / 高级」即可 (证书 ' + require('./tls').DIR + '；有域名证书用 TVBOX_TLS_CERT / TVBOX_TLS_KEY)');
   }
-  console.log(`\n  访问令牌  ${TOKEN}`);
-  console.log(`  管理员令牌  ${ADMIN_TOKEN}   （设置页「管理员」里用，可重启 / 更新服务；存在 ${AUTH.ENV_FILE} 的 ${AUTH.ADMIN_KEY}）`);
-  console.log(`  （浏览器第一次打开要输入它，之后一直记住；存在 ${AUTH.ENV_FILE} 的 ${AUTH.KEY}，换令牌就删掉那一行再重启）`);
+  console.log(`\n  管理员令牌  ${ADMIN_TOKEN}`);
+  console.log(`  （注册账号后，在设置页「账号管理」里输入它，就能把这个账号升为管理员；也能在「管理后台」登录。存在 ${AUTH.ENV_FILE} 的 ${AUTH.ADMIN_KEY}，换令牌就删掉那一行再重启）`);
   console.log(`\n  进程：${n} 个（CPU ${CPUS} 核，环境变量 WORKERS 可调）`);
   console.log(`  下载目录：${dl}`);
   console.log(`  直播封面：${ffmpeg ? 'ffmpeg 已找到' : '没有 ffmpeg，悬停时用浏览器截图'}`);
@@ -171,7 +170,7 @@ function banner(n, ffmpeg, dl) {
     console.log(`\n  公网      ${url}  （正在从外网探测是否可达…）`);
     reachableFromOutside(ip, PORT).then(ok => {
       if (ok === true) {
-        console.log(`  公网可达  ✓ ${url}  外网节点已连通，端口映射生效。没有访问令牌的人打不开；令牌别发给别人。`);
+        console.log(`  公网可达  ✓ ${url}  外网节点已连通，端口映射生效。⚠ 现在没有访问口令，公网上谁都能以访客（标准级别）打开；只想自己用的话别映射端口，或在前面加一层反向代理认证。`);
         qr('公网二维码', url);
       } else if (ok === false) {
         console.log(`  公网可达  ✗ 外网连不上 ${ip}:${PORT}。需要在路由器 / 光猫里把端口 ${PORT} 转发到这台电脑（二级路由要两层都转；运营商没给公网 IPv4 时不通）。`);
@@ -221,14 +220,14 @@ function rpc(op, args, ms = 60000) {
     const id = `${process.pid}:${++rpcSeq}`;
     const t = setTimeout(() => { rpcWait.delete(id); bad(new Error('内部请求超时')); }, ms);
     rpcWait.set(id, { ok, bad, t });
-    process.send({ t: 'rpc', id, op, args });
+    process.send({ t: 'rpc', id, op, args, lvl: reqCtx.getStore()?.level || '' });
   });
 }
 if (cluster.isWorker) {
   process.on('message', async m => {
     if (!m || typeof m !== 'object') return;
     if (m.t === 'rpc' && ownsOp(m.op)) {
-      try { process.send({ t: 'rpc-res', id: m.id, result: await rpcHandlers[m.op](m.args) }); }
+      try { process.send({ t: 'rpc-res', id: m.id, result: await reqCtx.run({ level: m.lvl || 'standard' }, () => rpcHandlers[m.op](m.args)) }); }
       catch (e) { process.send({ t: 'rpc-res', id: m.id, error: e.message || String(e) }); }
     } else if (m.t === 'rpc-res') {
       const w = rpcWait.get(m.id);
@@ -246,9 +245,9 @@ function broadcastReload() {
 function reloadState() {
   const c = readJson(STORE, null);
   if (c) config = normalize(c);
-  safety = readJson(SAFETY, { level: 'standard', pin: '' });
   localCfg = readLocalCfg();
   cache.clear();
+  sessCache.clear();
 }
 
 const MIME = { '.webmanifest': 'application/manifest+json', '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -338,8 +337,13 @@ if (IS_LEADER && !fs.existsSync(STORE)) saveConfig();
 
 // ======================= safety level =======================
 // kids: only kids sites; standard: hide adult sites + adult categories; all: everything.
-const SAFETY = path.join(DATA, 'safety.json');
-let safety = readJson(SAFETY, { level: 'standard', pin: '' });
+// 安全级别属于账号 (users.js)：访客固定「标准」，账号各有各的，只有管理员账号能是「全部」。没有全局设置、也没有 PIN。
+// 每个请求开头按会话查出级别放进 reqCtx (AsyncLocalStorage)，下面所有 safety.level 都读它；转给 leader 的 rpc 会带上同一个级别。
+// 没有请求上下文的后台任务读到的是「标准」(最保守，不会因为它多放出成人内容)。
+const safety = { get level() { return reqCtx.getStore()?.level || 'standard'; } };
+const sessCache = new Map();   // 会话令牌 -> { u, at }，worker 内存里短暂缓存 (账号改动时 reloadState 清掉)
+const SESS_TTL = 20e3;
+const acctLevel = who => (who ? who.level : 'standard');
 const ADULT = /伦理|理论|三级|福利|写真|里番|两性|擦边|成人|情色|激情|无码|有码|性感|午夜|黄色|av|porn/i;
 const KIDS_CATS = /动漫|动画|儿童|少儿|卡通|亲子|早教|绘本/;
 // 直播: a source can be flagged 少儿 / 成人 like a 点播源; on top of that every group / channel is classified by its name.
@@ -359,7 +363,7 @@ function liveFilter(groups, src) {
 function sitesBody(SITES, pv) {
   const inGroup = new Map();
   for (const g of SITES) for (const m of g.memberSites || []) if (!inGroup.has(m.key)) inGroup.set(m.key, g.key);
-  return { level: safety.level, sites: SITES.map(({ key, name, kids, adult, hidden, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(hidden ? { hidden: true } : {}), ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: pv ? pv.liveList : config.lives.map((l, i) => ({ key: String(i), name: l.name, kids: !!l.kids, adult: !!l.adult, ...(l.hidden ? { hidden: true } : {}) })).filter(l => safety.level === 'all' || !l.adult) };
+  return { level: safety.level, u: reqCtx.getStore()?.who?.id || 0, sites: SITES.map(({ key, name, kids, adult, hidden, memberSites, api, local }) => ({ key, name, kids: !!kids, ...(hidden ? { hidden: true } : {}), ...(inGroup.has(key) ? { inGroup: inGroup.get(key) } : {}), ...(api && !memberSites ? { api } : {}), ...(local ? { local: true } : {}), adult: !!(adult || memberSites?.some(m => m.adult)), ...(memberSites ? { group: memberSites.length, members: memberSites.map(m => m.key) } : {}) })), live: pv ? pv.liveList : config.lives.map((l, i) => ({ key: String(i), name: l.name, kids: !!l.kids, adult: !!l.adult, ...(l.hidden ? { hidden: true } : {}) })).filter(l => safety.level === 'all' || !l.adult) };
 }
 
 function visibleSites() {
@@ -385,7 +389,8 @@ function catAllowed(site, name) {
   if (safety.level === 'kids' && !site.categories && !KIDS_CATS.test(name)) return false;
   return true;
 }
-const pinOk = req => !safety.pin || req.headers['x-pin'] === safety.pin;
+// 源数据 (点播源 / 直播源 / 导入 / 本地媒体目录) 只有管理员账号能改，而且要在安全级别「全部」下改：成人标记要靠它看全，免得在过滤过的视图上保存把成人源冲掉。
+const srcWriteOk = req => adminAuthed(req) && safety.level === 'all';
 
 // ======================= live: text, check, covers =======================
 const LIVES = path.join(DATA, 'lives');
@@ -3148,8 +3153,8 @@ rpcHandlers.admin = async ({ op, body = {} }) => {
     return ok({ job: j });
   }
   if (op === 'rotate') {
-    const which = body.which === 'admin' ? AUTH.ADMIN_KEY : body.which === 'access' ? AUTH.KEY : '';
-    if (!which) return no(400, '要换哪个令牌？');
+    const which = body.which === 'admin' ? AUTH.ADMIN_KEY : '';
+    if (!which) return no(400, '只能换管理员令牌');
     if (!canRestart()) return no(409, '换令牌后需要重启才生效，但当前没法自动重启；请手动改 .env 后重启');
     let fresh;
     const j = startJob('rotate', (log, j) => { fresh = AUTH.rotate(which); log('新令牌已写入 .env'); restartSoon(j, log, '管理员：换令牌'); });
@@ -3193,7 +3198,9 @@ function readBody(req, max = 2e6) {
     req.on('error', fail);
   });
 }
-const needPin = res => send(res, 403, { error: '需要家长 PIN', pin: true });
+const needAdmin = (res, req) => send(res, 403, adminAuthed(req)
+  ? { error: '源设置只能在安全级别「全部」下修改（管理员可以在后台把自己的级别调成「全部」）', locked: true }
+  : { error: '源设置只有管理员才能修改', admin: true });
 
 // ---- batch support ----
 const BATCH_MAX = 60, BATCH_PAR = 6;
@@ -3240,9 +3247,9 @@ async function api(route, q, res, req) {
   const SITES = pv ? (pv.site ? [pv.site] : []) : visibleSites();
   const write = req.method !== 'GET';
   // Source settings (点播源 / 直播源 / 导入 / 本地媒体 folders) can only be changed at 安全级别「全部」: they carry the 成人 flags
-  // that the other levels rely on. Safety level itself is changed through /api/safety (with the PIN, if one is set).
-  if (write && safety.level !== 'all' && /^(config(\/.*)?|live\/(raw|edit|merge)|recognize|classify|local)$/.test(route))
-    return send(res, 403, { error: '源设置只能在安全级别「全部」下修改', locked: true });
+  // that the other levels rely on. Safety level belongs to the account and is changed by an admin (console/users/update).
+  if (write && !srcWriteOk(req) && /^(config(\/.*)?|live\/(raw|edit|merge)|vod\/raw|recognize|classify|local)$/.test(route))
+    return needAdmin(res, req);
 
   const leader = async (op, args) => { const r = await rpc(op, args); return send(res, r.code || 200, r.body); };
 
@@ -3280,7 +3287,44 @@ async function api(route, q, res, req) {
   // ---- 账号：用户名 + 密码，历史 / 收藏 / 偏好按账号隔离 (users.js)。会话令牌在 X-Session 头里 ----
   if (route === 'acct' || route.startsWith('acct/')) {
     const sub = route.slice(5), body = write ? await readBody(req, 4e6) : {};
-    return leader('acct', { sub, method: req.method, body, session: str(req.headers['x-session']), ip: req.socket.remoteAddress || '', ua: str(req.headers['user-agent']) });
+    const ip = req.socket.remoteAddress || '';
+    let adminOk = false;
+    if (sub === 'claim' && write) {   // 用管理员令牌把当前账号升为管理员 (令牌错误次数和管理员登录共用限速)
+      const f = failures.get('a|' + ip);
+      if (f && f.n >= 5 && f.reset > Date.now()) { res.setHeader('Retry-After', '60'); return send(res, 429, { error: '管理员令牌错误次数太多，请 1 分钟后再试' }); }
+      if (!adminTokenOk(str(body.token).trim())) {
+        const x = f && f.reset > Date.now() ? f : { n: 0, reset: Date.now() + 60000 };
+        x.n++; failures.set('a|' + ip, x);
+        return send(res, 403, { error: '管理员令牌不对' });
+      }
+      failures.delete('a|' + ip); adminOk = true;
+    }
+    const r = await rpc('acct', { sub, method: req.method, body: sub === 'claim' ? {} : body, session: sessionToken(req), ip, ua: str(req.headers['user-agent']), adminOk });
+    if (sub === 'claim' || (write && (sub === 'password' || sub === 'delete' || sub === 'logout'))) broadcastReload();
+    return send(res, r.code || 200, r.body);
+  }
+
+  // ---- 管理后台 (public/admin/): 只有管理员 (管理员账号 / 管理员令牌) 能用；不受自己当前安全级别影响, 读写的都是完整数据 ----
+  if (route.startsWith('console/')) {
+    const sub = route.slice(8);
+    if (sub === 'me' && !write) return send(res, 200, { admin: adminAuthed(req), viaToken: !req.who?.admin && tokenAdmin(req), user: req.who || null, level: safety.level });
+    if (!adminAuthed(req)) return send(res, 403, { error: '需要管理员账号（或管理员令牌）', admin: true });
+    if (sub === 'users' && !write) return leader('acctAdmin', { op: 'list' });
+    if (sub.startsWith('users/') && write) {
+      const op = sub.slice(6);
+      if (!['create', 'update', 'password', 'kick', 'delete'].includes(op)) return send(res, 404, { error: 'unknown api' });
+      return leader('acctAdmin', { op, body: await readBody(req), actor: req.who?.id || 0 });
+    }
+    if (sub === 'config' && !write) return send(res, 200, config);   // 完整配置 (含成人源)
+    if (sub === 'config' && req.method === 'PUT') return leader('config', { op: 'put', body: await readBody(req) });
+    if (sub === 'overview' && !write) {
+      const ul = await rpc('acctAdmin', { op: 'list' });
+      const us = ul.body.users || [];
+      return send(res, 200, { users: us.length, admins: us.filter(u => u.admin).length, byLevel: { kids: us.filter(u => u.level === 'kids').length, standard: us.filter(u => u.level === 'standard').length, all: us.filter(u => u.level === 'all').length },
+        sites: config.sites.filter(s => !s.members).length, groups: config.sites.filter(s => s.members).length, lives: config.lives.length, adultSites: config.sites.filter(s => s.adult).length, kidsSites: config.sites.filter(s => s.kids).length,
+        register: ul.body.register, sessions: us.reduce((n, u) => n + u.sessions, 0), history: us.reduce((n, u) => n + u.history, 0), favs: us.reduce((n, u) => n + u.favs, 0) });
+    }
+    return send(res, 404, { error: 'unknown api' });
   }
 
   // ---- 管理员 ----
@@ -3331,8 +3375,9 @@ async function api(route, q, res, req) {
 
   // ---- safety / config: written by the leader, then every worker reloads ----
   if (route === 'safety') {
-    if (!write) return send(res, 200, { level: safety.level, hasPin: !!safety.pin });
-    return leader('safety', await readBody(req));
+    // 安全级别属于账号, 不能在这里改 (管理员在后台改账号的级别); 这里只告诉页面「我现在是什么级别、是不是管理员」
+    if (write) return send(res, 405, { error: '安全级别由管理员在后台按账号设置' });
+    return send(res, 200, { level: safety.level, admin: adminAuthed(req), acctAdmin: !!req.who?.admin, guest: !req.who });
   }
   if (route.startsWith('config')) {
     if (!write) {
@@ -3342,7 +3387,7 @@ async function api(route, q, res, req) {
       return send(res, 200, { sites: config.sites.filter(s => keys.has(s.key)).map(s => s.members ? { ...s, members: s.members.filter(k => keys.has(k)) } : s),
         lives: config.lives.map(l => liveSrcOk(l) ? l : { name: '', url: '', hidden: 1 }) });
     }
-    if (!pinOk(req)) return needPin(res);
+    if (!srcWriteOk(req)) return needAdmin(res, req);
     const op = { config: 'put', 'config/reset': 'reset', 'config/add': 'add', 'config/import': 'import' }[route];
     if (!op || (op === 'put' && req.method !== 'PUT')) return send(res, 404, { error: 'unknown api' });
     return leader('config', { op, body: await readBody(req) });
@@ -3389,7 +3434,7 @@ async function api(route, q, res, req) {
   if (route === 'local') {
     if (!write) return send(res, 200, { cfg: localCfg, status: await rpc('localStatus'), exts: [...MEDIA_EXT], ffmpeg: !!FFMPEG,
       urls: lanIps().map(ip => `http://${ip}:${PORT}/api/local/vod`) });
-    if (!pinOk(req)) return needPin(res);
+    if (!srcWriteOk(req)) return needAdmin(res, req);
     return send(res, 200, await rpc('localSave', await readBody(req)));
   }
   // Open a local file in this computer's default player / show it in the file manager. Only for a browser running
@@ -3467,7 +3512,7 @@ async function api(route, q, res, req) {
       try { return send(res, 200, await vodText(q.get('api') || '', { done: 0, total: 0, titles: 0, cancel: false }).then(r => typeof r === 'string' ? { text: r } : r)); }
       catch (e) { return send(res, 200, { text: '', error: e.message }); }
     }
-    if (!pinOk(req)) return needPin(res);
+    if (!srcWriteOk(req)) return needAdmin(res, req);
     return leader('config', { op: 'vodRaw', body: await readBody(req, 512e6) });
   }
   if (route === 'live/raw') {
@@ -3475,14 +3520,14 @@ async function api(route, q, res, req) {
       try { return send(res, 200, { text: await liveText(q.get('url') || '', true) }); }
       catch (e) { return send(res, 200, { text: '', error: e.message }); }
     }
-    if (!pinOk(req)) return needPin(res);
+    if (!srcWriteOk(req)) return needAdmin(res, req);
     return leader('config', { op: 'liveRaw', body: await readBody(req, 512e6) });
   }
   // 编辑文本 in VS Code (this machine only): the list becomes a local file under data/lives and that file is opened in the
   // editor; saved edits are read from disk on every load, so nothing else has to be done afterwards.
   if (route === 'live/edit' && write) {
     if (!isLoopback(req)) return send(res, 403, { error: '只有在这台电脑本机（localhost）上才能调用 VS Code' });
-    if (!pinOk(req)) return needPin(res);
+    if (!srcWriteOk(req)) return needAdmin(res, req);
     const url = str((await readBody(req)).url);
     let file;
     if (url.startsWith('local:')) file = path.basename(url.slice(6));
@@ -3495,7 +3540,7 @@ async function api(route, q, res, req) {
     return send(res, 200, { ok: true, url: 'local:' + file, path: full });
   }
   if (route === 'live/merge' && write) {
-    if (!pinOk(req)) return needPin(res);
+    if (!srcWriteOk(req)) return needAdmin(res, req);
     return leader('config', { op: 'liveMerge', body: await readBody(req) });
   }
   if (route === 'live/thumb' || route === 'live/preview') {
@@ -3664,30 +3709,17 @@ async function api(route, q, res, req) {
 
 // ======================= 账号 (SQLite，只在 leader 里读写) =======================
 let usersDb = null;
-rpcHandlers.acct = args => {
-  usersDb = usersDb || require('./users')({ file: path.join(DATA, 'users.sqlite'), allowRegister: process.env.TVBOX_ALLOW_REGISTER !== '0' });
-  // 账号管理 (注册 / 登录 / 改密码 / 删号 / 清空 / 导入) 只在安全级别「全部」下能操作，和源设置一样；已登录账号的同步照常
-  return usersDb.handle({ ...args, lockAcct: safety.level !== 'all', level: safety.level });
+const getUsers = () => usersDb || (usersDb = require('./users')({ file: path.join(DATA, 'users.sqlite'), allowRegister: process.env.TVBOX_ALLOW_REGISTER !== '0' }));
+rpcHandlers.acct = args => getUsers().handle(args);
+rpcHandlers.who = ({ token }) => getUsers().who(token);
+// 管理员后台的账号管理: 改完让所有 worker 丢掉缓存的会话信息 (级别 / 管理员身份马上生效)
+rpcHandlers.acctAdmin = async ({ op, body, actor }) => {
+  const r = await getUsers().admin(op, body, actor);
+  if (op !== 'list') broadcastReload();
+  return r;
 };
 
 // ======================= leader-side handlers =======================
-const LEVEL_RANK = { kids: 0, standard: 1, all: 2 };
-rpcHandlers.safety = b => {
-  // With a PIN set, going to a stricter level is free (locking never needs a key); loosening the level, or changing / clearing
-  // the PIN, needs the PIN.
-  const loosen = LEVEL_RANK[b.level] > LEVEL_RANK[safety.level];
-  const needs = typeof b.newPin === 'string' || loosen;
-  if (safety.pin && needs && b.pin !== safety.pin) return { code: 403, body: { error: loosen ? '切换到更宽松的级别需要家长 PIN' : '需要家长 PIN', pin: true } };
-  const after = ['kids', 'standard', 'all'].includes(b.level) ? b.level : safety.level;
-  // A PIN guards the stricter levels, so it can only be removed while the level is 「全部」. (Forgotten PIN: run reset-pin.js on the host.)
-  if (b.newPin === '' && safety.pin && after !== 'all') return { code: 403, body: { error: '儿童 / 标准模式下不能清除 PIN，先切到「全部」（需要 PIN）。忘记 PIN 的话，在运行服务的电脑上执行 node reset-pin.js' } };
-  if (['kids', 'standard', 'all'].includes(b.level)) safety.level = b.level;
-  if (typeof b.newPin === 'string') safety.pin = b.newPin.trim();
-  writeJson(SAFETY, safety);
-  broadcastReload();
-  return { body: { level: safety.level, hasPin: !!safety.pin } };
-};
-
 rpcHandlers.config = async ({ op, body: b }) => {
   let extra = {};
   if (op === 'put') config = normalize(b);
@@ -3972,7 +4004,9 @@ async function relay(target, res, req) {
 // no-cache + ETag: the browser revalidates, so an updated app.js/style.css shows up on the next load.
 const staticCache = new Map();
 async function serveStatic(p, req, res) {
-  const file = path.normalize(path.join(PUBLIC, p === '/' ? 'index.html' : p));
+  if (p === '/admin') { res.writeHead(301, { Location: '/admin/' }); return res.end(); }
+  if (p.endsWith('/')) p += 'index.html';   // /admin/ → public/admin/index.html (管理后台)
+  const file = path.normalize(path.join(PUBLIC, p === '/index.html' ? 'index.html' : p));
   if (!file.startsWith(PUBLIC)) return send(res, 403, 'forbidden', 'text/plain');
   const st = await fsp.stat(file).catch(() => null);
   if (!st || !st.isFile()) return send(res, 404, 'not found', 'text/plain');
@@ -4006,21 +4040,29 @@ async function serveStatic(p, req, res) {
   res.end(body);
 }
 
-// ---- 访问令牌 ----
-// 一道统一的闸，放在所有路由前面：除了网页本身的静态文件，/api /hls /img /dl /media 全部要令牌，没有一个接口单独处理。
-// 令牌两种带法，都不走 URL：Cookie（浏览器登录后服务端种下，HttpOnly、长期有效，<img> / <video> / hls 请求自动带上）、
-// Authorization: Bearer（网页的 fetch 拦截器带，用来登录和 Cookie 丢了时自动恢复）。
-// 带对了令牌、而 Cookie 还不对，就顺手种一个 Cookie。
+// ---- 管理员令牌 / 账号会话 ----
+// 没有访问令牌这道闸了：谁都能打开网页，访客是「标准」级别。账号会话 (tvbox_sess Cookie / X-Session 头) 决定安全级别和是否管理员；
+// 管理员令牌 (tvbox_admin Cookie / X-Admin-Token 头) 能重启 / 更新服务、进管理后台。
 const INDEX_HTML = path.join(PUBLIC, 'index.html');
-const COOKIE = 'tvbox_token';
-const tokenHash = crypto.createHash('sha256').update(TOKEN).digest();
-const tokenOk = v => typeof v === 'string' && v.length > 0 && v.length < 512 &&
-  crypto.timingSafeEqual(crypto.createHash('sha256').update(v).digest(), tokenHash);
 const ADMIN_COOKIE = 'tvbox_admin';
 const adminHash = crypto.createHash('sha256').update(ADMIN_TOKEN).digest();
 const adminTokenOk = v => typeof v === 'string' && v.length > 0 && v.length < 512 &&
   crypto.timingSafeEqual(crypto.createHash('sha256').update(v).digest(), adminHash);
-const adminAuthed = req => adminTokenOk(cookieOf(req, ADMIN_COOKIE)) || adminTokenOk(String(req.headers['x-admin-token'] || ''));
+const tokenAdmin = req => adminTokenOk(cookieOf(req, ADMIN_COOKIE)) || adminTokenOk(String(req.headers['x-admin-token'] || ''));
+// 管理员 = 管理员账号 (登录后 req.who.admin) 或者带着管理员令牌的浏览器
+const adminAuthed = req => !!req.who?.admin || tokenAdmin(req);
+const SESS_COOKIE = 'tvbox_sess';   // 账号会话令牌: 页面 (acct.js) 登录 / 切换账号时种下, <img> <video> 这类带不了请求头的请求也靠它认出是谁
+const sessionToken = req => str(req.headers['x-session']) || cookieOf(req, SESS_COOKIE);
+// 会话 -> 账号 { id, name, level, admin }；worker 里缓存 20 秒, 账号有改动时 reloadState 会清掉
+async function sessionOf(tok) {
+  if (!tok || tok.length > 200) return null;
+  const c = sessCache.get(tok);
+  if (c && Date.now() - c.at < SESS_TTL) return c.u;
+  const u = await rpc('who', { token: tok }, 8000).catch(() => (c ? c.u : null));
+  sessCache.set(tok, { u: u || null, at: Date.now() });
+  if (sessCache.size > 500) sessCache.delete(sessCache.keys().next().value);
+  return u || null;
+}
 const cookieOf = (req, name) => {
   for (const part of String(req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');
@@ -4028,23 +4070,8 @@ const cookieOf = (req, name) => {
   }
   return '';
 };
-const failures = new Map(); // ip -> { n, reset }  给错令牌的次数（每个 worker 各记各的）
+const failures = new Map(); // ip -> { n, reset }  给错管理员令牌的次数（每个 worker 各记各的）
 setInterval(() => { const now = Date.now(); for (const [k, v] of failures) if (v.reset < now) failures.delete(k); }, 60000).unref();
-// -> { ok, tooMany, fresh }  fresh = 令牌是 header 带的，Cookie 还没有
-function checkAuth(req, u) {
-  if (tokenOk(cookieOf(req, COOKIE))) return { ok: true };
-  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
-  if (!m) return { ok: false };
-  const given = m[1].trim();
-  const ip = req.socket.remoteAddress || '';
-  const f = failures.get(ip);
-  if (f && f.n >= 10 && f.reset > Date.now()) return { ok: false, tooMany: true };
-  if (tokenOk(given)) return { ok: true, fresh: true };
-  const x = f && f.reset > Date.now() ? f : { n: 0, reset: Date.now() + 60000 };
-  x.n++; failures.set(ip, x);
-  return { ok: false, bad: true };
-}
-
 // ---- worker protection: heartbeat to the primary, memory / event-loop self check, drain on request, crash handlers ----
 {
   const role = !cluster.isWorker ? '' : process.env.TVBOX_LEADER === '1' ? 'leader' : process.env.TVBOX_MEDIA === '1' ? 'media' : 'web';
@@ -4073,27 +4100,24 @@ function checkAuth(req, u) {
 }
 const handle = async (req, res) => {
   const u = new URL(req.url, 'http://x');
-  const guarded = /^\/(api|hls|img|dl|media)(\/|$)/.test(u.pathname);
-  const a = checkAuth(req, u);
-  req.authed = a.ok;
-  if (a.fresh) {
-    const secure = req.socket.encrypted || /^https\b/i.test(req.headers['x-forwarded-proto'] || '');
-    res.setHeader('Set-Cookie', `${COOKIE}=${encodeURIComponent(TOKEN)}; Path=/; Max-Age=315360000; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`);
-  }
-  if (guarded && !a.ok) {
-    res.setHeader('X-Auth-Required', '1');
-    if (a.tooMany) res.setHeader('Retry-After', '60');
-    return send(res, a.tooMany ? 429 : 401, { error: a.tooMany ? '令牌错误次数太多，请 1 分钟后再试' : '需要访问令牌', auth: true });
-  }
+  req.authed = true;
   const gone = new AbortController();
   res.on('close', () => { if (!res.writableFinished) gone.abort(); });
   try {
-    if (u.pathname.startsWith('/api/')) return await reqCtx.run({ signal: gone.signal }, () => api(u.pathname.slice(5), u.searchParams, res, req));
-    if (u.pathname === '/hls') return await relay(u.searchParams.get('u') || '', res, req);
-    if (u.pathname === '/img') return await reqCtx.run({ signal: gone.signal }, () => imageProxy(u.searchParams.get('u') || '', res));
-    if (u.pathname.startsWith('/dl/')) return await serveDownload(u.pathname.slice(4), req, res);
-    if (u.pathname.startsWith('/media/')) return await serveMedia(u.pathname.slice(7), req, res);
-    return await serveStatic(decodeURIComponent(u.pathname), req, res);
+    // 谁在请求: 按会话查出账号 → 安全级别 / 是否管理员。没带会话 = 访客 = 「标准」。静态资源用不着, 不查。
+    const dyn = u.pathname === '/' || /^\/(api|hls|dl|media)(\/|$)/.test(u.pathname) || /\.html?$/.test(u.pathname) || u.pathname.endsWith('/');
+    const tok = dyn ? sessionToken(req) : '';
+    const who = tok ? await sessionOf(tok) : null;
+    req.who = who;
+    const store = { signal: gone.signal, level: acctLevel(who), who };
+    return await reqCtx.run(store, async () => {
+      if (u.pathname.startsWith('/api/')) return await api(u.pathname.slice(5), u.searchParams, res, req);
+      if (u.pathname === '/hls') return await relay(u.searchParams.get('u') || '', res, req);
+      if (u.pathname === '/img') return await imageProxy(u.searchParams.get('u') || '', res);
+      if (u.pathname.startsWith('/dl/')) return await serveDownload(u.pathname.slice(4), req, res);
+      if (u.pathname.startsWith('/media/')) return await serveMedia(u.pathname.slice(7), req, res);
+      return await serveStatic(decodeURIComponent(u.pathname), req, res);
+    });
   } catch (e) {
     if (res.destroyed) return;            // the browser already gave up (page switched)
     if (!res.headersSent) send(res, 502, { error: e.message || String(e) });

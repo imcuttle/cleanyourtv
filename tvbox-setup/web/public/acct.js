@@ -12,19 +12,23 @@
 const PV = new URLSearchParams(location.search).get('pv');
 const ls = window.localStorage;
 const LIST = 'tvbox_accts', ACTIVE = 'tvbox_acct', LOST = 'tvbox_acct_lost', ON = 'tvbox_acct_on';
-const KV = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols']);
+const KV = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols', 'cardMode', 'cardScale']);   // cardMode / cardScale: 封面设置
 const rj = (k, d) => { try { const v = JSON.parse(ls.getItem(k)); return v ?? d; } catch { return d; } };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-// 账号管理 (登录 / 注册 / 切换 / 退出 / 改密码 / 删号 / 清空 / 导入) 只有安全级别为「全部」时才能操作，和源设置一样；app.js 的 state.level 随时是最新的
-const LV = { kids: '儿童', standard: '标准' };
-const lockedNow = () => typeof state !== 'undefined' && !!state.level && state.level !== 'all';
-const LOCK_MSG = () => `账号管理只能在安全级别「全部」下操作（现在是「${LV[state.level] || state.level}」）`;
-const guard = () => { if (lockedNow()) throw new Error(LOCK_MSG()); };
+const LV = { kids: '儿童', standard: '标准', all: '全部' };
+// 账号会话令牌同时种进 Cookie (tvbox_sess)：<img> / <video> / 页面导航这类带不了请求头的请求，服务端也靠它认出是谁、算安全级别。
+// 登录 / 切换 / 退出时同步；预览页 (?pv=) 不动它。
+function setSessCookie(tok) {
+  if (PV) return;
+  const secure = location.protocol === 'https:' ? '; Secure' : '';
+  document.cookie = `tvbox_sess=${tok ? encodeURIComponent(tok) : ''}; Path=/; Max-Age=${tok ? 31536000 : 0}; SameSite=Lax${secure}`;
+}
 
 let accts = rj(LIST, []).filter(a => a && a.id && a.token);
 let me = accts.find(a => a.id === Number(ls.getItem(ACTIVE))) || null;
 if (!me) ls.setItem(ACTIVE, '0');
+setSessCookie(me ? me.token : '');
 const saveList = () => ls.setItem(LIST, JSON.stringify(accts));
 const pre = id => 'u' + id + ':';
 const ns = () => (me ? pre(me.id) : '');
@@ -134,12 +138,13 @@ function lost(who) {
   if (!who || !accts.some(a => a.id === who.id)) return;
   ls.setItem(LOST, who.name);
   accts = accts.filter(a => a.id !== who.id); saveList(); wipeLocal(who.id);
-  if (me && me.id === who.id) { ls.setItem(ACTIVE, '0'); location.reload(); }
+  if (me && me.id === who.id) { ls.setItem(ACTIVE, '0'); setSessCookie(''); location.reload(); }
 }
 async function switchTo(id) {
   if (PV) return;
   if (me) await Promise.race([flush(true), sleep(1500)]);
   ls.setItem(ACTIVE, String(id || 0));
+  setSessCookie((accts.find(a => a.id === id) || {}).token || '');   // 重新加载的第一个请求就要带上新账号的会话
   location.hash = '#/';
   location.reload();
 }
@@ -166,21 +171,18 @@ const API = {
   get me() { return me; }, get list() { return accts.slice(); }, UD, status, guestHasData,
   op: queue, flush, pull,
   ready: null,
-  async register(username, password, withGuest) {
-    guard();
-    const r = await call('register', 'POST', { username, password, import: withGuest && guestHasData() ? guestSnapshot() : undefined });
+  async register(username, password, withGuest, level) {
+    const r = await call('register', 'POST', { username, password, level, import: withGuest && guestHasData() ? guestSnapshot() : undefined });
     if (!r.ok) throw new Error(r.j.error || '注册失败');
     return enroll(r.j);
   },
   async login(username, password) {
-    guard();
     const r = await call('login', 'POST', { username, password });
     if (!r.ok) throw new Error(r.j.error || '登录失败');
     return enroll(r.j);
   },
   switchTo,
   async remove(id) {
-    guard();
     const a = accts.find(x => x.id === id); if (!a) return;
     call('logout', 'POST', {}, a.token).catch(() => {});
     accts = accts.filter(x => x.id !== id); saveList(); wipeLocal(id);
@@ -188,28 +190,31 @@ const API = {
   },
   async info() { if (!me) return null; const r = await call('me', 'GET', undefined, me.token); if (r.status === 401 && r.j.session === false) { lost(me); return null; } return r.ok ? r.j : null; },
   async importGuest() {
-    guard();
     if (!me) return null;
     const r = await call('import', 'POST', guestSnapshot(), me.token);
     if (!r.ok) throw new Error(r.j.error || '导入失败');
     box = []; persist(); await pull(); return r.j.stats;
   },
   async clear(what) {
-    guard();
     if (!me) return null;
     await flush();
     const r = await call('clear', 'POST', { what }, me.token);
     if (!r.ok) throw new Error(r.j.error || '清空失败');
     box = []; persist(); await pull(); return r.j.stats;
   },
-  async password(old, next) { guard(); const r = await call('password', 'POST', { old, next }, me.token); if (!r.ok) throw new Error(r.j.error || '修改失败'); },
+  async claim(token) {   // 用管理员令牌把当前账号升为管理员
+    if (!me) throw new Error('先登录账号');
+    const r = await call('claim', 'POST', { token }, me.token);
+    if (!r.ok) throw new Error(r.j.error || '失败');
+    return r.j.user;
+  },
+  async password(old, next) { const r = await call('password', 'POST', { old, next }, me.token); if (!r.ok) throw new Error(r.j.error || '修改失败'); },
   async destroy(password) {
-    guard();
     const who = me;
     const r = await call('delete', 'POST', { password }, who.token);
     if (!r.ok) throw new Error(r.j.error || '删除失败');
     accts = accts.filter(x => x.id !== who.id); saveList(); wipeLocal(who.id);
-    ls.setItem(ACTIVE, '0'); location.hash = '#/'; location.reload();
+    ls.setItem(ACTIVE, '0'); setSessCookie(''); location.hash = '#/'; location.reload();
   },
 };
 // 启动时：登录了账号就先拉一次最新数据 (最多等 0.9 秒，服务慢就先用本地缓存，不拖慢首屏)
@@ -231,7 +236,7 @@ function paintBtn() {
   btn.title = me ? '账号：' + me.name : '访客（本机）· 点击登录 / 切换账号';
 }
 function paintMenu() {
-  menu.innerHTML = `<div class="mhead">切换账号${lockedNow() ? ' · 已锁定' : ''}</div>
+  menu.innerHTML = `<div class="mhead">切换账号</div>
     <button type="button" data-id="0" class="${me ? '' : 'on'}">${guestAv}<span>访客（本机）</span>${me ? '' : '<i>当前</i>'}</button>
     ${accts.map(a => `<button type="button" data-id="${a.id}" class="${me && me.id === a.id ? 'on' : ''}">${avatar(a.name)}<span>${esc(a.name)}</span>${me && me.id === a.id ? '<i>当前</i>' : ''}</button>`).join('')}`;
 }
@@ -252,7 +257,6 @@ function mountHeader() {
   menu.onclick = e => {
     const b = e.target.closest('button'); if (!b) return;
     Pop.close();
-    if (lockedNow()) return say(LOCK_MSG());
     const id = Number(b.dataset.id);
     if ((me ? me.id : 0) !== id) switchTo(id);
   };
@@ -277,14 +281,6 @@ async function mountSettings(el) {
   if (!el.isConnected) return;
   const render = () => {
     const stats = info && info.stats;
-    if (lockedNow()) {   // 安全级别不是「全部」: 只看得到当前是谁, 一切操作都收起来 (服务端同样拒绝)
-      el.innerHTML = `<h2>账号管理</h2>
-        <div class="acct-now">${me ? avatar(me.name, 'lg') : guestAv.replace('class="av guest"', 'class="av guest lg"')}
-          <div class="nm"><b>${me ? esc(me.name) : '访客（本机）'}</b><small>${me ? '已登录 · 数据在服务端' : '不登录，数据只存在这个浏览器里'}</small></div>
-          ${stats ? `<div class="acct-stats"><span><b>${stats.history}</b>观看记录</span><span><b>${stats.favs}</b>收藏</span><span><b>${stats.liveFavs}</b>直播收藏</span></div>` : ''}</div>
-        <section class="locklote"><h2>账号管理已锁定</h2><p class="hint">当前安全级别是「${esc(LV[state.level] || state.level)}」。登录、注册、切换账号、退出、改密码、删除账号、清空和导入数据只能在「全部」下操作。想改的话，先在上面把安全级别切到「全部」。已登录的账号照常同步观看进度和收藏。</p></section>`;
-      return;
-    }
     const rows = [{ id: 0, name: '访客（本机）', guest: 1 }, ...accts].map(a => `
       <div class="acct-row ${((me ? me.id : 0) === a.id) ? 'cur' : ''}">${a.guest ? guestAv : avatar(a.name)}
         <div class="nm"><b>${esc(a.name)}</b><small>${a.guest ? '不登录，数据只存在这个浏览器里' : '已登录 · 数据在服务端'}</small></div>
@@ -292,12 +288,13 @@ async function mountSettings(el) {
         ${a.guest ? '' : `<button class="small ghost" data-rm="${a.id}" title="从这台设备上退出这个账号（数据仍保留在服务端，下次输密码即可登录）">退出</button>`}</div>`).join('');
     const subForm = {
       pw: `<form class="acct-sub" data-f="pw"><input type="password" name="old" placeholder="旧密码" autocomplete="current-password" required><input type="password" name="next" placeholder="新密码（6 位以上）" autocomplete="new-password" minlength="6" required><button class="small" type="submit">保存</button><button class="small ghost" type="button" data-sub="">取消</button></form>`,
+      claim: `<form class="acct-sub" data-f="claim"><span class="acct-warn" style="color:inherit">输入管理员令牌（服务启动窗口里显示，也存在 web/.env 的 TVBOX_ADMIN_TOKEN），这个账号就升为管理员。</span><input type="password" name="tok" placeholder="管理员令牌" autocomplete="off" required><button class="small" type="submit">升为管理员</button><button class="small ghost" type="button" data-sub="">取消</button></form>`,
       del: `<form class="acct-sub" data-f="del"><span class="acct-warn">会删除这个账号的全部观看历史、收藏和偏好，不可恢复。</span><input type="password" name="pw" placeholder="输入密码确认" autocomplete="current-password" required><button class="small danger" type="submit">永久删除</button><button class="small ghost" type="button" data-sub="">取消</button></form>`,
     }[sub] || '';
     el.innerHTML = `<h2>账号管理</h2>
       <p class="hint">用用户名和密码注册账号，观看历史、播放进度、收藏、沉浸推荐偏好都归账号所有，账号之间互不可见。同一台设备可以登录多个账号随时切换；换一台设备登录同一个账号，进度和收藏跟着走。</p>
       <div class="acct-now">${me ? avatar(me.name, 'lg') : guestAv.replace('class="av guest"', 'class="av guest lg"')}
-        <div class="nm"><b>${me ? esc(me.name) : '访客（本机）'}</b><small>${me ? `注册于 ${info ? fmtDate(info.user.created) : '…'}` : '还没登录：数据只存在这个浏览器里，登录后才会同步、才能跨设备'}</small></div>
+        <div class="nm"><b>${me ? esc(me.name) : '访客（本机）'}${info && info.user.admin ? ' <span class="acct-tag">管理员</span>' : ''}</b><small>${me ? `注册于 ${info ? fmtDate(info.user.created) : '…'}${info ? ' · 安全级别「' + (LV[info.user.level] || info.user.level) + '」' : ''}` : '还没登录：数据只存在这个浏览器里，安全级别固定是「标准」；登录后才会同步、才能跨设备'}</small></div>
         ${stats ? `<div class="acct-stats"><span><b>${stats.history}</b>观看记录</span><span><b>${stats.favs}</b>收藏</span><span><b>${stats.liveFavs}</b>直播收藏</span></div>` : ''}</div>
       <div class="acct-list">${rows}</div>
       <div class="acct-box">
@@ -306,11 +303,13 @@ async function mountSettings(el) {
           <input name="username" placeholder="用户名（2~20 个字）" autocomplete="username" autocapitalize="off" spellcheck="false" required>
           <input name="password" type="password" placeholder="密码${tab === 'reg' ? '（6 位以上）' : ''}" autocomplete="${tab === 'reg' ? 'new-password' : 'current-password'}" required>
           ${tab === 'reg' ? '<input name="again" type="password" placeholder="再输一次密码" autocomplete="new-password" required>' : ''}
+          ${tab === 'reg' ? '<div class="acct-lv"><span class="lan">安全级别</span><div class="seg"><button type="button" data-lv="standard" class="on">标准</button><button type="button" data-lv="kids">儿童</button></div><span class="lan">注册后只有管理员能改；「全部」只有管理员账号能用</span></div>' : ''}
           ${tab === 'reg' && guestHasData() ? '<label class="flag acct-imp"><input type="checkbox" name="imp" checked>把这个浏览器里的观看记录和收藏带到新账号</label>' : ''}
           <button class="small primary" type="submit">${tab === 'reg' ? '注册并登录' : '登录'}</button><span class="acct-msg" aria-live="polite"></span>
         </form></div>
       ${me ? `<div class="actions acct-acts">
         <button class="small" data-sub="pw">修改密码</button>
+        ${info && info.user.admin ? '<a class="btn more" href="/admin/" target="_blank" rel="noopener">管理后台</a>' : '<button class="small" data-sub="claim" title="用管理员令牌把这个账号升为管理员">升为管理员</button>'}
         ${guestHasData() ? '<button class="small" data-act="imp" title="把这个浏览器作为访客时留下的记录并入当前账号（同一部片取较新的一条）">导入访客数据</button>' : ''}
         <button class="small" data-act="clr-hist">清空观看历史</button><button class="small" data-act="clr-favs">清空收藏</button>
         <button class="small danger" data-sub="del">删除账号</button></div>${subForm}` : ''}`;
@@ -324,12 +323,14 @@ async function mountSettings(el) {
     el.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { if (confirm('从这台设备上退出这个账号？数据仍保留在服务端，下次输入密码即可登录。')) API.remove(Number(b.dataset.rm)); });
     el.querySelectorAll('[data-sub]').forEach(b => b.onclick = () => { sub = b.dataset.sub; render(); });
     const form = el.querySelector('#acctForm');
+    let regLv = 'standard';
+    el.querySelectorAll('[data-lv]').forEach(b => b.onclick = () => { regLv = b.dataset.lv; el.querySelectorAll('[data-lv]').forEach(x => x.classList.toggle('on', x === b)); });
     form.onsubmit = async e => {
       e.preventDefault();
       const f = new FormData(form), u = String(f.get('username') || '').trim(), p = String(f.get('password') || '');
       if (tab === 'reg' && p !== f.get('again')) return msg(false, '两次密码不一样');
       const go = form.querySelector('button[type=submit]'); go.disabled = true; msg(true, '请稍候…');
-      try { tab === 'reg' ? await API.register(u, p, !!f.get('imp')) : await API.login(u, p); }
+      try { tab === 'reg' ? await API.register(u, p, !!f.get('imp'), regLv) : await API.login(u, p); }
       catch (err) { go.disabled = false; msg(false, err.message); }
     };
     el.querySelector('[data-act=imp]')?.addEventListener('click', async () => { try { const s = await API.importGuest(); say(`已导入：观看记录 ${s.history} 条，收藏 ${s.favs} 部`); refresh(); } catch (err) { say(err.message); } });
@@ -339,6 +340,10 @@ async function mountSettings(el) {
     el.querySelector('[data-f=pw]')?.addEventListener('submit', async e => {
       e.preventDefault(); const f = new FormData(e.target);
       try { await API.password(String(f.get('old')), String(f.get('next'))); sub = ''; say('密码已修改，其它设备需要重新登录'); render(); } catch (err) { say(err.message); }
+    });
+    el.querySelector('[data-f=claim]')?.addEventListener('submit', async e => {
+      e.preventDefault();
+      try { await API.claim(String(new FormData(e.target).get('tok'))); sub = ''; say('已升为管理员'); await refresh(); } catch (err) { say(err.message); }
     });
     el.querySelector('[data-f=del]')?.addEventListener('submit', async e => {
       e.preventDefault();

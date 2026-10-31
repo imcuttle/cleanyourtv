@@ -25,7 +25,7 @@ if [ -z "$NODE" ]; then
   fi
 fi
 command -v ffmpeg >/dev/null 2>&1 || echo "提示：装了 ffmpeg（brew install ffmpeg）后，直播封面和悬停预览由服务端生成，更快。"
-# 访问令牌：第一次启动由 server.js 在 .env 里生成 TVBOX_TOKEN，并在这个窗口里打印；浏览器输入一次后会一直记住。
+# 没有访问令牌，打开网页不需要口令。管理员令牌第一次启动由 server.js 在 .env 里生成 TVBOX_ADMIN_TOKEN，并在这个窗口里打印。
 export PORT=${PORT:-9988}
 (sleep 1.5; open "http://localhost:$PORT") &
 exec "$NODE" server.js

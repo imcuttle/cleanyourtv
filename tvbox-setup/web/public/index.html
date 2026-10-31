@@ -16,121 +16,9 @@
 <link rel="icon" href="icon.svg">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=20261031v">
-<style>
-/* 访问令牌蒙层。html 的 data-auth 属性由服务端写：1 已登录（蒙层从头到尾不存在）、0 未登录（首帧就是登录框）；
-   pending = 正在用浏览器里记住的令牌自动登录（只显示 logo，不闪登录框）。没有这个属性 = 离线缓存的页面，按 pending 处理。 */
-#authMask{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:#141414;color:#fff;
-  font:15px/1.45 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
-  opacity:0;visibility:hidden;pointer-events:none;transition:opacity .2s ease,visibility 0s linear .2s}
-html:not([data-auth="1"]) #authMask{opacity:1;visibility:visible;pointer-events:auto;transition:opacity .15s ease}
-html:not([data-auth="1"]) body>:not(#authMask){visibility:hidden}
-#authMask .am-box{width:min(340px,86vw);text-align:center}
-#authMask .am-logo{font-size:32px;font-weight:800;letter-spacing:1px;color:#e50914;margin-bottom:26px}
-#authMask form{opacity:0;visibility:hidden;transition:opacity .15s ease}  /* 占着位置：pending → 登录框时 logo 不会跳 */
-html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
-#authMask .am-hint{margin:0 0 12px;color:#ddd}
-#authMask input{box-sizing:border-box;width:100%;height:44px;padding:0 14px;border-radius:8px;border:1px solid #ffffff40;background:#000a;color:#fff;font:inherit;font-size:16px;outline:none;text-align:center;letter-spacing:1px}
-#authMask input:focus{border-color:#fff}
-#authMask button{margin-top:12px;width:100%;height:44px;border:0;border-radius:8px;background:#e50914;color:#fff;font:inherit;font-size:16px;font-weight:700}
-#authMask button:disabled,#authMask input:disabled{opacity:.6}
-#authMask .msg{min-height:20px;margin-top:10px;color:#ff6b6d;font-size:13px}
-#authMask .am-sub{margin:6px 0 0;color:#8a8a8a;font-size:12px}
-</style>
-<script>
-/* 统一的接口拦截：/api /hls /img /dl /media 的 fetch 都经过这里。
-   - 请求带上浏览器里记住的令牌（服务端据此种下 HttpOnly Cookie，之后 <img> / <video> 也自动通过）
-   - 拿到 401：令牌失效，蒙层盖上，请求挂起；输入对了自动重发，页面不用刷新、业务代码不用管 */
-(() => {
-  'use strict';
-  const KEY = 'tvbox_token', root = document.documentElement, rawFetch = window.fetch.bind(window);
-  const store = {
-    get() { try { return localStorage.getItem(KEY) || ''; } catch { return ''; } },
-    set(v) { try { v ? localStorage.setItem(KEY, v) : localStorage.removeItem(KEY); } catch {} }
-  };
-
-  let state = root.getAttribute('data-auth'), ready = Promise.resolve(), release = () => {}, epoch = 0;
-  const wait = () => { ready = new Promise(r => { release = r; }); };
-  const focusSoon = () => requestAnimationFrame(() => { const i = document.getElementById('authToken'); if (i) i.focus({ preventScroll: true }); });
-  const set = s => { state = s; root.setAttribute('data-auth', s); if (s === '1') release(); else if (s === '0') focusSoon(); };
-  const until = signal => new Promise((ok, no) => {
-    const abort = () => no(new DOMException('Aborted', 'AbortError'));
-    if (signal && signal.aborted) return abort();
-    if (signal) signal.addEventListener('abort', abort, { once: true });
-    ready.then(ok);
-  });
-  // GET /api/safety（已有的接口）当探针：200 = 令牌对
-  async function verify(token) {
-    try {
-      const r = await rawFetch('/api/safety', { cache: 'no-store', headers: token ? { Authorization: 'Bearer ' + token } : {} });
-      return r.ok ? 'ok' : r.status === 401 ? 'bad' : r.status === 429 ? 'limited' : 'offline';
-    } catch { return 'offline'; }
-  }
-
-  if (state !== '1') {
-    wait();
-    if (state !== '0' && store.get()) {          // 离线缓存页 + 有记住的令牌：先当已登录放行（不等一次网络往返），后台验证；令牌不对再盖蒙层
-      const t = store.get();
-      set('1');
-      verify(t).then(r => { if (r === 'bad' && state === '1') { store.set(''); wait(); set('0'); } });
-    } else if (state !== '0' || store.get()) {   // 不确定 / 有记住的令牌：先静默验证，不出登录框
-      root.setAttribute('data-auth', state = 'pending');
-      verify(store.get()).then(r => {
-        if (r === 'ok' || r === 'offline') return set('1');   // offline：不是令牌的问题，让页面按原来的样子处理
-        if (r === 'bad') store.set('');
-        set('0');
-      });
-    }
-    document.addEventListener('DOMContentLoaded', () => { if (state === '0') focusSoon(); });
-  }
-
-  const guarded = input => {
-    try { const u = new URL(typeof input === 'string' ? input : input.url || String(input), location.href); return u.origin === location.origin && /^\/(api|hls|img|dl|media)\//.test(u.pathname); }
-    catch { return false; }
-  };
-  window.fetch = async function (input, init) {
-    if (!guarded(input)) return rawFetch(input, init);
-    const signal = init && init.signal;
-    for (;;) {
-      while (state !== '1') await until(signal);
-      const sent = epoch, t = store.get();
-      let opts = init;
-      if (t && typeof input === 'string') { const h = new Headers(init && init.headers); if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + t); opts = { ...init, headers: h }; }
-      const r = await rawFetch(input, opts);
-      if ((r.status !== 401 && r.status !== 429) || r.headers.get('X-Auth-Required') !== '1') return r;
-      if (sent === epoch) { store.set(''); if (state === '1') { wait(); set('0'); } }   // 令牌失效（改过 / Cookie 被清）→ 蒙层
-    }
-  };
-
-  document.addEventListener('submit', async e => {
-    const f = e.target;
-    if (!f || f.id !== 'authForm') return;
-    e.preventDefault();
-    const inp = f.elements.token, btn = f.querySelector('button'), msg = f.querySelector('.msg'), t = inp.value.trim();
-    if (!t) return inp.focus();
-    btn.disabled = inp.disabled = true; msg.textContent = '';
-    const r = await verify(t);
-    btn.disabled = inp.disabled = false;
-    if (r === 'ok') { store.set(t); epoch++; inp.value = ''; set('1'); return; }
-    msg.textContent = r === 'limited' ? '错误次数太多，请 1 分钟后再试' : r === 'offline' ? '连不上服务，稍后再试' : '令牌不对，再核对一下';
-    inp.focus(); inp.select();
-  });
-})();
-</script>
+<link rel="stylesheet" href="style.css?v=20261031w">
 </head>
 <body>
-<div id="authMask" role="dialog" aria-modal="true" aria-label="访问验证">
-  <div class="am-box">
-    <div class="am-logo">TVBOX</div>
-    <form id="authForm" autocomplete="on">
-      <p class="am-hint">请输入访问令牌</p>
-      <input id="authToken" name="token" type="password" autocomplete="current-password" placeholder="访问令牌" spellcheck="false" autocapitalize="off" autocorrect="off" enterkeyhint="go">
-      <button type="submit">进入</button>
-      <div class="msg" aria-live="polite"></div>
-      <p class="am-sub">令牌在启动服务的窗口里，也存在服务端 web/.env 的 TVBOX_TOKEN</p>
-    </form>
-  </div>
-</div>
 <header id="top">
   <!-- Back / forward / reload: an installed (standalone) window has no browser toolbar. Shown only there on PC. -->
   <div class="hnav" id="hnav">
@@ -253,8 +141,8 @@ html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
 
 <script>if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));</script>
 <script src="vendor/hls.min.js"></script>
-<script src="acct.js?v=20261031v"></script>
-<script src="app.js?v=20261031v"></script>
-<script src="feed.js?v=20261031v"></script>
+<script src="acct.js?v=20261031w"></script>
+<script src="app.js?v=20261031w"></script>
+<script src="feed.js?v=20261031w"></script>
 </body>
 </html>

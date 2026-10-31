@@ -48,7 +48,7 @@ every source editable in the app rather than baked in.
 | 历史 / 收藏 | 继续观看 with progress; delete one or clear all; 收藏 for 点播 and 直播 (hidden in 儿童) | same, under 我的 |
 | 详情 | 分类 tag opens that category; 导演 / 演员 chips open their other works across all sources | same |
 | 后台 | — | background audio, lock-screen controls, Picture-in-Picture when switching apps |
-| 安全级别 | 儿童 · 标准 · 全部, optional parent PIN | same |
+| 安全级别 | 儿童 · 标准 · 全部, per account (admin sets it; guests are 标准) | same |
 
 ### Web
 
@@ -63,13 +63,16 @@ Phones only expose the system share sheet (WeChat, Messages, …), Service Worke
 address on the phone (the startup log prints it, with a QR code). With no certificate given it generates a self-signed one
 with `openssl` into `web/data/tls/` (localhost, host name and LAN IPs; regenerated when the IPs change) — the browser warns once,
 tap continue. For a warning-free setup point `TVBOX_TLS_CERT` / `TVBOX_TLS_KEY` at a real certificate. The origin differs
-from http, so enter the access token once more on the https address.
+from http, so accounts and guest data are separate on the https address.
 
-**Access token.** The first start generates `TVBOX_TOKEN` into `web/.env` (git-ignored) and prints it in the
-log. Browsers ask for it once (a full-screen mask, no flash either way),
-then keep it for good (HttpOnly cookie + localStorage backup). One gate in front of every route guards
-`/api /hls /img /dl /media`; only the page's static files are public. The token never travels in a URL
-(cookie, or `Authorization: Bearer …` for scripts). Share links carry none either: the recipient enters it once. Rotate it: delete the line in `.env`, restart.
+**Accounts, safety level and admin.** There is no access token: anyone who can reach the page opens it as a *guest* (safety level
+「标准」, data kept in that browser). Register an account (user name + password) to keep history, progress, favourites and the
+cover (竖版 / 横版 + size) setting on the server, per account, and to pick a level: 儿童 or 标准. The safety level belongs to the
+account; only an admin account can use 「全部」 and only an admin can change anybody's level. The first start generates
+`TVBOX_ADMIN_TOKEN` into `web/.env` (git-ignored) and prints it in the log: after registering, enter it in 设置 → 账号管理 to
+turn that account into an admin (or use it on `/admin/` directly). Only admins can edit sources (点播源 / 直播源 / 导入 / 本地媒体,
+and only while their own level is 「全部」) and see the 管理后台 at `/admin/` (users, sources, system). No parental PIN anymore.
+Rotate the admin token: delete the line in `.env`, restart.
 
 The server runs one worker per CPU core (`node:cluster`, set `WORKERS=n` to override); downloads,
 config writes, ffmpeg and 豆瓣 rate-limiting live in one leader worker the others talk to over IPC.
@@ -147,7 +150,7 @@ http on the LAN, so the web side relies on the paste event (or the box in 设置
 - **标准** (default) — hides sources marked 成人 and categories like 伦理 / 写真 / 福利.
 - **全部** — no filtering.
 
-Mark any source 少儿 or 成人 in 设置. Set a PIN and both the level and the source list need it.
+Mark any source 少儿 or 成人 in 设置 (admins only). The level is per account, set at registration (儿童 / 标准) and changeable only by an admin in the 管理后台; only admin accounts can use 全部.
 
 ## What is in here
 

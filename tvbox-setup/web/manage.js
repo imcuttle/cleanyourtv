@@ -3,11 +3,11 @@
 //   ↑↓ 选择，回车确认，默认停在上一次的操作；也可以直接带参数: node manage.js restart | update | check | stop | info
 //   重启          已经有一个在跑就先停掉它 (覆盖), 没有就直接新启动
 //   更新后重启    当前目录在 git 仓库里 -> git pull; 否则从 GitHub 下载默认分支最新 zip, 解压后替换程序文件
-//                 (data/ 数据、.env 令牌、.tools/ 便携 Node 与 ffmpeg 保留不动)；更新逻辑和网页「管理员」页共用 updater.js
+//                 (data/ 数据、.env 管理员令牌、.tools/ 便携 Node 与 ffmpeg 保留不动)；更新逻辑和网页「管理员」页共用 updater.js
 //   检查更新      只看有没有新版本 (结果带缓存), 不动任何文件
 //   停止服务      停掉正在运行的实例
 //   运行状态 / 查看日志   服务在后台运行 (关掉这个窗口不影响)，日志写在 data/server.log
-//   访问信息      打印访问地址、访问令牌和管理员令牌
+//   访问信息      打印访问地址和管理员令牌
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -46,7 +46,7 @@ const ACTIONS = [
   { key: 'stop', title: '停止服务', hint: '停掉正在运行的实例' },
   { key: 'status', title: '运行状态', hint: '是否在运行、进程号、访问地址' },
   { key: 'logs', title: '查看日志', hint: '服务在后台运行，输出写在 data/server.log (q 退出查看)' },
-  { key: 'info', title: '访问信息', hint: '访问地址、访问令牌、管理员令牌' },
+  { key: 'info', title: '访问信息', hint: '访问地址、管理员令牌' },
 ];
 let MODE = 'git';
 const updateHint = () => MODE === 'git' ? '检测到 git 仓库: git pull 更新后启动' : `不是 git 仓库: 下载 GitHub 仓库默认分支的最新 zip (${(() => { try { return updater.repoSlug(); } catch { return '?'; } })()}), 解压替换后启动`;
@@ -147,12 +147,13 @@ function procInfo(pid) {
 const isOurs = cmd => /(^|[\s/\\"])server\.js\b/.test(cmd);
 const isNode = info => !!info && (/^node(\.exe)?$/.test(info.name) || /node(\.exe)?"?\s/i.test(info.cmd));
 
-// 端口上到底是不是 TVBox: 直接问它。TVBox 的 /api/ 没带令牌会回 401 + X-Auth-Required: 1 (或带令牌回健康信息)。
-// 比看进程命令行可靠 (Windows 上命令行经常取不到 / 带引号 / 路径形式不一样)。注意: 请求不带令牌, 所以一定得到 401。
+// 端口上到底是不是 TVBox: 直接问它。TVBox 的 GET /api/safety 回 {level, admin, guest}（访客就是标准级别，不需要口令）。
+// 比看进程命令行可靠 (Windows 上命令行经常取不到 / 带引号 / 路径形式不一样)。
 function isTvboxOnPort() {
   return new Promise(resolve => {
-    const rq = http.get({ host: '127.0.0.1', port: PORT, path: '/api/health', timeout: 2500 }, res => {
-      res.resume(); resolve(res.statusCode === 401 && res.headers['x-auth-required'] === '1');   // 不带令牌访问 /api/* 一定是 401 + 这个头；别的 HTTP 服务不会有
+    const rq = http.get({ host: '127.0.0.1', port: PORT, path: '/api/safety', timeout: 2500 }, res => {
+      let b = ''; res.setEncoding('utf8'); res.on('data', c => { if (b.length < 4096) b += c; });
+      res.on('end', () => { try { const j = JSON.parse(b); resolve(res.statusCode === 200 && typeof j.level === 'string' && 'guest' in j); } catch { resolve(false); } });   // 别的 HTTP 服务不会回这个形状
     });
     rq.on('timeout', () => { rq.destroy(); resolve(false); });
     rq.on('error', () => resolve(false));
@@ -277,8 +278,7 @@ async function doInfo() {
   say(`本机      http://localhost:${PORT}`);
   for (const ip of lan) say(`局域网    http://${ip}:${PORT}`);
   await printHttps();
-  say(`\n访问令牌    ${a.token}`);
-  say(`管理员令牌  ${a.adminToken}   ${C.d}(设置页「管理员」里用)${C.x}`);
+  say(`\n管理员令牌  ${a.adminToken}   ${C.d}(注册账号后在设置页「账号管理」里输入它升为管理员；「管理后台」也用它登录)${C.x}`);
   say(`${C.d}令牌存在 ${a.file}${C.x}`);
 }
 
