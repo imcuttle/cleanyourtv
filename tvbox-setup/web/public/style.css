@@ -2122,3 +2122,19 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 #trashBusy b { font-size: 16px; }
 #trashBusy small { min-height: 18px; color: #ffffffb3; font-size: 13px; }
 #trashBusy .spinner { position: static; margin: 0; }
+
+/* 直播页切源 / 刷新: 旧内容留着调暗, 新的备好后一次换上 */
+#liveBody { transition: opacity .18s; }
+#liveBody.swapping { opacity: .45; pointer-events: none; }
+.ptrsnap { transition-duration: .4s; }
+
+/* ---------- 小屏详情页跟着卡片类型走 ----------
+   小屏详情页的封面原来写死成 170px 宽的 2:3 竖封面 (html:root 的优先级压过了 html.wide-cards), 选了横版卡片也是竖的。
+   横版: 封面改成通栏 16:9 (左右留 20px, 和下面的标题 / 按钮对齐), 取景偏上 (人脸多在上半部分); 竖版 (默认) 一点没动。 */
+@media (max-width: 760px) {
+  html:root.wide-cards .sheet { width: 100%; max-width: none; }   /* 大屏横版把详情页收成 94vw, 小屏是独立整页, 要满宽 */
+  html:root.wide-cards .sheet .top .poster { width: calc(100% - 40px); max-width: 560px; aspect-ratio: 16/9; border-radius: 12px; background-position: center 22%; border: 0; box-shadow: 0 14px 36px #000a; }
+  html:root.wide-cards .sheet .top { display: block; min-height: 0; padding: calc(env(safe-area-inset-top) + 52px) 0 0; }
+  html:root.wide-cards .sheet .top .info { padding-top: 18px; }
+  html:root.wide-cards .sheet .top h1 { font-size: 22px; }
+}

@@ -4053,15 +4053,20 @@ function lmRender() {
   const cur = localStorage.live;
   const nHid = state.lives.filter(l => l.hidden).length;
   if (!nHid) lm.tab = 'vis';
-  const tabs = $('#lmTabs'); if (tabs) tabs.innerHTML = menuTabs(state.lives.length - nHid, nHid, lm.tab, 'data-ltab');
+  const tabs = $('#lmTabs'); if (tabs) { const th = menuTabs(state.lives.length - nHid, nHid, lm.tab, 'data-ltab'); if (tabs._h !== th) { tabs._h = th; tabs.innerHTML = th; } }
   const rows = lmVisible();
-  box.innerHTML = rows.map(l => {
+  const html = rows.map(l => {
     const s = lmStatus(l.key), h = liveHealth.get(liveUrlOf(l.key));
     return `<div class="lpr ${l.key === cur ? 'on' : ''} ${h && h !== 'busy' && !h.ok ? 'dead' : ''} " data-k="${esc(l.key)}">
       <span class="nm" title="${esc(l.name)}">${esc(l.name)}</span>${s ? `<b class="hs">${s.html}</b>` : ''}
       ${state.level === 'all' ? `<em class="x" data-del="${esc(l.key)}" title="删除这个直播源">×</em>` : ''}</div>`;
   }).join('') || '<div class="lan" style="padding:10px">没有匹配的直播源</div>';
   $('#lmCount').textContent = lm.q ? `${rows.length} / ${state.lives.length}` : state.lives.length;
+  // 内容没变就不重画 (打开浮窗时会先画一遍、拉到最新的源列表后再画一遍, 整块重建就是「闪」); 变了也保持滚动位置
+  // 只对比「有哪些行、谁高亮」: 测速状态 (lmMark) 是原地更新的, 不算变化, 否则每次测速结果出来再画一遍列表又闪
+  const sig = rows.map(l => l.key + '\u0001' + l.name + '\u0001' + (l.key === cur ? 1 : 0)).join('\u0002') + '|' + state.level + '|' + lm.q;
+  if (box._h === sig) { $$('#llist .lpr').forEach(r => { const k = r.dataset.k; if (lmStatus(k)) lmMark(k); }); return; }
+  const top = box.scrollTop; box._h = sig; box.innerHTML = html; box.scrollTop = top;
   lmWatch();
 }
 async function lmSave(mutate) {
@@ -4173,7 +4178,9 @@ async function renderLive() {
         return;
       }
       const row = e.target.closest('.lpr'); if (!row) return;
+      if (row.dataset.k === localStorage.live && $('#liveBody .live')) { Pop.close(); return; }
       localStorage.live = row.dataset.k; setQuery({ g: '', q: '' });
+      $$('#llist .lpr').forEach(r => r.classList.toggle('on', r === row));   // 当场高亮, 不重画列表
       Pop.close();
       $('#lmName').textContent = l2name(); newPage(); loadLiveBody();
     };
@@ -4185,9 +4192,12 @@ async function renderLive() {
 const l2name = () => state.lives.find(l => l.key === localStorage.live)?.name || '无直播源';
 async function loadLiveBody() {
   const src = localStorage.live; liveSrc = src;
-  $('#liveBody').innerHTML = spinner;
+  const body = $('#liveBody');
+  // 已经有内容 (切源 / 下拉刷新): 旧内容留着并调暗, 新的备好后一次换上; 第一次进来没有内容才显示转圈 —— 中间不再出现「清空 → 转圈 → 重画」的闪烁
+  if (body.firstElementChild && !body.querySelector('.spinner')) body.classList.add('swapping'); else body.innerHTML = spinner;
   $('#chq').value = '';
   try { return await renderLiveBody(src); } catch (e) { if (!isAbort(e)) toast(e.message); }
+  finally { if (src === liveSrc) $('#liveBody')?.classList.remove('swapping'); }
 }
 async function renderLiveBody(src) {
   const [{ groups }, info] = await Promise.all([api('live', { src }), infoP()]);
@@ -5718,14 +5728,13 @@ function freezeView() {
 async function thawView(s, t0) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(Math.max(0, 450 - (Date.now() - t0)));                 // 至少转一会儿, 让人看到刷新了
-  for (let i = 0; i < 12; i++) {                                     // 首屏的封面还没显出来就再等等 (最多 ~0.7 秒), 淡出以后不会又是一排灰块
-    const pend = $$('#view img').some(im => { const r = im.getBoundingClientRect(); return r.top < innerHeight && r.bottom > 0 && !im.classList.contains('ok') && !im.complete; });
-    if (!pend) break;
-    await sleep(60);
-  }
+  // 首屏 (含横向滚动行的可见部分) 的封面要等到真正显出来 (.ok), 不是只等「下载完」: 图片下载完到淡入完成之间还有 0.35 秒, 这段时间卡片只有深色底, 垫图撤掉就是「黑一下」
+  const seen = () => $$('#view img:not(.ok)').filter(im => { const r = im.getBoundingClientRect(); return r.top < innerHeight && r.bottom > 0 && r.left < innerWidth && r.right > 0 && im.isConnected; });
+  for (let i = 0; i < 30 && seen().length; i++) await sleep(60);       // 最多再等 ~1.8 秒
+  await sleep(380);                                                      // 让 .ok 之后的淡入走完
   await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   s.style.opacity = '0';
-  setTimeout(() => s.remove(), 300);
+  setTimeout(() => s.remove(), 400);
 }
 // 小屏下拉刷新: 在页面最顶上继续往下拉, 过了阈值松手 = 清掉缓存 / 保活页面, 重新请求当前页的数据
 {
