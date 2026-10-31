@@ -1991,7 +1991,7 @@ function renderCollection(kind, focusId = '') {
     const gs = fav && !fc ? groups() : null, rows = gs && gs.length > 1;
     const title = fc ? fc.name : T.name;
     const head = selMode ? `<div class="hact">${selTools}<button type="button" class="selok" data-sel="done">完成</button></div>`
-      : (list.length || (fav && favCols.all().length)) ? `<div class="hact">${list.length ? `<button class="small ibs" data-feed="${kind}" ${fc ? `data-col="${esc(fc.id)}"` : ''} title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button>` : ''}${fav ? `<button class="small ibs" data-colmgr title="管理合集" aria-label="管理合集">${IC.folder}</button>` : ''}${list.length ? `<button class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button>` : ''}</div>` : '';
+      : (list.length || (fav && favCols.all().length)) ? `<div class="hact">${list.length ? `<button class="small ibs" data-feed="${kind}" ${fc ? `data-col="${esc(fc.id)}"` : ''} title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button>` : ''}${fav && !rows && shown.length ? `<button class="small ibs" data-plplay title="顺序播放" aria-label="顺序播放">${IC.plist}</button>` : ''}${fav && !fc ? `<button class="small ibs" data-colmgr title="管理合集" aria-label="管理合集">${IC.folder}</button>` : ''}${list.length ? `<button class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button>` : ''}</div>` : '';
     const body = !shown.length ? `<p class="empty hempty">${fc ? '这个合集还没有内容。收藏影片时可以放进来，或在多选里选「合集」。' : T.empty}</p>`
       : rows ? gs.map(g => row(g.name, g.items, `#/favorites/${encodeURIComponent(g.id)}`, sub, { removable: 'fav', extra: `<small class="rcount">${g.items.length}</small>` })).join('')
       : `<div class="grid">${shown.map(it => card(it, { removable: kind, progress: !fav, sub: sub(it) })).join('')}</div>`;
@@ -2022,6 +2022,7 @@ function renderCollection(kind, focusId = '') {
   view.onclick = e => {
     const sb = e.target.closest('[data-sel]');
     if (sb) { selMode = sb.dataset.sel === 'on'; sel.clear(); paint(); return; }
+    if (e.target.closest('[data-plplay]')) { const fc = focusCol(); plStart(fc ? list.filter(f => favInCol(f, fc.id)) : list, fc ? fc.name : T.name); return; }
     if (e.target.closest('[data-colmgr]')) { colManage(() => { list = store.list(); const gone = focus && !focusCol(); if (gone) history.replaceState(history.state, '', '#/favorites'); paint(); }); return; }
     const c = selMode && e.target.closest('.card'); if (!c) return;
     e.preventDefault(); e.stopPropagation();
@@ -2528,6 +2529,7 @@ const IC = {
   save: svgI('M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3M4 3h4M16 3h4'),
   wait: svgI('M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'),
   sel: svgI('M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM7.8 12.3l3 3 5.4-5.8'),
+  plist: svgI('M4 6h12M4 12h12M4 18h8M17 14l4 3-4 3z'),
   folder: svgI('M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'),
 };
 
@@ -3082,7 +3084,7 @@ function syncMedia() {
     ms.metadata = new MediaMetadata({ title: live ? e.name : (cur.eps.length > 1 ? e.name : cur.title), artist: live ? '直播' : cur.title, album: 'TVBOX',
       artwork: pic ? [{ src: new URL(pic, location.href).href, sizes: '512x512' }] : [] });
   } catch {}
-  try { ms.setActionHandler('previoustrack', cur.ep > 0 ? () => step(-1) : null); ms.setActionHandler('nexttrack', cur.ep < cur.eps.length - 1 ? () => step(1) : null); } catch {}
+  try { ms.setActionHandler('previoustrack', (cur.pl ? cur.pl.idx > 0 : cur.ep > 0) ? () => step(-1) : null); ms.setActionHandler('nexttrack', plHasNext() ? () => step(1) : null); } catch {}
 }
 if (ms) {
   const on = (a, f) => { try { ms.setActionHandler(a, f); } catch {} };
@@ -3123,6 +3125,7 @@ function openPlayer(startAt) {
   setL('next', live ? '下一台' : '下一集'); setL('list', live ? '频道' : '选集');
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
+  if (cur.pl) { setL('next', '下一部'); setL('list', '合集'); $('[data-act=next]').hidden = !plHasNext(); $('[data-act=list]').hidden = cur.pl.items.length <= 1; }
   syncFs();
   $('[data-act=pip]').hidden = !pipSupported() || fineCursor;   // desktop has it in the control bar
   syncMedia();
@@ -3444,6 +3447,7 @@ function paintPmode() {
   const b = $('[data-act=pmode]'); if (!b) return;
   const m = pmode();
   b.hidden = !cur || cur.kind === 'live';
+  if (cur?.pl) $('[data-act=next]').hidden = !plHasNext();
   $('svg', b).innerHTML = `<path d="${m[2]}"/>`; setL('pmode', m[1]); b.title = '播放模式：' + m[1] + '（点一下切换）';
   syncMore?.();
 }
@@ -3452,6 +3456,7 @@ video.addEventListener('ended', () => {
   if (!cur || cur.kind === 'live') return;
   const m = pmode()[0], last = cur.ep >= cur.eps.length - 1;
   if (m === 'one') { video.currentTime = 0; video.play().catch(() => {}); return; }
+  if (cur.pl) { plStep(1); return; }                              // 合集顺序播放: 放完这一部接下一部 (顺序播放放完最后一部就停, 列表循环回到第一部)
   if (!last) return step(1);
   if (m === 'loop') { if (cur.eps.length > 1) { cur.ep = 0; openPlayer(0); } else { video.currentTime = 0; video.play().catch(() => {}); } }
 });
@@ -3602,11 +3607,56 @@ video.addEventListener('timeupdate', () => {
   toast('已跳过' + hit.name);
 });
 
-function step(n) { cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(0); }
+function step(n) { if (cur.pl) return plStep(n); cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(0); }
+// ---------- 合集顺序播放 (普通播放器): 一个合集里的片子当作一份「选集」, 一部接一部放 ----------
+// cur.pl = { items: 收藏条目, idx: 正在放第几部, name: 合集名 }; cur 本身还是正在放的那一部 (cur.eps 是它自己的集)。
+// 每部从上次看到的那一集接着放 (没看过就第一集); 「下一集」= 下一部, 「选集」= 合集列表, 播放模式 (顺序 / 列表循环 / 单集循环) 对整个合集生效。
+const plHasNext = () => cur.pl ? cur.pl.idx < cur.pl.items.length - 1 || (pmode()[0] === 'loop' && cur.pl.items.length > 1) : cur.ep < cur.eps.length - 1;
+function plStart(items, name, idx = 0) {
+  items = items.filter(it => state.sites.some(s => s.key === it.site));
+  if (!items.length) return toast('这里没有可以播放的片子');
+  plLoad({ items, idx, name }, Math.min(idx, items.length - 1), 1);
+}
+function plStep(n) {
+  const pl = cur.pl, len = pl.items.length; let i = pl.idx + n;
+  if (i < 0 || i >= len) { if (!(n > 0 && pmode()[0] === 'loop' && len > 1)) return false; i = (i + len) % len; }
+  plLoad(pl, i, n > 0 ? 1 : -1); return true;
+}
+async function plLoad(pl, i, dir, tries = 0) {
+  const it = pl.items[i], t = toast(`正在打开「${it.name}」…`, true);
+  const skip = why => {                                           // 打不开 / 没有可播放的内容: 提示一下, 接着试下一部 (同方向), 一圈试完就停
+    toast(`「${it.name}」${why}，已跳过`);
+    const j = i + dir;
+    if (tries + 1 < pl.items.length && j >= 0 && j < pl.items.length) return plLoad(pl, j, dir, tries + 1);
+  };
+  try {
+    const d = await api('detail', { site: it.site, id: it.id }, null);
+    t.remove();
+    if (pl.started && (!cur || cur.pl !== pl)) return;           // 等的时候已经退出播放 / 换成别的了
+    if (!d.lines?.length) return skip('没有可播放的内容');
+    const h = hist.get(d.site, d.id), line = h && d.lines[h.line] ? h.line : 0, ep = h && h.line === line && d.lines[line].episodes[h.ep] ? h.ep : 0;
+    pl.idx = i; pl.started = true;
+    cur = { kind: 'vod', d, line, ep, eps: d.lines[line].episodes, title: d.name, pl };
+    openPlayer(h && h.line === line && h.ep === ep && h.dur - h.t > 30 ? h.t : 0);
+  } catch (err) { t.remove(); if (!isAbort(err)) skip('打开失败'); }
+}
 // Episode / channel picker. Live: numbered single column with a filter; 点播: compact grid.
 // Picking closes the panel; click outside or Esc also closes it.
 function renderPlist() {
   const box = $('.plist'), live = cur.kind === 'live';
+  if (cur.pl) {                                                    // 合集顺序播放: 「选集」是这个合集里的片子
+    const pl = cur.pl;
+    box.dataset.mode = 'ep'; box.classList.remove('srcs', 'skipset'); box.classList.add('live');
+    box.innerHTML = `<div class="phead"><i class="grab"></i><b>${esc(pl.name || '合集')}</b><span>${pl.idx + 1} / ${pl.items.length}</span>
+        <button class="icon sm" data-pclose title="关闭">✕</button></div>
+      ${pl.items.length > 12 ? '<input class="pfind" type="search" enterkeyhint="search" autocomplete="off" placeholder="搜片名">' : ''}
+      <div class="pitems">${pl.items.map((it, i) => `<button data-i="${i}" class="${i === pl.idx ? 'on' : ''}"><em>${i + 1}</em><span>${esc(it.name)}</span></button>`).join('')}</div>`;
+    $('[data-pclose]', box).onclick = () => togglePlist(false);
+    $$('.pitems button', box).forEach(b => b.onclick = () => { togglePlist(false); if (+b.dataset.i !== pl.idx) plLoad(pl, +b.dataset.i, 1); });
+    const f = $('.pfind', box);
+    if (f) f.oninput = () => { const q = f.value.trim().toLowerCase(); $$('.pitems button', box).forEach(b => { b.hidden = !!q && !pl.items[+b.dataset.i].name.toLowerCase().includes(q); }); };
+    return;
+  }
   box.dataset.mode = 'ep'; box.classList.remove('srcs', 'skipset');
   box.classList.toggle('live', live);
   box.innerHTML = `<div class="phead"><i class="grab"></i><b>${live ? '频道' : '选集'}</b><span>${cur.ep + 1} / ${cur.eps.length}</span>
