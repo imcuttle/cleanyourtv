@@ -2258,3 +2258,9 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
   .pagehead.cathead .selok:hover { background: #e8e8ea; }
   .selmode .card, .dls.sel .dl { user-select: none; }
 }
+
+/* 分集播放进度: 看了一部分的集数按钮底色按进度铺开, 看完的变暗并打勾; 正在播的那集 (.on) 保持红色 */
+.eps a.wp, .pitems button.wp:not(.on) { background: linear-gradient(90deg, #ffffff2e var(--wp), #2a2a2a var(--wp)); }
+.eps a.wp:hover, .pitems button.wp:not(.on):hover { background: linear-gradient(90deg, #ffffff3d var(--wp), #3a3a3a var(--wp)); }
+.eps a.watched, .pitems button.watched:not(.on) { color: #8a8a8a; }
+.eps a.watched::before, .pitems button.watched:not(.on) span::before { content: '✓ '; color: #46d369; font-size: 11px; }

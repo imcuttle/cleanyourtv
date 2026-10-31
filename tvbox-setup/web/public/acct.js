@@ -54,6 +54,7 @@ function compact(ops) {
     if (kind === 'clear') { if (cleared.has(grp)) continue; cleared.add(grp); out.push(o); continue; }
     if (cleared.has(grp)) continue;
     key = grp === 'kv' ? 'kv|' + o.k : grp + '|' + (o.e ? (o.e.site ?? '') + '|' + (o.e.id ?? o.e.url) : (o.site ?? '') + '|' + (o.id ?? o.url ?? ''));
+    if (grp === 'prog') key += '|' + (kind === 'put' ? o.e.ep : kind === 'dropep' ? 'drop' + o.ep + '|' + i : o.ep ?? '*');   // 进度按「哪一集」分开记；删集改了集号，不能合并
     if (seen.has(key)) continue;
     seen.add(key); out.push(o);
   }
@@ -108,6 +109,7 @@ async function pull() {
   const j = r.j, p = pre(who.id);
   try {
     ls.setItem(p + 'history', JSON.stringify((j.history || []).slice(0, 40)));
+    ls.setItem(p + 'prog', JSON.stringify((j.prog || []).slice(0, 1500)));
     ls.setItem(p + 'favs', JSON.stringify((j.favs || []).slice(0, 500)));
     ls.setItem(p + 'liveFavs', JSON.stringify(j.liveFavs || []));
     for (const k of KV) (j.kv && typeof j.kv[k] === 'string') ? ls.setItem(p + k, j.kv[k]) : ls.removeItem(p + k);
@@ -143,7 +145,7 @@ function enroll({ user, token }) {
   return switchTo(user.id);
 }
 const guestSnapshot = () => ({
-  history: rj('history', []), favs: rj('favs', []), liveFavs: rj('liveFavs', []),
+  history: rj('history', []), prog: rj('prog', []), favs: rj('favs', []), liveFavs: rj('liveFavs', []),
   kv: Object.fromEntries([...KV].map(k => [k, ls.getItem(k)]).filter(([, v]) => typeof v === 'string')),
 });
 const guestHasData = () => { const g = guestSnapshot(); return g.history.length + g.favs.length + g.liveFavs.length > 0; };

@@ -1,6 +1,6 @@
 // Service worker：PWA 外壳离线可用 + 冷启动不等网络；/api/sites 和批量接口里的首页数据做 stale-while-revalidate。
 // /hls /img /dl /media 永远走网络。所有缓存操作都可能失败（存储空间不足 / 被系统清理 / 缓存损坏）：失败一律退回「直接走网络」，绝不让缓存问题影响页面。
-const CACHE = 'tvbox-shell-v101', API_CACHE = 'tvbox-api-v3';
+const CACHE = 'tvbox-shell-v102', API_CACHE = 'tvbox-api-v3';
 const SHELL = ['./', 'style.css', 'acct.js', 'app.js', 'feed.js', 'vendor/hls.min.js', 'icon.svg', 'icons/icon-192.png'];
 
 // ---------- 过期策略 ----------

@@ -202,6 +202,7 @@ function saveHist(s) {
   const d = s.d;
   hist.put({ site: d.site, adult: d.adult ? 1 : 0, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
     line: s.line, ep: s.ep, epName: s.eps[s.ep]?.name || '', t: s.video.currentTime, dur: vdur(s.video) });
+  prog.put(d.site, d.id, s.ep, s.video.currentTime, vdur(s.video));
 }
 
 function teardown(s) {
@@ -219,7 +220,7 @@ function pickStart(s) {
   s.line = h && d.lines[h.line] ? h.line : 0;
   s.eps = d.lines[s.line].episodes;
   s.ep = h && h.line === s.line && s.eps[h.ep] ? h.ep : 0;
-  s.startAt = h && h.line === s.line && h.ep === s.ep && h.dur - h.t > 30 ? h.t : 0;
+  s.startAt = prog.resume(d, s.line, s.ep);
 }
 function paintInfo(s) {
   const { it, d } = s;
@@ -411,9 +412,10 @@ function onEnded(s) {
   if (F.idx < F.items.length - 1) return go(1);
   s.video.currentTime = 0; tryPlay(s);                 // last title of a finished list: loop it
 }
-function switchEp(s, line, ep, startAt = 0) {
+function switchEp(s, line, ep, startAt) {
   saveHist(s);
-  s.line = line; s.eps = s.d.lines[line].episodes; s.ep = Math.max(0, Math.min(ep, s.eps.length - 1)); s.startAt = startAt;
+  s.line = line; s.eps = s.d.lines[line].episodes; s.ep = Math.max(0, Math.min(ep, s.eps.length - 1));
+  s.startAt = startAt ?? prog.resume(s.d, line, s.ep);   // 没指定就接着这一集上次看到的地方
   s.watched = 0; s.judged = false; s.stage = 0; s.compat = false; s.tried = null;
   paintInfo(s); attach(s);
   if (!sheetEl.hidden) renderSheet();

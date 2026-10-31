@@ -426,11 +426,47 @@ const hist = {
     tabKeep.clear();
     ACCT.op({ t: 'hist.put', e });
   },
-  del(site, id) { tabKeep.clear(); UD.set('history', JSON.stringify(hist.all().filter(h => !(h.site === site && h.id === id)))); ACCT.op({ t: 'hist.del', site, id }); },
-  clear() { tabKeep.clear(); UD.set('history', '[]'); ACCT.op({ t: 'hist.clear' }); },
+  del(site, id) { tabKeep.clear(); UD.set('history', JSON.stringify(hist.all().filter(h => !(h.site === site && h.id === id)))); ACCT.op({ t: 'hist.del', site, id }); prog.delTitle(site, id); },
+  clear() { tabKeep.clear(); UD.set('history', '[]'); ACCT.op({ t: 'hist.clear' }); prog.clear(); },
   // The local source lists only its own history; 成人 titles follow showEntry (see below).
   visible: (h, site = state.site) => (site === 'local' ? h.site === 'local' : true) && showEntry(h, site),
   list: () => hist.all().filter(h => hist.visible(h)),
+};
+
+// ---------- 分集播放进度 ----------
+// 每部片的每一集各记一条 {site,id,ep,t,dur,at,done}，只记总长超过 3 分钟的视频（短视频每次从头播）。
+// 和观看历史一样属于当前账号 (UD)：登录后以服务端为准、按账号隔离；访客只存在本机。
+// 看到最后 30 秒 / 97% 以后算「看完」(done)：再点开这一集从头播，集数列表上打勾。
+const PROG_MIN = 180, PROG_KEEP_LOCAL = 1500;
+const prog = {
+  all: () => UD.json('prog', []),
+  of(site, id) { const m = new Map(); for (const p of prog.all()) if (p.site === site && p.id === id) m.set(p.ep, p); return m; },
+  get: (site, id, ep) => prog.all().find(p => p.site === site && p.id === id && p.ep === ep),
+  put(site, id, ep, t, dur) {
+    if (!(dur > PROG_MIN) || !isFinite(dur) || !(t >= 10) || !isFinite(t)) return;
+    const done = dur - t <= 30 || t / dur >= 0.97 ? 1 : 0;
+    const e = { site, id, ep, t: Math.round(Math.min(t, dur)), dur: Math.round(dur), at: Date.now(), done };
+    const list = prog.all().filter(p => !(p.site === site && p.id === id && p.ep === ep));
+    list.unshift(e);
+    UD.set('prog', JSON.stringify(list.slice(0, PROG_KEEP_LOCAL)));
+    ACCT.op({ t: 'prog.put', e });
+  },
+  // 这一集该从哪里接着播: 没看完且超过 5 秒才接着; 没有分集记录的老数据退回观看历史里那一集的进度
+  resume(d, line, ep) {
+    const p = prog.get(d.site, d.id, ep);
+    if (p) return !p.done && p.dur > PROG_MIN && p.t > 5 ? p.t : 0;
+    const h = hist.get(d.site, d.id);
+    return h && h.line === line && h.ep === ep && h.dur > PROG_MIN && h.t > 5 && h.dur - h.t > 30 ? h.t : 0;
+  },
+  delTitle(site, id) { UD.set('prog', JSON.stringify(prog.all().filter(p => !(p.site === site && p.id === id)))); ACCT.op({ t: 'prog.del', site, id }); },
+  // 删掉一集 (本地资源): 这一集的进度去掉, 后面的集号减一
+  dropEp(site, id, idx) {
+    UD.set('prog', JSON.stringify(prog.all().filter(p => !(p.site === site && p.id === id && p.ep === idx)).map(p => p.site === site && p.id === id && p.ep > idx ? { ...p, ep: p.ep - 1 } : p)));
+    ACCT.op({ t: 'prog.dropep', site, id, ep: idx });
+  },
+  clear() { UD.set('prog', '[]'); ACCT.op({ t: 'prog.clear' }); },
+  // 集数按钮上的进度: 0~100, 看完 = 100, 没记录 = null
+  pct(p) { return !p ? null : p.done ? 100 : Math.max(2, Math.min(99, Math.round(p.t / p.dur * 100))); },
 };
 
 // 成人 entries (history / favorites): a title is 成人 when it was saved with the flag, its source is a 成人 source, or it is
@@ -2795,6 +2831,7 @@ async function openDetail(site, id, autoplay = false, replace = false, quiet = f
     const h = hist.get(site, id);
     const eps = d.lines[line]?.episodes || [];
     const resumeIdx = h && h.line === line && eps[h.ep] ? h.ep : 0;
+    const pm = prog.of(site, id);
     const small = matchMedia('(max-width: 760px)').matches;     // 小屏: 标题 → 标签行 → 按钮 (同原生 app), 大屏标签行在下面正文里
     const metaHtml = `<div class="metaRow"><span id="qtag">${qChip(vodQ(d), 'big')}</span><a class="dbtag" id="dbtag" hidden target="_blank" rel="noreferrer"></a>
         <a class="tag" data-nav href="#/site/${encodeURIComponent(site)}" title="切换到这个源">${esc(d.siteName)}</a>
@@ -2821,8 +2858,10 @@ async function openDetail(site, id, autoplay = false, replace = false, quiet = f
           <div class="eps ${dlMode ? 'dlmode' : ''}">${eps.map((e, i) => {
             const inner = esc(e.name);
             const cls = h && h.line === line && i <= h.ep ? 'seen' : '';
+            const pg = prog.pct(pm.get(i)), pc = pg === null ? '' : pg >= 100 ? ' watched' : ' wp';
+            const ps = pg === null ? '' : pg >= 100 ? ' title="已看完"' : ` style="--wp:${pg}%"`;
             return dlMode ? `<button data-dl="${i}" class="${cls}" title="${esc(e.name)}">${inner}</button>`
-              : `<a data-ep="${i}" class="${cls}" title="${esc(e.name)}" href="${esc(playHref(site, id, line, i))}">${inner}</a>`;
+              : `<a data-ep="${i}" class="${cls}${pc}"${ps ? ps : ` title="${esc(e.name)}"`} href="${esc(playHref(site, id, line, i))}">${inner}</a>`;
           }).join('')}</div>`
           : '<p class="err">这个源没有可直接播放的地址，看看下面的其他源。</p>'}
         <h3>其他源</h3><div class="alts" id="alts"><span class="lan">在所有源里搜索中…</span></div>
@@ -3103,14 +3142,15 @@ if (ms) {
 
 function play(d, line, ep) {
   cur = { kind: 'vod', d, line, ep, eps: d.lines[line].episodes, title: d.name };
-  const h = hist.get(d.site, d.id);
-  openPlayer(h && h.line === line && h.ep === ep && h.dur - h.t > 30 ? h.t : 0);
+  openPlayer(prog.resume(d, line, ep));
 }
 // 沉浸看片的「全屏观看」: 从指定进度接着用普通播放器播放
 function playAt(d, line, ep, t) {
   cur = { kind: 'vod', d, line, ep, eps: d.lines[line].episodes, title: d.name };
   openPlayer(t);
 }
+// 换到 cur.ep 这一集时从哪里起播 (点播才有分集进度; 本地下载列表 / 直播从头)
+const epResume = () => cur?.kind === 'vod' ? prog.resume(cur.d, cur.line, cur.ep) : 0;
 function playLive(channels, idx) {
   cur = { kind: 'live', eps: channels.map(c => ({ name: c.name, url: c.url, logo: c.logo })), ep: idx };
   openPlayer(0);
@@ -3184,7 +3224,7 @@ async function playerTrash(quiet) {
   if (!await trashLocal([fileIdOf(e.url)], many ? `把「${d.name} · ${e.name}」移到回收站？` : `把「${d.name}」移到回收站？`)) { if (was) video.play().catch(() => {}); return; }
   dropEpHist(d, line, idx);
   cur.eps.splice(idx, 1);                      // 和 d.lines[line].episodes 是同一个数组
-  if (cur.eps.length) { cur.ep = Math.min(idx, cur.eps.length - 1); openPlayer(0); $('#modal')?.refresh?.(); return; }
+  if (cur.eps.length) { cur.ep = Math.min(idx, cur.eps.length - 1); openPlayer(epResume()); $('#modal')?.refresh?.(); return; }
   localGone(d); closeAllOverlays();
 }
 // The player's buttons are an icon plus a small label (shown on touch screens, a tooltip on desktop).
@@ -3454,6 +3494,7 @@ function paintPmode() {
 function cyclePmode() { const m = PMODES[(PMODES.indexOf(pmode()) + 1) % PMODES.length]; localStorage.playMode = m[0]; paintPmode(); toast(m[1]); }
 video.addEventListener('ended', () => {
   if (!cur || cur.kind === 'live') return;
+  if (cur.kind === 'vod' && vdur(video) > PROG_MIN) prog.put(cur.d.site, cur.d.id, cur.ep, vdur(video), vdur(video));   // 放完了: 记成「看完」, 再点开这一集从头播
   const m = pmode()[0], last = cur.ep >= cur.eps.length - 1;
   if (m === 'one') { video.currentTime = 0; video.play().catch(() => {}); return; }
   if (cur.pl) { plStep(1); return; }                              // 合集顺序播放: 放完这一部接下一部 (顺序播放放完最后一部就停, 列表循环回到第一部)
@@ -3461,13 +3502,16 @@ video.addEventListener('ended', () => {
   if (m === 'loop') { if (cur.eps.length > 1) { cur.ep = 0; openPlayer(0); } else { video.currentTime = 0; video.play().catch(() => {}); } }
 });
 let lastSave = 0;
-video.addEventListener('timeupdate', () => {
-  if (!cur || cur.kind !== 'vod' || Date.now() - lastSave < 4000 || !vdur(video)) return;
+function saveWatch() {
+  if (!cur || cur.kind !== 'vod' || !vdur(video) || video.readyState < 2) return;
   lastSave = Date.now();
-  const { d, line, ep, eps } = cur;
+  const { d, line, ep, eps } = cur, t = video.currentTime, dur = vdur(video);
   hist.put({ site: d.site, adult: d.adult ? 1 : 0, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
-    line, ep, epName: eps[ep].name, t: video.currentTime, dur: vdur(video) });
-});
+    line, ep, epName: eps[ep].name, t, dur });
+  prog.put(d.site, d.id, ep, t, dur);
+}
+video.addEventListener('timeupdate', () => { if (Date.now() - lastSave >= 4000) saveWatch(); });
+video.addEventListener('pause', () => { if (!video.ended) saveWatch(); });
 // ---------- 自动跳过片头 / 片尾 / 每集重复的广告 ----------
 // 服务端拿相邻两集的音频做指纹, 找出两集里一模一样的片段 (片头曲、片尾曲、每集都插的同一条广告), 算好后缓存。
 // 选集少于 3 集不做。这里只管问结果、播放到那一段时自动跳过 (每一段只跳一次, 跳完想回看不会再拦)。只有点播多集、普通播放器用; 沉浸看片不用。
@@ -3607,7 +3651,7 @@ video.addEventListener('timeupdate', () => {
   toast('已跳过' + hit.name);
 });
 
-function step(n) { if (cur.pl) return plStep(n); cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(0); }
+function step(n) { if (cur.pl) return plStep(n); cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(epResume()); }
 // ---------- 合集顺序播放 (普通播放器): 一个合集里的片子当作一份「选集」, 一部接一部放 ----------
 // cur.pl = { items: 收藏条目, idx: 正在放第几部, name: 合集名 }; cur 本身还是正在放的那一部 (cur.eps 是它自己的集)。
 // 每部从上次看到的那一集接着放 (没看过就第一集); 「下一集」= 下一部, 「选集」= 合集列表, 播放模式 (顺序 / 列表循环 / 单集循环) 对整个合集生效。
@@ -3637,7 +3681,7 @@ async function plLoad(pl, i, dir, tries = 0) {
     const h = hist.get(d.site, d.id), line = h && d.lines[h.line] ? h.line : 0, ep = h && h.line === line && d.lines[line].episodes[h.ep] ? h.ep : 0;
     pl.idx = i; pl.started = true;
     cur = { kind: 'vod', d, line, ep, eps: d.lines[line].episodes, title: d.name, pl };
-    openPlayer(h && h.line === line && h.ep === ep && h.dur - h.t > 30 ? h.t : 0);
+    openPlayer(prog.resume(d, line, ep));
   } catch (err) { t.remove(); if (!isAbort(err)) skip('打开失败'); }
 }
 // Episode / channel picker. Live: numbered single column with a filter; 点播: compact grid.
@@ -3658,13 +3702,14 @@ function renderPlist() {
     return;
   }
   box.dataset.mode = 'ep'; box.classList.remove('srcs', 'skipset');
+  const pm = !live && cur.kind === 'vod' ? prog.of(cur.d.site, cur.d.id) : null;
   box.classList.toggle('live', live);
   box.innerHTML = `<div class="phead"><i class="grab"></i><b>${live ? '频道' : '选集'}</b><span>${cur.ep + 1} / ${cur.eps.length}</span>
       <button class="icon sm" data-pclose title="关闭">✕</button></div>
     ${live || cur.eps.length > 20 ? `<input class="pfind" type="search" enterkeyhint="search" autocomplete="off" placeholder="${live ? '搜频道' : '搜集数'}">` : ''}
-    <div class="pitems">${cur.eps.map((e, i) => `<button data-i="${i}" class="${i === cur.ep ? 'on' : ''}">${live ? `<em>${i + 1}</em>` : ''}<span>${esc(e.name)}</span></button>`).join('')}</div>`;
+    <div class="pitems">${cur.eps.map((e, i) => { const pg = live ? null : prog.pct(pm?.get(i)); return `<button data-i="${i}" class="${i === cur.ep ? 'on' : ''}${pg === null ? '' : pg >= 100 ? ' watched' : ' wp'}"${pg !== null && pg < 100 ? ` style="--wp:${pg}%"` : ''}>${live ? `<em>${i + 1}</em>` : ''}<span>${esc(e.name)}</span></button>`; }).join('')}</div>`;
   $('[data-pclose]', box).onclick = () => togglePlist(false);
-  $$('.pitems button', box).forEach(b => b.onclick = () => { cur.ep = +b.dataset.i; togglePlist(false); openPlayer(0); });
+  $$('.pitems button', box).forEach(b => b.onclick = () => { cur.ep = +b.dataset.i; togglePlist(false); openPlayer(epResume()); });
   const find = $('.pfind', box);
   if (find) find.oninput = () => {
     const q = find.value.trim().toLowerCase();
@@ -3685,6 +3730,7 @@ function togglePlist(open = $('.plist').hidden) {
   }
 }
 function closePlayer() {
+  saveWatch();
   skipStop(); ask = null;
   if (hls) { hls.destroy(); hls = null; }
   pvReset(); playingSrc = null;
@@ -4236,8 +4282,10 @@ function trashBusy(text = '正在移到回收站…') {
 }
 // 一集删掉以后: 观看记录里指着它的去掉, 排在它后面的集号减一
 function dropEpHist(d, line, idx) {
+  prog.dropEp(d.site, d.id, idx);
   const h = hist.get(d.site, d.id); if (!h || h.line !== line) return;
-  if (h.ep === idx) hist.del(d.site, d.id); else if (h.ep > idx) hist.put({ ...h, ep: h.ep - 1 });
+  if (h.ep === idx) { tabKeep.clear(); UD.set('history', JSON.stringify(hist.all().filter(x => !(x.site === d.site && x.id === d.id)))); ACCT.op({ t: 'hist.del', site: d.site, id: d.id }); }   // 只删观看记录, 别的集的进度留着
+  else if (h.ep > idx) hist.put({ ...h, ep: h.ep - 1 });
 }
 // 整部都没了: 记录 / 收藏 / 页面上的卡片一起清掉
 function localGone(d) {

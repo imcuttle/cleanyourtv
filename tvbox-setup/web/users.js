@@ -8,9 +8,11 @@
 //   POST login             {username, password}                -> { user, token }
 //   POST logout                                                -> { ok }
 //   GET  me                                                    -> { user, stats }
-//   GET  sync                                                  -> { user, history, favs, liveFavs, kv }
+//   GET  sync                                                  -> { user, history, prog, favs, liveFavs, kv }
 //   POST ops               {ops:[…]}                           -> { ok, applied }   (客户端的改动队列，按顺序执行)
-//   POST import            {history, favs, liveFavs, kv}       -> { ok, stats }      (把访客数据并入当前账号)
+//   POST import            {history, prog, favs, liveFavs, kv} -> { ok, stats }      (把访客数据并入当前账号)
+// 分集播放进度 (prog)：每个账号、每部片的每一集各一条 {site,id,ep,t,dur,done}，只记总长超过 3 分钟的视频；
+// 改动走 ops：prog.put {e} / prog.del {site,id,ep?} / prog.dropep {site,id,ep} (删了一集，后面的集号减一) / prog.clear
 //   POST password          {old, next}                         -> { ok }
 //   POST clear             {what: history|favs|liveFavs|kv|all}-> { ok, stats }
 //   POST delete            {password}                          -> { ok }
@@ -20,7 +22,8 @@ const path = require('path');
 
 const NAME_RE = /^[\p{L}\p{N}_-]{2,20}$/u;
 const MIN_PW = 6, MAX_PW = 64;
-const HIST_KEEP = 100, FAV_KEEP = 800, LFAV_KEEP = 800;
+const HIST_KEEP = 100, FAV_KEEP = 800, LFAV_KEEP = 800, PROG_KEEP = 3000;
+const PROG_MIN_DUR = 180;   // 总长不到 3 分钟的视频不记进度
 const KV_KEYS = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols']);   // favCols: 收藏合集 [{id,name,at}]; 哪部片在哪些合集里写在收藏条目自己的 cols 字段里
 const KV_MAX = 200e3;
 const ENTRY_MAX = 8e3;
@@ -61,6 +64,10 @@ module.exports = function createUsers({ file, allowRegister = true }) {
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, site TEXT NOT NULL, vid TEXT NOT NULL,
         at INTEGER NOT NULL, t REAL, dur REAL, data TEXT NOT NULL, PRIMARY KEY(user_id, site, vid));
       CREATE INDEX IF NOT EXISTS history_at ON history(user_id, at DESC);
+      CREATE TABLE IF NOT EXISTS progress(
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, site TEXT NOT NULL, vid TEXT NOT NULL, ep INTEGER NOT NULL,
+        at INTEGER NOT NULL, t REAL NOT NULL, dur REAL NOT NULL, done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, site, vid, ep));
+      CREATE INDEX IF NOT EXISTS progress_at ON progress(user_id, at DESC);
       CREATE TABLE IF NOT EXISTS favorites(
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, site TEXT NOT NULL, vid TEXT NOT NULL,
         at INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(user_id, site, vid));
@@ -133,6 +140,15 @@ module.exports = function createUsers({ file, allowRegister = true }) {
       uid, text(e.site), text(e.id), atOf(e), +e.t || 0, +e.dur || 0, data);
       run(`DELETE FROM history WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM history WHERE user_id=? ORDER BY at DESC LIMIT ${HIST_KEEP})`, uid, uid);
     },
+    prog(uid, e) {
+      if (!e || typeof e !== 'object' || !text(e.site) || !text(e.id)) return;
+      const ep = Math.floor(+e.ep), t = +e.t, dur = +e.dur;
+      if (!(ep >= 0 && ep < 100000) || !(dur > PROG_MIN_DUR) || !isFinite(dur) || !(t >= 0) || !isFinite(t)) return;
+      run(`INSERT INTO progress(user_id, site, vid, ep, at, t, dur, done) VALUES(?,?,?,?,?,?,?,?)
+           ON CONFLICT(user_id, site, vid, ep) DO UPDATE SET at=excluded.at, t=excluded.t, dur=excluded.dur, done=excluded.done`,
+      uid, text(e.site), text(e.id), ep, atOf(e), Math.min(t, dur), dur, e.done ? 1 : 0);
+      run(`DELETE FROM progress WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM progress WHERE user_id=? ORDER BY at DESC LIMIT ${PROG_KEEP})`, uid, uid);
+    },
     fav(uid, e) {
       const data = cleanEntry(e); if (!data || !text(e.site) || !text(e.id)) return;
       run(`INSERT INTO favorites(user_id, site, vid, at, data) VALUES(?,?,?,?,?)
@@ -157,6 +173,19 @@ module.exports = function createUsers({ file, allowRegister = true }) {
       case 'hist.put': put.hist(uid, o.e); return true;
       case 'hist.del': run('DELETE FROM history WHERE user_id=? AND site=? AND vid=?', uid, text(o.site), text(o.id)); return true;
       case 'hist.clear': run('DELETE FROM history WHERE user_id=?', uid); return true;
+      case 'prog.put': put.prog(uid, o.e); return true;
+      case 'prog.del':
+        if (o.ep === undefined || o.ep === null) run('DELETE FROM progress WHERE user_id=? AND site=? AND vid=?', uid, text(o.site), text(o.id));
+        else run('DELETE FROM progress WHERE user_id=? AND site=? AND vid=? AND ep=?', uid, text(o.site), text(o.id), Math.floor(+o.ep));
+        return true;
+      case 'prog.dropep': {   // 删掉一集：这一集的进度去掉，后面的集号减一 (逐条改，免得主键临时撞车)
+        const idx = Math.floor(+o.ep); if (!(idx >= 0)) return true;
+        run('DELETE FROM progress WHERE user_id=? AND site=? AND vid=? AND ep=?', uid, text(o.site), text(o.id), idx);
+        for (const r of q('SELECT ep FROM progress WHERE user_id=? AND site=? AND vid=? AND ep>? ORDER BY ep', uid, text(o.site), text(o.id), idx))
+          run('UPDATE progress SET ep=? WHERE user_id=? AND site=? AND vid=? AND ep=?', r.ep - 1, uid, text(o.site), text(o.id), r.ep);
+        return true;
+      }
+      case 'prog.clear': run('DELETE FROM progress WHERE user_id=?', uid); return true;
       case 'fav.put': put.fav(uid, o.e); return true;
       case 'fav.del': run('DELETE FROM favorites WHERE user_id=? AND site=? AND vid=?', uid, text(o.site), text(o.id)); return true;
       case 'fav.clear': run('DELETE FROM favorites WHERE user_id=?', uid); return true;
@@ -171,6 +200,11 @@ module.exports = function createUsers({ file, allowRegister = true }) {
   function importData(uid, b) {
     const newer = (table, site, id, at) => { const r = one(`SELECT at FROM ${table} WHERE user_id=? AND site=? AND vid=?`, uid, site, id); return !r || r.at < at; };
     for (const e of (Array.isArray(b.history) ? b.history : []).slice(0, HIST_KEEP)) if (e && newer('history', text(e.site), text(e.id), atOf(e))) put.hist(uid, e);
+    for (const e of (Array.isArray(b.prog) ? b.prog : []).slice(0, PROG_KEEP)) {
+      if (!e) continue;
+      const r = one('SELECT at FROM progress WHERE user_id=? AND site=? AND vid=? AND ep=?', uid, text(e.site), text(e.id), Math.floor(+e.ep));
+      if (!r || r.at < atOf(e)) put.prog(uid, e);
+    }
     for (const e of (Array.isArray(b.favs) ? b.favs : []).slice(0, FAV_KEEP)) if (e && newer('favorites', text(e.site), text(e.id), atOf(e))) put.fav(uid, e);
     for (const e of (Array.isArray(b.liveFavs) ? b.liveFavs : []).slice(0, LFAV_KEEP)) if (e) put.lfav(uid, { ...e, at: e.at || Date.now() });
     const kv = b.kv && typeof b.kv === 'object' ? b.kv : {};
@@ -180,6 +214,7 @@ module.exports = function createUsers({ file, allowRegister = true }) {
   function snapshot(uid) {
     return {
       history: q('SELECT data FROM history WHERE user_id=? ORDER BY at DESC', uid).map(parse).filter(Boolean),
+      prog: q('SELECT site, vid id, ep, t, dur, at, done FROM progress WHERE user_id=? ORDER BY at DESC', uid).map(r => ({ site: r.site, id: r.id, ep: r.ep, t: r.t, dur: r.dur, at: r.at, done: r.done ? 1 : 0 })),
       favs: q('SELECT data FROM favorites WHERE user_id=? ORDER BY at DESC', uid).map(parse).filter(Boolean),
       liveFavs: q('SELECT data FROM live_favs WHERE user_id=? ORDER BY at DESC', uid).map(parse).filter(Boolean),
       kv: Object.fromEntries(q('SELECT k, v FROM kv WHERE user_id=?', uid).map(r => [r.k, r.v])),
@@ -243,7 +278,7 @@ module.exports = function createUsers({ file, allowRegister = true }) {
     if (sub === 'clear' && write) {
       const what = str(body.what);
       tx(() => {
-        if (what === 'history' || what === 'all') run('DELETE FROM history WHERE user_id=?', me.id);
+        if (what === 'history' || what === 'all') { run('DELETE FROM history WHERE user_id=?', me.id); run('DELETE FROM progress WHERE user_id=?', me.id); }
         if (what === 'favs' || what === 'all') { run('DELETE FROM favorites WHERE user_id=?', me.id); run("DELETE FROM kv WHERE user_id=? AND k='favCols'", me.id); }
         if (what === 'liveFavs' || what === 'all') run('DELETE FROM live_favs WHERE user_id=?', me.id);
         if (what === 'kv' || what === 'all') run('DELETE FROM kv WHERE user_id=?', me.id);
