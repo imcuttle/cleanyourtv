@@ -111,16 +111,19 @@ module.exports = function ({ ffmpeg, ua, file }) {
   const key = u => crypto.createHash('md5').update(u).digest('hex');
   const base = ['-hide_banner', '-nostdin', '-user_agent', ua, '-rw_timeout', '15000000'];
 
+  // 正在读文件的 ffmpeg: Windows 上它们打开文件不带「允许删除」, 文件进回收站前要先停掉 (release)
+  const live = new Set();
+  const track = (p, u) => { const e = { p, u }; live.add(e); p.once('close', () => live.delete(e)); p.once('error', () => live.delete(e)); return p; };
   const duration = u => new Promise(ok => {
-    const p = spawn(ffmpeg, [...base, '-i', u], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    const p = track(spawn(ffmpeg, [...base, '-i', u], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true }), u);
     let err = ''; const t = setTimeout(() => p.kill('SIGKILL'), 30000);
     p.stderr.on('data', d => { if (err.length < 20000) err += d; });
     p.on('close', () => { clearTimeout(t); const m = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(err); ok(m ? +m[1] * 3600 + +m[2] * 60 + +m[3] : 0); });
     p.on('error', () => { clearTimeout(t); ok(0); });
   });
   const pcm = (u, ss, t) => new Promise((ok, bad) => {
-    const p = spawn(ffmpeg, [...base, '-loglevel', 'error', ...(ss > 0 ? ['-ss', String(Math.floor(ss))] : []), '-t', String(t), '-i', u, '-vn', '-sn', '-ac', '1', '-ar', String(SR), '-f', 's16le', '-'],
-      { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    const p = track(spawn(ffmpeg, [...base, '-loglevel', 'error', ...(ss > 0 ? ['-ss', String(Math.floor(ss))] : []), '-t', String(t), '-i', u, '-vn', '-sn', '-ac', '1', '-ar', String(SR), '-f', 's16le', '-'],
+      { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }), u);
     try { os.setPriority(p.pid, 15); } catch {}   // 后台活, 让位给正常播放 / 请求
     const chunks = []; const to = setTimeout(() => p.kill('SIGKILL'), 240000);
     p.stdout.on('data', d => chunks.push(d));
@@ -168,7 +171,7 @@ module.exports = function ({ ffmpeg, ua, file }) {
 
   // u: 这一集的原始地址, n: 相邻一集 (下一集, 没有就用上一集)。从不等计算: 没好就回 pending
   // peek: 只看缓存, 没有就回 none, 绝不启动计算 (自动跳过关着时只为了在进度条上标出位置)
-  return function marks(u, n, peek) {
+  function marks(u, n, peek) {
     const okSrc = x => /^https?:\/\//.test(x || '') || (path.isAbsolute(x || '') && fs.existsSync(x));   // 网络地址, 或本地媒体的文件路径
     if (!ffmpeg || !okSrc(u) || !okSrc(n)) return { status: 'none' };
     const k = key(u), hit = get(k);
@@ -180,7 +183,15 @@ module.exports = function ({ ffmpeg, ua, file }) {
     if (queue.length >= 8) return { status: 'none' };             // 排队太多就先不接新的
     busy.set(k, 1); queue.push({ u, n, k }); pump();
     return { status: 'pending' };
+  }
+  // 停掉所有正在读这些文件的 ffmpeg (给「移到回收站」让路), 并忘掉它们的识别结果
+  marks.release = files => {
+    const set = new Set(files); let n = 0;
+    for (const e of [...live]) if (set.has(e.u)) { try { e.p.kill('SIGKILL'); n++; } catch {} }
+    for (const [k, v] of [...cache]) if (v && set.has(v.u)) cache.delete(k);
+    return n;
   };
+  return marks;
 };
 module.exports.fingerprint = fingerprint;
 module.exports.common = common;

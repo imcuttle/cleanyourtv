@@ -26,7 +26,20 @@ const { Readable } = require('stream');
 const { AsyncLocalStorage } = require('async_hooks');
 // 每个请求带一个 AbortSignal: 浏览器断开 (切换页面 / 关页面) 就触发，请求里发起的上游 fetch 跟着中断，不再白占资源。
 const reqCtx = new AsyncLocalStorage();
-const { spawn, execFileSync } = require('child_process');
+const { spawn: spawnRaw, execFileSync } = require('child_process');
+// 记下所有在跑的 ffmpeg 子进程和它们的参数: 文件要进回收站时, 先把还在读它的 ffmpeg 停掉 (Windows 上 ffmpeg 打开文件不带「允许删除」, 不停掉就删不了)
+const ffLive = new Set();
+function spawn(cmd, args, opts) {
+  const p = spawnRaw(cmd, args, opts);
+  if (Array.isArray(args) && /ffmpeg/i.test(path.basename(String(cmd)))) { const e = { p, args }; ffLive.add(e); p.once('close', () => ffLive.delete(e)); p.once('error', () => ffLive.delete(e)); }
+  return p;
+}
+async function releaseFiles(files) {
+  const set = new Set(files), hit = [...ffLive].filter(e => e.args.some(a => set.has(a)));
+  for (const e of hit) { try { e.p.kill('SIGKILL'); } catch {} }
+  await Promise.all(hit.map(e => new Promise(ok => { if (e.p.exitCode !== null || e.p.killed && e.p.signalCode) return ok(); e.p.once('close', ok); setTimeout(ok, 3000); })));
+  return hit.length;
+}
 const cluster = require('cluster');
 const zlib = require('zlib');
 
@@ -821,7 +834,8 @@ const sizeQuality = (w, h) => (w >= 3000 || h >= 1900) ? '4K' : (w >= 1800 || h 
 // Local files go to the media process (ffmpeg -i). Results are cached for a day; identical probes share one request.
 const skipMarks = require('./skipmarks')({ ffmpeg: FFMPEG, ua: UA, file: path.join(DATA, 'skipmarks.json') });
 const probeCache = new Map(), probeBusy = new Map();
-rpcHandlers.skipmarks = ({ u, n, peek }) => skipMarks(u, n, peek);   // 只在主进程算 + 写缓存, 多个 worker 不会互相覆盖
+rpcHandlers.skipmarks = ({ u, n, peek }) => skipMarks(u, n, peek);
+rpcHandlers.skipRelease = ({ files }) => skipMarks.release(files || []);   // leader: 停掉在分析这些文件的 ffmpeg   // 只在主进程算 + 写缓存, 多个 worker 不会互相覆盖
 let probeRunning = 0; const probeWait = [];
 async function probeStream(u) {
   const hit = probeCache.get(u);
@@ -2589,13 +2603,15 @@ rpcHandlers.localSave = b => {
 // ---- 管理员删除本地资源: 文件(连同同名的 nfo / 字幕 / 海报)移到系统回收站, 不是直接删除 ----
 // 系统回收站调不起来时宁可失败也不硬删。返回仍留在原地的路径。
 const SIDECAR_EXT = new Set(['nfo', 'srt', 'ass', 'ssa', 'vtt', 'sub', 'idx', 'jpg', 'jpeg', 'png', 'webp']);
+let trashErr = '';
 async function trashPaths(list) {
   const left = () => list.filter(f => fs.existsSync(f));
   const run = (cmd, args, env) => new Promise(ok => {
-    let p; try { p = spawn(cmd, args, { stdio: 'ignore', windowsHide: true, env: env ? { ...process.env, ...env } : process.env }); } catch { return ok(); }
-    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} }, 60000);
-    p.on('error', () => { clearTimeout(t); ok(); });
-    p.on('close', () => { clearTimeout(t); ok(); });
+    let p, err = ''; try { p = spawnRaw(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: env ? { ...process.env, ...env } : process.env }); } catch (e) { trashErr = e.message; return ok(); }
+    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} trashErr = '系统回收站 30 秒没有响应'; }, 30000);
+    p.stderr.on('data', d => { if (err.length < 2000) err += d; });
+    p.on('error', e => { clearTimeout(t); trashErr = e.message; ok(); });
+    p.on('close', () => { clearTimeout(t); if (err.trim()) trashErr = err.trim().slice(0, 300); ok(); });
   });
   if (!left().length) return [];
   if (process.platform === 'darwin') {
@@ -2609,8 +2625,17 @@ async function trashPaths(list) {
       } catch {}
     }
   } else if (process.platform === 'win32') {
-    const ps = "Add-Type -AssemblyName Microsoft.VisualBasic; foreach ($p in (ConvertFrom-Json $env:TVBOX_TRASH)) { try { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($p, 'OnlyErrorDialogs', 'SendToRecycleBin') } catch {} }";
-    await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { TVBOX_TRASH: JSON.stringify(left()) });
+    // SHFileOperation (FO_DELETE + FOF_ALLOWUNDO): 进回收站, 静默: 不弹确认 / 进度 / 出错窗口 (出错窗口没人点会一直卡住)。
+    // 脚本走 -EncodedCommand (UTF-16LE base64), 不经过命令行引号转义; 路径走环境变量 (用 | 隔开, Windows 文件名里不会有 |), 中文路径不会乱码。
+    const cs = 'using System;using System.Runtime.InteropServices;public static class TvTrash{'
+      + '[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]struct F64{public IntPtr h;public uint fn;public string src;public string to;public ushort fl;public int ab;public IntPtr nm;public string tt;}'
+      + '[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode,Pack=1)]struct F32{public IntPtr h;public uint fn;public string src;public string to;public ushort fl;public int ab;public IntPtr nm;public string tt;}'
+      + '[DllImport("shell32.dll",CharSet=CharSet.Unicode,EntryPoint="SHFileOperationW")]static extern int O64(ref F64 f);'
+      + '[DllImport("shell32.dll",CharSet=CharSet.Unicode,EntryPoint="SHFileOperationW")]static extern int O32(ref F32 f);'
+      + 'public static int Trash(string p){string src=p+"\\0\\0";ushort fl=0x40|0x10|0x4|0x400;'
+      + 'if(IntPtr.Size==8){var f=new F64();f.fn=3;f.src=src;f.fl=fl;return O64(ref f);}else{var f=new F32();f.fn=3;f.src=src;f.fl=fl;return O32(ref f);}}}';
+    const ps = `$ErrorActionPreference='Stop'; Add-Type -TypeDefinition @'\n${cs}\n'@; foreach ($p in ($env:TVBOX_TRASH -split '\\|')) { if ($p -and (Test-Path -LiteralPath $p)) { $r = [TvTrash]::Trash($p); if ($r -ne 0) { [Console]::Error.WriteLine('SHFileOperation 返回 0x' + $r.ToString('X') + ': ' + $p) } } }`;
+    await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], { TVBOX_TRASH: left().join('|') });
   } else {
     await run('gio', ['trash', '--', ...left()]);
     if (left().length) await run('trash-put', ['--', ...left()]);
@@ -2622,12 +2647,22 @@ function sidecarsOf(file) {
   try { return fs.readdirSync(dir).filter(n => SIDECAR_EXT.has(path.extname(n).slice(1).toLowerCase()) && path.basename(n, path.extname(n)).toLowerCase() === base).map(n => path.join(dir, n)); } catch { return []; }
 }
 rpcHandlers.localTrash = async ({ ids }) => {
-  const snap = localIndex(), done = [], failed = [];
+  const snap = localIndex(), done = [], failed = []; let lastErr = '';
   for (const id of ids) {
     const f = snap.byFile.get(id); if (!f) continue;
-    try { hlsJobs.get(id)?.proc?.kill('SIGKILL'); } catch {}
-    const left = await trashPaths([f.path, ...sidecarsOf(f.path)]);
-    if (left.includes(f.path)) failed.push(id); else done.push(id);
+    const files = [f.path, ...sidecarsOf(f.path)];
+    let left = files;
+    // 还有 ffmpeg 在读它 (边转边播 / 封面 / 自动跳过分析) 时 Windows 不让删: 先停掉它们, 删不掉就再试几次 (进程退出到句柄放开有一点延迟)
+    for (let k = 0; k < 4; k++) {
+      try { hlsJobs.get(id)?.proc?.kill('SIGKILL'); } catch {}
+      await releaseFiles(files);
+      await rpc('skipRelease', { files }, 5000).catch(() => {});
+      if (k) await new Promise(ok => setTimeout(ok, 700 * k));
+      trashErr = '';
+      left = await trashPaths(files);
+      if (!left.includes(f.path)) break;
+    }
+    if (left.includes(f.path)) { failed.push(id); lastErr = trashErr; } else done.push(id);
   }
   if (done.length) {
     const gone = new Set(done), idx = readJson(LOCAL_INDEX, null);
@@ -2644,7 +2679,7 @@ rpcHandlers.localTrash = async ({ ids }) => {
     }
     if (localScan.running) scanQueued = true;    // 正在扫描的那一遍可能带着旧结果, 跑完再扫一遍
   }
-  return { done, failed };
+  return { done, failed, error: lastErr };
 };
 if (IS_MEDIA) {
   setTimeout(() => { if (localCfg.enabled && localCfg.dirs.length) scanLocal(); }, 1500).unref();
@@ -3334,7 +3369,7 @@ async function api(route, q, res, req) {
     const ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).map(str))].filter(id => { const f = snap.byFile.get(id); return f && localCfg.enabled && localCatOk(snap.catById.get(f.item.cat)); }).slice(0, 500);
     if (!ids.length) return send(res, 404, { error: '找不到文件，可能已经被删除，重新扫描一下' });
     const r = await rpc('localTrash', { ids }, 120000).catch(e => ({ done: [], failed: ids, error: e.message }));
-    if (!r.done.length) return send(res, 500, { error: '移到回收站失败' + (r.error ? '：' + r.error : '，系统回收站没有响应（文件可能正被占用，或没有权限）') });
+    if (!r.done.length) return send(res, 500, { error: '移到回收站失败' + (r.error ? '：' + r.error : '（文件可能正被别的程序占用，或没有权限）') });
     return send(res, 200, { ok: true, trashed: r.done.length, failed: r.failed.length });
   }
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
