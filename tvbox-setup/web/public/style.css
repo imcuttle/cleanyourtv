@@ -275,15 +275,6 @@ a.ch { color: inherit; }
 @media (max-width: 760px) { .crow { grid-template-columns: 20px 1fr; } .crow .curl, .crow .cstat { grid-column: 2; } }
 
 /* downloads */
-.dls { display: flex; flex-direction: column; gap: 10px; max-width: 1000px; }
-.dl { display: grid; grid-template-columns: 64px 1fr auto; gap: 14px; align-items: center; background: #1c1c1c; border-radius: 8px; padding: 10px 14px; }
-.dl .thumb { width: 64px; aspect-ratio: 2/3; border-radius: 4px; background: var(--card) center/cover; }
-.dl .dinfo span { color: var(--muted); margin-left: 6px; }
-.bar { height: 4px; background: #333; border-radius: 2px; margin-top: 8px; overflow: hidden; }
-.bar i { display: block; height: 100%; background: var(--red); transition: width .4s; }
-.dl.done .bar i { background: #46d369; }
-.dl.error .bar i { background: #f5a623; }
-.dops { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .btn.sm { padding: 6px 14px; font-size: 14px; }
 .flag { font-size: 12px; color: var(--muted); display: inline-flex; gap: 3px; align-items: center; margin-right: 4px; white-space: nowrap; }
 .savebar { position: sticky; bottom: 0; z-index: 8; background: linear-gradient(#14141400, var(--bg) 35%); padding: 20px 0 14px; margin: -6px 0 16px; }
@@ -329,7 +320,6 @@ a.ch { color: inherit; }
   .logo { font-size: 22px; }
   .right { width: 100%; margin: 0; }
   .menu { position: fixed; left: 4%; right: 4%; top: auto; min-width: 0; }
-  .dl { grid-template-columns: 48px 1fr; } .dl .thumb { width: 48px; } .dops { grid-column: 1 / -1; }
   .find { flex: 1; }
   .hero { height: 72vh; }
   .hero .poster { right: 50%; transform: translateX(50%); top: 110px; bottom: auto; height: 48%; }
@@ -517,7 +507,6 @@ nav a svg { display: none; }
   .seg.big button { padding: 9px 18px; }
   .savebar { bottom: 0; }   /* #view's own bottom padding already clears the tab bar */
   .toast { bottom: calc(var(--tab) + 14px + var(--sbn)); }
-  .dl { padding: 8px 10px; }
   .channels { grid-template-columns: repeat(2, 1fr); }
   .groups { margin: 0 -4%; padding: 0 4%; scrollbar-width: none; } .groups::-webkit-scrollbar { display: none; }
   /* player */
@@ -2083,7 +2072,6 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 
 /* 勾选圈: 下载行在左边, 收藏卡片在封面右上角 */
 .dl .chk { display: none; }
-.dls.sel .dl { padding-left: 46px; }
 .dls.sel .dops, .dls.sel .dlx { display: none; }
 .dls.sel .dl .chk, .selmode .card .selchk { display: block; width: 22px; height: 22px; border-radius: 50%; border: 2px solid #ffffffb3; background: #0006; box-shadow: 0 1px 4px #0008; }
 .dls.sel .dl .chk { position: absolute; left: 14px; top: 50%; margin-top: -11px; }
@@ -2094,18 +2082,6 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .selmode .card { cursor: pointer; }
 .selmode .card:hover { transform: none; }
 .selmode .card .img img { pointer-events: none; }
-
-/* 下载行: 外面包一层, 左滑露出红色删除 (只在小屏) */
-.dlw { position: relative; border-radius: 8px; overflow: hidden; }
-.dlx { display: none; }
-.dl { position: relative; }
-@media (max-width: 760px) {
-  .dlx { display: flex; position: absolute; z-index: 0; right: 0; top: 0; bottom: 0; width: 80px; align-items: center; justify-content: center; border: 0; background: #e5484d; color: #fff; font-size: 15px; font-weight: 600; }
-  .dls .dl { z-index: 1; touch-action: pan-y; transition: transform .24s cubic-bezier(.32,.72,0,1); will-change: transform; }
-  .dls .dl.drag { transition: none; }
-  .dlw.open .dl { transform: translateX(-80px); }
-  .dops [data-op=del] { display: none; }
-}
 
 /* ---------- 管理员删除 (本地资源) ---------- */
 #delBtn svg { stroke: #ff6b6b; }
@@ -2138,3 +2114,80 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
   html:root.wide-cards .sheet .top .info { padding-top: 18px; }
   html:root.wide-cards .sheet .top h1 { font-size: 22px; }
 }
+
+
+/* =====================================================================================
+   下载 · 观看历史 · 我的收藏  —— 三个页面共用一套版式 (顶栏 / 图标按钮 / 卡片面 / 间距 / 动效)
+   ===================================================================================== */
+:root { --surface: #1c1c1e; --surface2: #262629; --hair: #ffffff12; }
+
+/* 顶栏右侧: 一律是图标按钮。大屏: 标题在左、按钮靠右; 小屏: 返回 + 居中标题 + 右侧图标 (见下面的小屏块) */
+.pagehead.cathead { gap: 12px; }
+.pagehead.cathead .hact { margin-left: auto; gap: 6px; }
+.pagehead.cathead .ibs { width: 38px; height: 38px; border-radius: 50%; background: var(--surface2); border: 0; color: #fff; transition: background .15s, transform .12s; }
+.pagehead.cathead .ibs:hover { background: #ffffff26; }
+.pagehead.cathead .ibs:active { transform: scale(.92); }
+.pagehead.cathead .ibs svg { width: 20px; height: 20px; }
+.csum { margin: -4px 0 14px; font-size: 13px; letter-spacing: .02em; }
+
+/* 状态卡: 下载速度 / 进行中 / 已用 / 剩余 */
+.dstats { display: grid; grid-template-columns: repeat(4, 1fr); max-width: 1000px; margin: 2px 0 18px; padding: 14px 6px; border-radius: 16px; background: linear-gradient(180deg, #232326, var(--surface)); border: 1px solid var(--hair); box-shadow: 0 8px 24px #0005; }
+.dstats > div { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; padding: 0 4px; }
+.dstats > div + div { border-left: 1px solid var(--hair); }
+.dstats small { font-size: 11px; color: var(--muted); letter-spacing: .04em; white-space: nowrap; }
+.dstats b { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; color: #f2f2f7; }
+.dstats b i { font-style: normal; font-weight: 500; font-size: 13px; color: var(--muted); }
+.dstats b.live { color: #46d369; }
+
+/* 下载列表: 大屏多列, 小屏单列; 封面在左 */
+.dls { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); gap: 12px; max-width: 1000px; }
+.dlw { position: relative; border-radius: 16px; overflow: hidden; }
+.dlx { display: none; }   /* 左滑删除只在小屏 (下面小屏块里才显示) */
+.dl { position: relative; display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 12px; border-radius: 16px; background: var(--surface); border: 1px solid var(--hair); transition: background .15s, border-color .15s; }
+@media (hover: hover) { .dl:hover { background: #212124; border-color: #ffffff1f; } }
+.dl .thumb { width: 92px; aspect-ratio: 2/3; border-radius: 10px; background: var(--card) center/cover; box-shadow: 0 6px 16px #0007; cursor: pointer; }
+.dl .dinfo { min-width: 0; align-self: stretch; display: flex; flex-direction: column; justify-content: center; gap: 3px; cursor: pointer; }
+.dl .dtitle { font-size: 16px; font-weight: 700; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.dl .dep { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dl .dstat { font-size: 12px; color: #8e8e93; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.dl .dstat .st { font-style: normal; font-weight: 700; margin-right: 6px; color: #d1d1d6; }
+.dl .dstat .st.downloading { color: var(--red); } .dl .dstat .st.done { color: #46d369; } .dl .dstat .st.error { color: #f5a623; } .dl .dstat .st.paused { color: #8e8e93; }
+.bar { height: 3px; margin-top: 8px; border-radius: 2px; background: #ffffff1c; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--red); border-radius: 2px; transition: width .5s linear; }
+.dl.done .bar i { background: #46d369; } .dl.error .bar i { background: #f5a623; } .dl.paused .bar i { background: #8e8e93; }
+.dl .dops { display: flex; flex-direction: column; gap: 6px; align-items: center; justify-content: center; }
+.dl .dops .ibs { width: 38px; height: 38px; border-radius: 50%; border: 0; background: var(--surface2); color: #fff; }
+.dl .dops .ibs svg { width: 20px; height: 20px; }
+.dl .dops .ibs.main.go { background: #fff; color: #000; }
+.dl .dops .ibs.more { background: none; color: #8e8e93; height: 30px; }
+.dl .dops .ibs:active { transform: scale(.92); }
+.dls.sel .dl { padding-left: 48px; cursor: pointer; }
+.dls.sel .dl .thumb, .dls.sel .dl .dinfo { pointer-events: none; }
+.dls.sel .dl.picked { border-color: var(--red); background: #2a1a1c; }
+.dls.sel .dl .chk { left: 14px; }
+
+/* 历史 / 收藏: 网格间距和卡片面与下载一致 */
+.coll .grid { gap: 22px 12px; }
+.coll .card .name { font-weight: 600; }
+
+@media (max-width: 760px) {
+  /* 右上角只放图标按钮: 扁平无底、间距紧凑 (同 iOS 导航栏) */
+  .pagehead.cathead .hact { margin-left: 0; gap: 0; }
+  .pagehead.cathead .ibs { width: 36px; height: 36px; background: none !important; }
+  .pagehead.cathead .ibs svg { width: 22px; height: 22px; }
+  .dstats { margin: 0 0 14px; padding: 12px 2px; border-radius: 14px; }
+  .dstats b { font-size: 15px; } .dstats small { font-size: 10.5px; }
+  .dls { grid-template-columns: 1fr; gap: 10px; }
+  .dl { grid-template-columns: 84px minmax(0, 1fr) auto; gap: 12px; padding: 10px; }
+  .dl .thumb { width: 84px; }
+  .dl .dtitle { font-size: 15px; }
+  .dlx { display: flex; position: absolute; z-index: 0; right: 0; top: 0; bottom: 0; width: 88px; align-items: center; justify-content: center; border: 0; border-radius: 0 16px 16px 0; background: #e5484d; color: #fff; font-size: 15px; font-weight: 600; }
+  .dls .dl { z-index: 1; touch-action: pan-y; transition: transform .26s cubic-bezier(.32,.72,0,1), background .15s; will-change: transform; }
+  .dls .dl.drag { transition: none; }
+  .dlw.open .dl { transform: translateX(-88px); }
+  .dls.sel .dl { padding-left: 46px; }
+}
+@media (min-width: 1100px) { .dl { grid-template-columns: 104px minmax(0, 1fr) auto; } .dl .thumb { width: 104px; } .dstats b { font-size: 19px; } }
+.pop.dlmenu button svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pop.dlmenu .p-head b { font-weight: 600; font-size: 14px; color: #aeaeb2; display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlpage > .pagehead { max-width: 1000px; }   /* 下载页内容限宽 1000, 顶栏按钮跟着靠内容右缘 */

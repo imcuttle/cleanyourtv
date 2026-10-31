@@ -1822,43 +1822,41 @@ function hero(items) {
 }
 
 // ---------- watch history ----------
-function renderHistory() {
-  const list = hist.list();
+// 观看历史 / 我的收藏 共用一套页面。顶栏右侧只有两个图标按钮: 沉浸观看、多选 (没有「清空全部」—— 要清就 多选 → 全选 → 删除);
+// 多选里底部一条操作栏 (全选 / 已选 N 项 / 删除), 点卡片勾选。小屏是 返回 + 居中标题 + 右侧图标, 大屏是 标题 + 右侧图标。
+function renderCollection(kind) {
+  const fav = kind === 'fav', store = fav ? favs : hist;
+  const T = fav ? { name: '我的收藏', pick: '选择收藏', empty: '还没有收藏。打开影片，点封面页的「♡」。', del: '取消收藏', ask: n => `取消收藏选中的 ${n} 项？`, done: n => `已取消收藏 ${n} 项` }
+    : { name: '观看历史', pick: '选择记录', empty: '还没有观看记录。', del: '删除', ask: n => `从观看历史删除选中的 ${n} 项？`, done: n => `已删除 ${n} 项记录` };
+  if (fav && kidsMode()) { view.innerHTML = '<div class="page"><h1>我的收藏</h1><p class="empty">儿童模式下收藏不可见。</p></div>'; return; }
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
-  view.innerHTML = `<div class="page"><div class="pagehead cathead">${BACK_BTN}<h1>观看历史</h1>
-      ${list.length ? `<div class="hact"><button class="small ibs feedgo" data-feed="hist" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button><button class="small ibs" data-clear="hist" title="清空全部" aria-label="清空全部">${IC.trash}</button></div>` : ''}</div>
-    <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有观看记录。</p>
-    ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'hist', progress: true, sub: `${names[it.site] || it.siteName} · ${it.epName || ''}` })).join('')}</div>` : ''}</div>`;
-  observeRatings(view);
-  observeJav(view);
-}
-function renderFavorites() {
-  if (kidsMode()) { view.innerHTML = '<div class="page"><h1>我的收藏</h1><p class="empty">儿童模式下收藏不可见。</p></div>'; return; }
-  let list = favs.list();
-  let selMode = false; const sel = new Set();
+  let list = store.list(), selMode = false; const sel = new Set();
   const key = c => c.dataset.site + '|' + c.dataset.id;
+  const sub = it => fav ? [it.siteName, it.type].filter(Boolean).join(' · ') : `${names[it.site] || it.siteName} · ${it.epName || ''}`;
   const paint = () => {
     view.classList.toggle('selmode', selMode);
     const head = selMode ? '<div class="hact"><button type="button" class="selok" data-sel="done">完成</button></div>'
-      : list.length ? `<div class="hact"><button class="small ibs feedgo" data-feed="fav" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button><button class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button><button class="small ibs" data-clear="fav" title="清空全部" aria-label="清空全部">${IC.trash}</button></div>` : '';
-    view.innerHTML = `<div class="page"><div class="pagehead cathead">${BACK_BTN}<h1>${selMode ? '选择收藏' : '我的收藏'}</h1>${head}</div>
-      <p class="empty hempty" ${list.length ? 'hidden' : ''}>还没有收藏。打开影片，点封面页的「♡」。</p>
-      ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: 'fav', sub: [it.siteName, it.type].filter(Boolean).join(' · ') })).join('')}</div>` : ''}</div>`;
+      : list.length ? `<div class="hact"><button class="small ibs" data-feed="${kind}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button><button class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button></div>` : '';
+    view.innerHTML = `<div class="page coll"><div class="pagehead cathead">${BACK_BTN}<h1>${selMode ? T.pick : T.name}</h1>${head}</div>
+      ${list.length ? `<p class="lan csum">${list.length} 部</p>` : ''}
+      <p class="empty hempty" ${list.length ? 'hidden' : ''}>${T.empty}</p>
+      ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: kind, progress: !fav, sub: sub(it) })).join('')}</div>` : ''}</div>`;
     if (selMode) $$('.grid .card .img', view).forEach(i => i.insertAdjacentHTML('beforeend', '<i class="selchk"></i>'));
-    observeRatings(view);
+    observeRatings(view); if (!fav) observeJav(view);
     syncSel();
   };
   const syncSel = () => {
     if (!selMode) return selBarSet(false);
     $$('.grid .card', view).forEach(c => c.classList.toggle('picked', sel.has(key(c))));
-    const h = $('.cathead h1', view); if (h) h.textContent = sel.size ? `已选择 ${sel.size} 项` : '选择收藏';
-    selBarSet(true, { count: sel.size, total: list.length, delLabel: sel.size ? `取消收藏(${sel.size})` : '取消收藏',
+    const h = $('.cathead h1', view); if (h) h.textContent = sel.size ? `已选择 ${sel.size} 项` : T.pick;
+    selBarSet(true, { count: sel.size, total: list.length, delLabel: sel.size ? `${T.del}(${sel.size})` : T.del,
       onAll: () => { if (sel.size >= list.length) sel.clear(); else list.forEach(it => sel.add(it.site + '|' + it.id)); syncSel(); },
       onDel: () => {
-        if (!sel.size || !confirm(`取消收藏选中的 ${sel.size} 项？`)) return;
-        for (const k of sel) { const i = k.indexOf('|'); favs.del(k.slice(0, i), k.slice(i + 1)); }
-        toast(`已取消收藏 ${sel.size} 项`);
-        selMode = false; sel.clear(); list = favs.list(); paint();
+        if (!sel.size || !confirm(T.ask(sel.size))) return;
+        const n = sel.size;
+        for (const k of sel) { const i = k.indexOf('|'); store.del(k.slice(0, i), k.slice(i + 1)); }
+        toast(T.done(n));
+        selMode = false; sel.clear(); list = store.list(); paint();
       } });
   };
   paint();
@@ -1871,15 +1869,8 @@ function renderFavorites() {
     syncSel();
   };
 }
-document.addEventListener('click', e => {
-  const b = e.target.closest('#view [data-clear]'); if (!b) return;
-  e.preventDefault();
-  const fav = b.dataset.clear === 'fav';
-  if (!confirm(fav ? '清空全部收藏？' : '清空全部观看历史？')) return;
-  (fav ? favs : hist).clear();
-  toast(fav ? '收藏已清空' : '观看历史已清空');
-  route();
-});
+const renderHistory = () => renderCollection('hist');
+const renderFavorites = () => renderCollection('fav');
 
 // ---------- people (演员 / 导演) ----------
 async function renderPerson(role, name, scopeKey = '') {
@@ -2393,40 +2384,45 @@ async function renderDownloads() {
   const sel = new Set();
   const statLine = x => {
     const pct = x.pct || 0;
-    return `${esc(x.siteName)} · ${status[x.status] || x.status}${x.status === 'queued' && x.qpos ? ` 第 ${x.qpos} 位` : ''}${['downloading', 'paused'].includes(x.status) ? ` ${pct}%` : ''} · ${fmtSize(x.bytes || 0)}${x.status === 'downloading' && x.speed ? ` · <b class="spd">${fmtSpeed(x.speed)}</b> · ${fmtEta(x.eta)}` : ''}${x.error ? ' · ' + esc(x.error) : ''}`;
+    return `<em class="st ${x.status}">${status[x.status] || x.status}${x.status === 'queued' && x.qpos ? ` · 第 ${x.qpos} 位` : ''}${['downloading', 'paused'].includes(x.status) ? ` · ${pct}%` : ''}</em>${fmtSize(x.bytes || 0)}${x.status === 'downloading' && x.speed ? ` · ${fmtSpeed(x.speed)} · ${fmtEta(x.eta)}` : ''}${x.error ? ' · ' + esc(x.error) : ''}`;
   };
-  const sumLine = () => `已用 ${fmtSize(jobs.reduce((s, x) => s + (x.bytes || 0), 0))}${free ? ` · 剩余 ${fmtSize(free)}` : ''} · 同时下载 ${maxJobs} 集`;
-  const structKey = () => jobs.map(x => x.id + x.status + (x.qpos > 1 ? 1 : 0)).join() + '|' + jobs.some(x => ACTIVE.includes(x.status)) + jobs.some(x => ['paused', 'error'].includes(x.status)) + !!jobs.reduce((n, x) => n + (x.speed || 0), 0) + selMode;
+  const totals = () => ({ speed: jobs.reduce((n, x) => n + (x.speed || 0), 0), active: jobs.filter(x => ACTIVE.includes(x.status)).length, used: jobs.reduce((s, x) => s + (x.bytes || 0), 0) });
+  // 状态卡: 速度单独放在这里, 不挤顶栏
+  const statsHtml = () => { const t = totals(); return `<div class="dstats">
+      <div><small>下载速度</small><b class="sv-speed${t.speed ? ' live' : ''}">${t.speed ? fmtSpeed(t.speed) : '—'}</b></div>
+      <div><small>进行中</small><b class="sv-active">${t.active}<i>/${maxJobs}</i></b></div>
+      <div><small>已用空间</small><b class="sv-used">${fmtSize(t.used)}</b></div>
+      <div><small>剩余空间</small><b class="sv-free">${free ? fmtSize(free) : '—'}</b></div></div>`; };
+  const structKey = () => jobs.map(x => x.id + x.status + (x.qpos > 1 ? 1 : 0)).join() + '|' + jobs.some(x => ACTIVE.includes(x.status)) + jobs.some(x => ['paused', 'error'].includes(x.status)) + selMode;
+  const rowHtml = (x, open) => {
+    const pct = x.pct || 0;
+    // 每行只有一个主按钮 (播放 / 暂停 / 继续 / 重试), 其余 (保存 · 优先 · 删除) 收进「⋯」
+    const main = x.status === 'done' ? `<button class="small ibs main go" data-op="play" title="播放" aria-label="播放">${IC.play}</button>`
+      : ['queued', 'downloading'].includes(x.status) ? `<button class="small ibs main" data-op="pause" title="暂停" aria-label="暂停">${IC.pause}</button>`
+      : `<button class="small ibs main" data-op="resume" title="${x.status === 'error' ? '重试' : '继续'}" aria-label="${x.status === 'error' ? '重试' : '继续'}">${x.status === 'error' ? IC.retry : IC.play}</button>`;
+    return `<div class="dlw${open ? ' open' : ''}" data-id="${esc(x.id)}"><button type="button" class="dlx" data-op="del" data-swipe aria-label="删除">删除</button>
+      <div class="dl ${x.status}${sel.has(x.id) ? ' picked' : ''}" data-id="${esc(x.id)}"><i class="chk"></i>
+        <div class="thumb" data-open style="${bgHi(x.pic, 'm')}" title="查看详情"></div>
+        <div class="dinfo" data-open><div class="dtitle">${esc(x.name)}</div>
+          <div class="dep">${esc(x.epName)} · ${esc(x.siteName)}</div>
+          <div class="dstat">${statLine(x)}</div>
+          <div class="bar"><i style="width:${x.status === 'done' ? 100 : pct}%"></i></div></div>
+        <div class="dops">${main}<button class="small ibs more" data-op="more" title="更多" aria-label="更多"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div>
+        <a class="dlsave" hidden href="/dl/${esc(x.id)}/save" download></a></div></div>`;
+  };
   // 整页重画 (列表结构变了才走这里); 一秒一次的进度刷新只改文字和进度条, 不重画, 左滑出来的删除也不会被收回去
   const paint = () => {
     if (!onPage('#/downloads')) return;
     const open = new Set($$('.dlw.open', view).map(w => w.dataset.id));
     const anyActive = jobs.some(x => ACTIVE.includes(x.status)), anyPaused = jobs.some(x => ['paused', 'error'].includes(x.status));
-    const totalSpeed = jobs.reduce((n, x) => n + (x.speed || 0), 0);
     const head = selMode
       ? `<div class="hact"><button type="button" class="selok" data-sel="done">完成</button></div>`
       : `<div class="hact">
-        ${anyActive ? `<button class="small ibs" data-op="pause" data-all title="全部暂停" aria-label="全部暂停">${IC.pause}</button>` : ''}
-        ${anyPaused ? `<button class="small ibs" data-op="resume" data-all title="全部开始" aria-label="全部开始">${IC.play}</button>` : ''}
-        ${totalSpeed ? `<span class="spd">${fmtSpeed(totalSpeed)}</span>` : ''}
+        ${anyActive ? `<button class="small ibs" data-op="pause" data-all title="全部暂停" aria-label="全部暂停">${IC.pause}</button>` : anyPaused ? `<button class="small ibs" data-op="resume" data-all title="全部开始" aria-label="全部开始">${IC.play}</button>` : ''}
         ${jobs.length ? `<button class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button>` : ''}</div>`;
-    view.innerHTML = `<div class="page"><div class="pagehead cathead">${BACK_BTN}<h1>${selMode ? '选择下载' : '下载'}</h1>${head}</div>
-      <p class="lan dsum">${sumLine()}</p>
-      ${jobs.length ? `<div class="dls${selMode ? ' sel' : ''}">${jobs.map(x => {
-        const pct = x.pct || 0;
-        return `<div class="dlw${open.has(x.id) ? ' open' : ''}" data-id="${esc(x.id)}"><button type="button" class="dlx" data-op="del" data-swipe aria-label="删除">删除</button>
-          <div class="dl ${x.status}${sel.has(x.id) ? ' picked' : ''}" data-id="${esc(x.id)}"><i class="chk"></i>
-          <div class="thumb" style="${bg(x.pic)}"></div>
-          <div class="dinfo"><div><b>${esc(x.name)}</b> <span>${esc(x.epName)}</span></div>
-            <div class="lan dstat">${statLine(x)}</div>
-            <div class="bar"><i style="width:${x.status === 'done' ? 100 : pct}%"></i></div></div>
-          <div class="dops">
-            ${x.status === 'done' ? `<button class="small ibs ok" data-op="play" title="播放" aria-label="播放">${IC.play}</button><a class="small ibs" href="/dl/${esc(x.id)}/save" download title="保存到本机" aria-label="保存到本机">${IC.save}</a>` : ''}
-            ${['queued', 'downloading'].includes(x.status) ? `<button class="small ibs" data-op="pause" title="暂停" aria-label="暂停">${IC.pause}</button>` : ''}
-            ${['paused', 'error'].includes(x.status) ? `<button class="small ibs" data-op="resume" title="${x.status === 'error' ? '重试' : '继续'}" aria-label="${x.status === 'error' ? '重试' : '继续'}">${x.status === 'error' ? IC.retry : IC.play}</button>` : ''}
-            ${(x.status === 'queued' && x.qpos > 1) || ['paused', 'error'].includes(x.status) ? `<button class="small ibs" data-op="top" title="排到队首，下一个就下" aria-label="优先">${IC.top}</button>` : ''}
-            <button class="small ibs" data-op="del" title="删除" aria-label="删除">${IC.trash}</button></div></div></div>`;
-      }).join('')}</div>` : '<p class="empty">还没有下载。打开任意影片，点封面页的下载图标再选集。</p>'}</div>`;
+    view.innerHTML = `<div class="page dlpage"><div class="pagehead cathead">${BACK_BTN}<h1>${selMode ? '选择下载' : '下载'}</h1>${head}</div>
+      ${statsHtml()}
+      ${jobs.length ? `<div class="dls${selMode ? ' sel' : ''}">${jobs.map(x => rowHtml(x, open.has(x.id))).join('')}</div>` : '<p class="empty">还没有下载。打开任意影片，点封面页的下载图标再选集。</p>'}</div>`;
     lastKey = structKey();
     syncSel();
   };
@@ -2453,17 +2449,38 @@ async function renderDownloads() {
     await fetchJobs();
     if (!onPage('#/downloads') || sw) return;
     if (structKey() !== lastKey) return paint();
-    $('.dsum', view)?.replaceChildren(sumLine());
-    const sp = $('.cathead .hact .spd', view), total = jobs.reduce((n, x) => n + (x.speed || 0), 0);
-    if (sp) sp.textContent = fmtSpeed(total);
+    const t = totals(), sp = $('.sv-speed', view);
+    if (sp) { sp.textContent = t.speed ? fmtSpeed(t.speed) : '—'; sp.classList.toggle('live', !!t.speed); }
+    const ac = $('.sv-active', view); if (ac) ac.innerHTML = `${t.active}<i>/${maxJobs}</i>`;
+    $('.sv-used', view)?.replaceChildren(fmtSize(t.used));
+    $('.sv-free', view)?.replaceChildren(free ? fmtSize(free) : '—');
     for (const x of jobs) {
       const row = $(`.dl[data-id="${CSS.escape(x.id)}"]`, view); if (!row) continue;
       $('.dstat', row).innerHTML = statLine(x);
       $('.bar i', row).style.width = (x.status === 'done' ? 100 : x.pct || 0) + '%';
     }
   };
+  // 「⋯」: 小屏是底部上拉浮窗, 大屏是按钮旁的小菜单 (同全站其他菜单)
+  const openMore = btn => {
+    const id = btn.closest('.dl').dataset.id, x = jobs.find(j => j.id === id); if (!x) return;
+    const items = [];
+    if (x.status === 'done') items.push(['save', IC.save, '保存到本机']);
+    if ((x.status === 'queued' && x.qpos > 1) || ['paused', 'error'].includes(x.status)) items.push(['top', IC.top, '排到队首']);
+    items.push(['del', IC.trash, '删除', true]);
+    Pop.open({ anchor: btn, title: x.name, cls: 'pop-menu dlmenu',
+      body: items.map(([k, ic, t, danger]) => `<button type="button" data-m="${k}"${danger ? ' class="danger"' : ''}>${ic}${t}</button>`).join(''),
+      onClick: async (e, close) => {
+        const b = e.target.closest('[data-m]'); if (!b) return;
+        close();
+        if (b.dataset.m === 'save') return $(`.dl[data-id="${CSS.escape(id)}"] .dlsave`, view)?.click();
+        if (b.dataset.m === 'top') { await req('PATCH', `/api/downloads?id=${id}&action=top`).catch(err => toast(err.message)); return draw(); }
+        if (!confirm(`删除「${x.name} ${x.epName}」？`)) return;
+        await req('DELETE', '/api/downloads?id=' + id).catch(err => toast(err.message)); draw();
+      } });
+  };
   await draw();
   view.onclick = async e => {
+    if (Date.now() - swAt < 450) return;               // 左滑松手后补发的那下 click 不算
     // 多选: 进入 / 退出 / 点行勾选
     const sb = e.target.closest('[data-sel]');
     if (sb) { selMode = sb.dataset.sel === 'on'; sel.clear(); return paint(); }
@@ -2483,7 +2500,7 @@ async function renderDownloads() {
       const href = sv.getAttribute('href'), x = state.downloads.find(j => href.includes('/' + j.id + '/'));
       const have = saveFiles.get(href);
       if (have) {
-        try { await navigator.share({ files: [have] }); saveFiles.delete(href); sv.classList.remove('ok'); }
+        try { await navigator.share({ files: [have] }); saveFiles.delete(href); }
         catch (err) { if (err.name !== 'AbortError') toast('无法打开系统分享：' + err.message); }
         return;
       }
@@ -2496,13 +2513,19 @@ async function renderDownloads() {
         const name = decodeURIComponent((/filename\*=UTF-8''([^;]+)/.exec(r.headers.get('content-disposition') || '') || [])[1] || 'video.mp4');
         const blob = await r.blob(), file = new File([blob], name, { type: blob.type || 'video/mp4' });
         if (!navigator.canShare({ files: [file] })) throw new Error('系统不接受这个文件');
-        saveFiles.set(href, file); sv.classList.add('ok'); toast('文件已准备好，再点一次「保存」按钮，选「存储到文件」');
+        saveFiles.set(href, file); toast('文件已准备好，再点一次「保存到本机」，选「存储到文件」');
       } catch (err) { toast('准备文件失败：' + err.message); }
       finally { delete sv.dataset.busy; }
       return;
     }
-    const ob = e.target.closest('[data-op]'); if (!ob) return;
+    const ob = e.target.closest('[data-op]');
+    if (!ob) {                                                     // 点封面 / 标题 = 看详情
+      const o = e.target.closest('[data-open]'); if (!o) return;
+      const x = jobs.find(j => j.id === o.closest('.dl').dataset.id);
+      return x && openDetail(x.site, x.vid);
+    }
     const op = ob.dataset.op;
+    if (op === 'more') return openMore(ob);
     if (ob.dataset.all !== undefined) { await req('PATCH', `/api/downloads?id=*&action=${op}`); return draw(); }
     const id = ob.closest('.dl, .dlw').dataset.id;
     const x = state.downloads.find(j => j.id === id);
@@ -2512,15 +2535,14 @@ async function renderDownloads() {
       const eps = sib.length ? sib.map(j => ({ name: j.epName, url: j.play })) : [{ name: x.epName, url: x.play }];
       cur = { kind: 'local', eps, ep: Math.max(0, sib.findIndex(j => j.id === x.id)), title: x.name }; return openPlayer(0);
     }
-    if (op === 'del' && !ob.dataset.swipe && !confirm(`删除「${x.name} ${x.epName}」？`)) return;
-    if (op === 'del') await req('DELETE', '/api/downloads?id=' + id);
+    if (op === 'del') await req('DELETE', '/api/downloads?id=' + id);     // 左滑露出的红色「删除」: 滑出来本身就是确认, 直接删
     else await req('PATCH', `/api/downloads?id=${id}&action=${op}`);
     draw();
   };
   pageTimer = setInterval(() => { if (state.downloads.some(x => ACTIVE.includes(x.status))) tick().catch(() => {}); }, 1000);
 }
 // 小屏下载列表: 一行往左滑 = 露出红色「删除」(松手过一半就停在那里, 点它删除; 点别处 / 滑别的行收回去)。多选模式里不滑
-let sw = null;
+let sw = null, swAt = 0;
 {
   const W = 80;
   view.addEventListener('touchstart', e => {
@@ -2543,7 +2565,7 @@ let sw = null;
     if (s.lock !== 'x') return;
     s.row.classList.remove('drag'); s.row.style.transform = '';
     s.w.classList.toggle('open', s.cx < -W / 2);
-    s.moved = true;
+    swAt = Date.now();
   };
   view.addEventListener('touchend', done); view.addEventListener('touchcancel', done);
 }
