@@ -1494,25 +1494,31 @@ function openCardMenu(c, x, y, sheet) {
     },
   });
 }
+// 长按卡片 →「沉浸播放」: 先播这一张, 后面一律按推荐逻辑接着放 (一随机、一按口味, 交替), 不按列表顺序。推荐的范围跟着当前页面走:
+//   分类页 → 这个分类 / 搜索页 → 这次搜索的结果 / 收藏 · 历史页 → 收藏 · 历史 (和页面右上角那个沉浸按钮同一套: 直接借它的参数)
+//   首页 → 当前源的推荐流 / 其他页面 (演员 · 榜单 …) → 这一页上的这批片子, 随机 + 按口味排
 async function feedFromCard(c) {
   const box = c.closest('.scroller, .grid') || c.parentElement;
   const label = c.closest('.row')?.querySelector('h2')?.textContent.trim() || $('#view h1')?.textContent.trim() || '列表';
-  let items = [...box.querySelectorAll('.card')].map(el => el === c || el.dataset.db === undefined ? [el, cardItems.get(el.dataset.site + '|' + el.dataset.id)] : null).filter(p => p && (p[0] === c || p[1]));
-  let start = Math.max(0, items.findIndex(p => p[0] === c));
-  items = items.map(p => p[1]);
+  let first = c.dataset.db !== undefined ? null : cardItems.get(c.dataset.site + '|' + c.dataset.id);
   if (c.dataset.db !== undefined) {                       // 豆瓣 card: 先在源里找到这部
     const t = toast('正在打开沉浸播放…', true);
     try {
-      const hit = await findTitle(c.dataset.db, new AbortController().signal);
+      first = await findTitle(c.dataset.db, new AbortController().signal);
       t.remove();
-      if (!hit) return toast(`没找到「${c.dataset.db}」`);
-      items[start] = hit;
+      if (!first) return toast(`没找到「${c.dataset.db}」`);
     } catch (err) { t.remove(); if (!isAbort(err)) toast(err.message); return; }
   }
-  items = items.filter(Boolean);
-  if (!items.length) return;
-  start = Math.min(start, items.length - 1);
-  window.openFeed({ mode: 'list', items, start, label });
+  if (!first) return;
+  const at = first.site + '|' + first.id;
+  const pg = $('#view [data-feed]');
+  if (pg && ['cat', 'search', 'fav', 'hist'].includes(pg.dataset.feed)) {
+    const d = pg.dataset;
+    return window.openFeed({ mode: d.feed, t: d.t || '', name: d.name || '', site: d.site || state.site, q: d.q || '', scope: d.scope || '', at });
+  }
+  if (document.body.dataset.page === 'home') return window.openFeed({ mode: 'rec', at });
+  const items = [...box.querySelectorAll('.card')].map(el => el.dataset.db === undefined ? cardItems.get(el.dataset.site + '|' + el.dataset.id) : null).filter(Boolean);
+  window.openFeed({ mode: 'list', items, label, rand: true, at });
 }
 // 触感反馈: 安卓用 navigator.vibrate; iOS Safari 没有这个接口, 但 17.4+ 点一下 <input switch> 的标签会有系统触感, 借它用一下。
 const haptic = (() => {

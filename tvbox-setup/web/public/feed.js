@@ -598,7 +598,7 @@ const drainPool = n => { const out = []; while (out.length < n && F.pool.length)
 async function moreCands(gen) {
   const m = F.mode, fresh = list => list.filter(it => !F.keys.has(keyOf(it)));
   if (m === 'rec') return fresh(await recMore(gen));
-  // 分类 / 搜索 的沉浸按钮: 随机播放 + 按喜好推荐 (一随机、一按口味, 交替); 从卡片右键进入的 'list' 则严格按列表顺序
+  // 分类 / 搜索 的沉浸按钮和长按卡片: 随机播放 + 按喜好推荐 (一随机、一按口味, 交替); 'list' 只有不带 rand 时才严格按列表顺序 (现在没有入口用它)
   if (m === 'cat') {
     const x = F.extra;
     while (F.pool.length < 6 && F.catUsed.size < F.catCount) {
@@ -631,7 +631,11 @@ async function moreCands(gen) {
   }
   if (F.once) return [];
   F.once = true;
-  if (m === 'list') { const a = F.extra.items, k = F.extra.start || 0; return fresh(a.slice(k).concat(a.slice(0, k))); }
+  if (m === 'list') {
+    const x = F.extra;
+    if (x.rand) { if (!F.once) { F.once = true; poolAdd(x.items); } return drainPool(6); }     // 长按卡片: 这一批片子里随机 + 按口味交替
+    const a = x.items, k = x.start || 0; return fresh(a.slice(k).concat(a.slice(0, k)));
+  }
   return [];
 }
 // Keeps `AHEAD` validated titles in front of the viewer. Three details are fetched at a time and appended in order
