@@ -1,5 +1,5 @@
 // TVBOX 管理后台 (Vue 3, 不用构建: vue.global.prod.js 带模板编译器, 组件直接写模板字符串)。
-// 谁能进: 管理员账号 (登录后 Cookie tvbox_sess) 或带管理员令牌的浏览器 (Cookie tvbox_admin)。接口都在 /api/console/ 下, 服务端逐个校验。
+// 谁能进: 带管理员令牌的浏览器 (输入令牌后服务端种 Cookie tvbox_admin)。账号没有管理员概念。接口都在 /api/console/ 下, 服务端逐个校验。
 // 手机优先: 底部标签栏 + 上拉弹层; 宽屏变成左侧栏。
 'use strict';
 const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } = Vue;
@@ -13,19 +13,6 @@ async function api(method, path, body) {
 }
 const get = p => api('GET', p);
 const post = (p, b) => api('POST', p, b || {});
-
-// 和前台共用同一份账号登记 (acct.js 的 localStorage 键), 在这里登录前台也跟着登录
-const LIST = 'tvbox_accts', ACTIVE = 'tvbox_acct', ON = 'tvbox_acct_on';
-function setSessCookie(tok) {
-  document.cookie = `tvbox_sess=${tok ? encodeURIComponent(tok) : ''}; Path=/; Max-Age=${tok ? 31536000 : 0}; SameSite=Lax${location.protocol === 'https:' ? '; Secure' : ''}`;
-}
-function enroll(user, token) {
-  let list = []; try { list = JSON.parse(localStorage.getItem(LIST) || '[]'); } catch {}
-  list = list.filter(a => a && a.id !== user.id); list.push({ id: user.id, name: user.name, token });
-  localStorage.setItem(LIST, JSON.stringify(list)); localStorage.setItem(ACTIVE, String(user.id)); localStorage.setItem(ON, '1');
-  setSessCookie(token);
-}
-function leaveAccount() { localStorage.setItem(ACTIVE, '0'); setSessCookie(''); }
 
 const LV = { kids: '儿童', standard: '标准', all: '全部' };
 const hue = s => { let h = 0; for (const c of String(s)) h = (h * 31 + c.codePointAt(0)) % 360; return h; };
@@ -62,7 +49,7 @@ const Overview = {
     <h2>概览</h2>
     <div class="stats">
       <div class="stat"><small>账号</small><b>{{ d.users }}<i>个</i></b></div>
-      <div class="stat"><small>管理员</small><b>{{ d.admins }}<i>个</i></b></div>
+      <div class="stat"><small>可用无限模式</small><b>{{ d.unlimited }}<i>个账号</i></b></div>
       <div class="stat"><small>点播源</small><b>{{ d.sites }}<i>{{ d.groups ? '+ ' + d.groups + ' 聚合' : '个' }}</i></b></div>
       <div class="stat"><small>直播源</small><b>{{ d.lives }}<i>个</i></b></div>
     </div>
@@ -91,59 +78,87 @@ const Overview = {
 };
 
 // ---------- 账号 ----------
+// 账号上有两样东西由这里设置: 安全级别 (儿童 / 标准 / 全部) 和「允许无限模式」开关。开关关着, 账号看不到「全部」;
+// 开着, 账号可以自己在设置页切换三档。账号本身没有管理员概念。点一个账号看明细。
 const Users = {
-  props: ['me'],
   components: { Avatar, Sheet },
-  setup(props) {
-    const users = ref(null), reg = ref(true), busy = ref(false);
-    const form = reactive({ open: false, username: '', password: '', level: 'standard', admin: false });
+  setup() {
+    const users = ref(null), reg = ref(true), busy = ref(false), q = ref('');
+    const form = reactive({ open: false, username: '', password: '', level: 'standard', unlimited: false });
+    const detail = ref(null), dBusy = ref(false);
     const load = () => get('console/users').then(v => { users.value = v.users; reg.value = v.register; }, oops);
     onMounted(load);
-    const isMe = u => props.me.user && props.me.user.id === u.id;
-    const act = async (fn, okMsg) => { if (busy.value) return; busy.value = true; try { await fn(); if (okMsg) toast(okMsg); await load(); } catch (e) { oops(e); } finally { busy.value = false; } };
+    const shown = computed(() => (users.value || []).filter(u => !q.value || u.name.toLowerCase().includes(q.value.toLowerCase())));
+    const act = async (fn, okMsg) => { if (busy.value) return; busy.value = true; try { await fn(); if (okMsg) toast(okMsg); await load(); if (detail.value) await openDetail(detail.value.user.id, true); } catch (e) { oops(e); } finally { busy.value = false; } };
     const setLevel = (u, level) => level !== u.level && act(() => post('console/users/update', { id: u.id, level }), `「${u.name}」的安全级别改成${LV[level]}`);
-    const setAdmin = async (u, on) => {
-      if (!await confirmBox(on ? '设为管理员？' : '取消管理员？', on ? `「${u.name}」将能管理账号、修改源数据、使用「全部」级别。` : `「${u.name}」将失去管理权限${u.level === 'all' ? '，安全级别会降回「标准」' : ''}。`, '确定')) return;
-      act(() => post('console/users/update', { id: u.id, admin: on }), on ? '已设为管理员' : '已取消管理员');
-    };
+    const setUnlimited = (u, on) => act(() => post('console/users/update', { id: u.id, unlimited: on }), on ? `「${u.name}」可以用无限模式了` : `「${u.name}」不能再用无限模式${u.level === 'all' ? '，级别降回标准' : ''}`);
     const resetPw = async u => {
       const pw = await promptBox(`重置「${u.name}」的密码`, '新密码（6 位以上）', 'password', '其它设备上的登录会失效, 需要用新密码重新登录。');
       if (pw) act(() => post('console/users/password', { id: u.id, password: pw }), '密码已重置');
     };
     const kick = async u => { if (await confirmBox('让所有设备下线？', `「${u.name}」在所有设备上的登录会失效。`)) act(() => post('console/users/kick', { id: u.id }), '已下线'); };
-    const del = async u => { if (await confirmBox('删除账号？', `会删除「${u.name}」的全部观看历史、收藏和偏好, 不可恢复。`, '永久删除', true)) act(() => post('console/users/delete', { id: u.id }), '已删除'); };
+    const del = async u => { if (await confirmBox('删除账号？', `会删除「${u.name}」的全部观看历史、收藏和偏好, 不可恢复。`, '永久删除', true)) { await act(() => post('console/users/delete', { id: u.id }), '已删除'); detail.value = null; } };
     const create = () => act(async () => {
-      await post('console/users/create', { username: form.username, password: form.password, level: form.level, admin: form.admin });
-      form.open = false; Object.assign(form, { username: '', password: '', level: 'standard', admin: false });
+      await post('console/users/create', { username: form.username, password: form.password, level: form.level, unlimited: form.unlimited });
+      form.open = false; Object.assign(form, { username: '', password: '', level: 'standard', unlimited: false });
     }, '账号已创建');
-    watch(() => form.admin, v => { if (!v && form.level === 'all') form.level = 'standard'; });
-    return { users, reg, busy, form, isMe, setLevel, setAdmin, resetPw, kick, del, create, LV, ago, fmtDate };
+    watch(() => form.unlimited, v => { if (!v && form.level === 'all') form.level = 'standard'; });
+    const openDetail = async (id, quiet) => { if (!quiet) dBusy.value = true; try { detail.value = await get('console/users/detail?id=' + id); } catch (e) { oops(e); } finally { dBusy.value = false; } };
+    const dur = t => { t = Math.round(t || 0); const m = Math.floor(t / 60), s = t % 60; return `${m}:${String(s).padStart(2, '0')}`; };
+    const uaName = ua => { ua = String(ua || ''); const os = /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac OS/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : '未知系统'; const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /Firefox\//.test(ua) ? 'Firefox' : '浏览器'; return `${br} · ${os}`; };
+    return { users, shown, q, reg, busy, form, detail, dBusy, setLevel, setUnlimited, resetPw, kick, del, create, openDetail, dur, uaName, LV, ago, fmtDate };
   },
   template: `<div>
     <div class="row" style="margin-bottom:6px"><h2 class="grow" style="margin:0">账号</h2><button class="btn red sm" @click="form.open = true">＋ 新建账号</button></div>
-    <p class="muted small" style="margin-top:0">安全级别属于账号: 访客固定「标准」; 非管理员只能是「儿童」或「标准」; 只有管理员账号能用「全部」。注册{{ reg ? '已开放' : '已关闭' }}。</p>
+    <p class="muted small" style="margin-top:0">安全级别属于账号, 访客固定「标准」。「允许无限模式」开着的账号才能用「全部」, 并且能自己在设置页切换三档; 关着的账号级别由这里定。账号没有管理员概念, 管理员只认令牌。注册{{ reg ? '已开放' : '已关闭' }}。点账号看明细。</p>
+    <div class="toolbar" v-if="users && users.length > 6"><input type="search" v-model="q" placeholder="搜用户名"></div>
     <div v-if="!users" class="muted">加载中…</div>
     <div v-else class="users">
-      <div class="card user" v-for="u in users" :key="u.id">
-        <div class="head"><Avatar :name="u.name" />
-          <div class="grow"><div class="nm">{{ u.name }}<span class="tag blue" v-if="u.admin">管理员</span><span class="tag" v-if="isMe(u)">我</span></div>
-            <div class="meta">注册 {{ fmtDate(u.created).slice(0, 10) }} · 最近 {{ ago(u.lastSeen) }} · 历史 {{ u.history }} · 收藏 {{ u.favs }} · {{ u.sessions }} 个会话</div></div></div>
+      <div class="card user" v-for="u in shown" :key="u.id">
+        <div class="head" @click="openDetail(u.id)" style="cursor:pointer"><Avatar :name="u.name" />
+          <div class="grow"><div class="nm">{{ u.name }}<span class="tag red" v-if="u.level === 'all'">无限</span></div>
+            <div class="meta">注册 {{ fmtDate(u.created).slice(0, 10) }} · 最近 {{ ago(u.lastSeen) }} · 历史 {{ u.history }} · 收藏 {{ u.favs }} · {{ u.sessions }} 个会话</div></div>
+          <span class="muted">›</span></div>
         <div class="ops"><span class="lbl">安全级别</span>
-          <div class="seg"><button v-for="(n, k) in LV" :key="k" :class="{ on: u.level === k }" :disabled="busy || (k === 'all' && !u.admin)" @click="setLevel(u, k)">{{ n }}</button></div></div>
-        <div class="ops"><span class="lbl">管理员</span><button class="switch" :class="{ on: u.admin }" :disabled="busy || (isMe(u) && u.admin)" @click="setAdmin(u, !u.admin)" :aria-pressed="u.admin"></button>
-          <span class="grow"></span>
-          <button class="btn sm" @click="resetPw(u)" :disabled="busy">重置密码</button>
-          <button class="btn sm" @click="kick(u)" :disabled="busy">踢下线</button>
-          <button class="btn sm danger" @click="del(u)" :disabled="busy || isMe(u)">删除</button></div>
+          <div class="seg"><button v-for="(n, k) in LV" :key="k" :class="{ on: u.level === k }" :disabled="busy || (k === 'all' && !u.unlimited)" @click="setLevel(u, k)">{{ n }}</button></div></div>
+        <div class="ops"><span class="lbl">允许无限模式</span><button class="switch" :class="{ on: u.unlimited }" :disabled="busy" @click="setUnlimited(u, !u.unlimited)" :aria-pressed="u.unlimited"></button></div>
       </div>
     </div>
     <p v-if="users && !users.length" class="muted">还没有账号。</p>
+
+    <Sheet v-if="detail" :title="detail.user.name + ' · 明细'" @close="detail = null">
+      <div class="kv">
+        <span>账号 ID</span><div>{{ detail.user.id }}</div>
+        <span>注册</span><div>{{ fmtDate(detail.user.created) }}</div>
+        <span>最近活动</span><div>{{ fmtDate(detail.user.lastSeen) }}（{{ ago(detail.user.lastSeen) }}）</div>
+        <span>安全级别</span><div><div class="seg"><button v-for="(n, k) in LV" :key="k" :class="{ on: detail.user.level === k }" :disabled="busy || (k === 'all' && !detail.user.unlimited)" @click="setLevel(detail.user, k)">{{ n }}</button></div></div>
+        <span>无限模式</span><div class="row"><button class="switch" :class="{ on: detail.user.unlimited }" :disabled="busy" @click="setUnlimited(detail.user, !detail.user.unlimited)"></button><span class="muted small">{{ detail.user.unlimited ? '可以用「全部」, 能自己切换三档' : '看不到「全部」, 级别由管理员定' }}</span></div>
+        <span>封面设置</span><div>{{ detail.prefs.cardMode === 'wide' ? '横版' : '竖版' }}{{ detail.prefs.cardScale ? ' · ' + Math.round(detail.prefs.cardScale * 100) + '%' : '' }}</div>
+      </div>
+      <h4 class="sec">数据量</h4>
+      <div class="row gap"><span class="tag">观看记录 {{ detail.counts.history }}</span><span class="tag">分集进度 {{ detail.counts.progress }}</span><span class="tag">收藏 {{ detail.counts.favs }}</span><span class="tag">直播收藏 {{ detail.counts.liveFavs }}</span></div>
+      <h4 class="sec">登录的设备（{{ detail.sessions.length }}）</h4>
+      <p class="muted small" v-if="!detail.sessions.length">没有登录会话。</p>
+      <div v-for="(s, i) in detail.sessions" :key="i" class="muted small" style="margin-bottom:4px">{{ uaName(s.ua) }} · 登录 {{ fmtDate(s.created).slice(0, 10) }} · 最近用 {{ ago(s.lastUsed) }}</div>
+      <h4 class="sec">最近观看（{{ detail.history.length }}）</h4>
+      <p class="muted small" v-if="!detail.history.length">还没有观看记录。</p>
+      <div v-for="(h, i) in detail.history" :key="'h' + i" class="small" style="margin-bottom:6px"><b>{{ h.name }}</b><span class="muted"> {{ h.epName ? '· ' + h.epName : '' }} · {{ dur(h.t) }} / {{ dur(h.dur) }} · {{ ago(h.at) }} · {{ h.siteName || h.site }}</span></div>
+      <h4 class="sec">最近收藏（{{ detail.favs.length }}）</h4>
+      <p class="muted small" v-if="!detail.favs.length">还没有收藏。</p>
+      <div class="small muted" v-else>{{ detail.favs.map(f => f.name).join('、') }}</div>
+      <div class="acts" style="margin-top:14px;flex-wrap:wrap">
+        <button class="btn sm" @click="resetPw(detail.user)" :disabled="busy">重置密码</button>
+        <button class="btn sm" @click="kick(detail.user)" :disabled="busy">踢下线</button>
+        <button class="btn sm danger" @click="del(detail.user)" :disabled="busy">删除账号</button>
+        <span class="grow"></span><button class="btn" @click="detail = null">关闭</button></div>
+    </Sheet>
+
     <Sheet v-if="form.open" title="新建账号" @close="form.open = false">
       <label class="fld"><span>用户名（2~20 个字）</span><input type="text" v-model.trim="form.username" autocomplete="off"></label>
       <label class="fld"><span>密码（6 位以上）</span><input type="password" v-model="form.password" autocomplete="new-password"></label>
-      <div class="row gap" style="margin-bottom:12px"><span class="muted small">管理员</span><button class="switch" :class="{ on: form.admin }" @click="form.admin = !form.admin"></button></div>
+      <div class="row gap" style="margin-bottom:12px"><span class="muted small">允许无限模式</span><button class="switch" :class="{ on: form.unlimited }" @click="form.unlimited = !form.unlimited"></button></div>
       <div class="row gap" style="margin-bottom:12px"><span class="muted small">安全级别</span>
-        <div class="seg"><button v-for="(n, k) in LV" :key="k" :class="{ on: form.level === k }" :disabled="k === 'all' && !form.admin" @click="form.level = k">{{ n }}</button></div></div>
+        <div class="seg"><button v-for="(n, k) in LV" :key="k" :class="{ on: form.level === k }" :disabled="k === 'all' && !form.unlimited" @click="form.level = k">{{ n }}</button></div></div>
       <div class="acts"><button class="btn" @click="form.open = false">取消</button><button class="btn red" :disabled="busy || !form.username || form.password.length < 6" @click="create">创建</button></div>
     </Sheet>
   </div>`
@@ -265,6 +280,72 @@ const Sources = {
   </div>`
 };
 
+// ---------- 本地媒体 ----------
+// 可以有多个本地源, 每个是一个独立的点播源: 名字 / 整体级别 (标准·少儿·成人, 管它下面所有目录) / 若干目录 (目录上还能再单独标少儿·成人)。
+// 改动先留在本页, 点「保存并扫描」才写入服务端并开始扫描。
+const Local = {
+  components: { Sheet },
+  setup() {
+    const d = ref(null), cfg = ref(null), orig = ref(''), saving = ref(false), edit = ref(null);
+    let timer = 0;
+    const apply = j => { d.value = j; cfg.value = JSON.parse(JSON.stringify(j.cfg)); orig.value = JSON.stringify(j.cfg); };
+    const load = async () => apply(await get('console/local'));
+    const poll = () => { clearTimeout(timer); if (!d.value || !d.value.status.running) return; timer = setTimeout(async () => { try { const j = await get('console/local'); d.value.status = j.status; if (!j.status.running) { toast('扫描完成'); } } catch {} poll(); }, 1200); };
+    onMounted(async () => { try { await load(); poll(); } catch (e) { oops(e); } });
+    onBeforeUnmount(() => clearTimeout(timer));
+    const dirty = computed(() => cfg.value && JSON.stringify(cfg.value) !== orig.value);
+    const lvlOf = s => s.adult ? 'adult' : s.kids ? 'kids' : 'std';
+    const setLvl = (s, v) => { delete s.adult; delete s.kids; if (v === 'adult') s.adult = 1; else if (v === 'kids') s.kids = 1; };
+    const stOf = (s, p) => d.value && d.value.status.dirs.find(x => x.path === p && (x.src || 'local') === (s.id || 'local'));
+    const addSrc = () => cfg.value.sources.push({ id: '', name: '', enabled: true, dirs: [{ path: '', name: '' }] });
+    const delSrc = async (i) => { if (await confirmBox('删除这个本地源？', '点「保存并扫描」后生效, 不会动磁盘上的文件。', '删除', true)) cfg.value.sources.splice(i, 1); };
+    const addDir = s => s.dirs.push({ path: '', name: '' });
+    const flag = (x, k, v) => { if (v) x[k] = 1; else delete x[k]; };
+    const save = async () => {
+      const bad = cfg.value.sources.flatMap(s => s.dirs).find(x => x.path.trim() && !/^(\/|~|[a-z]:[\\/]|\\\\)/i.test(x.path.trim()));
+      if (bad) return toast('要写完整路径: ' + bad.path, true);
+      const body = JSON.parse(JSON.stringify(cfg.value)); body.sources.forEach(s => { s.dirs = s.dirs.filter(x => x.path.trim()); });
+      saving.value = true;
+      try { const r = await api('PUT', 'console/local', body); d.value.status = r.status; cfg.value = JSON.parse(JSON.stringify(r.cfg)); orig.value = JSON.stringify(r.cfg); toast('已保存, 开始扫描'); poll(); } catch (e) { oops(e); } finally { saving.value = false; }
+    };
+    const scan = async () => { try { d.value.status = await post('console/local/scan'); poll(); } catch (e) { oops(e); } };
+    const revert = async () => { if (await confirmBox('放弃未保存的修改？', '', '放弃')) cfg.value = JSON.parse(orig.value); };
+    const stText = s => s.running ? `扫描中… 已找到 ${s.dirs.reduce((n, x) => n + x.items, 0)} 部` : s.at ? `上次扫描 ${ago(s.at)} · ${s.items} 部 / ${s.files} 个文件${s.error ? ' · 出错: ' + s.error : ''}` : '还没扫描过';
+    return { d, cfg, dirty, saving, lvlOf, setLvl, stOf, addSrc, delSrc, addDir, flag, save, scan, revert, stText };
+  },
+  template: `<div>
+    <div class="row" style="margin-bottom:6px"><h2 class="grow" style="margin:0">本地媒体</h2><button class="btn red sm" @click="addSrc" :disabled="!cfg">＋ 添加本地源</button></div>
+    <p class="muted small" style="margin-top:0">扫描这台电脑(或挂载的 NAS)上的文件夹。每个本地源是一个独立的点播源。「整体级别」管这个源下面所有目录: 标成人的源只有「全部」级别的账号看得到, 标少儿的源儿童模式也能看。</p>
+    <div v-if="!cfg" class="muted">加载中…</div>
+    <template v-else>
+      <div class="card" v-for="(s, si) in cfg.sources" :key="si">
+        <div class="row" style="margin-bottom:10px">
+          <button class="switch" :class="{ on: s.enabled !== false }" @click="s.enabled = s.enabled === false" :aria-label="'启用'"></button>
+          <input type="text" v-model="s.name" placeholder="源名称" style="flex:1;min-width:120px">
+          <button class="btn sm danger" @click="delSrc(si)">删除源</button></div>
+        <div class="row" style="margin-bottom:10px"><span class="muted small">整体级别</span>
+          <div class="seg"><button :class="{ on: lvlOf(s) === 'std' }" @click="setLvl(s, 'std')">标准</button><button :class="{ on: lvlOf(s) === 'kids' }" @click="setLvl(s, 'kids')">少儿</button><button :class="{ on: lvlOf(s) === 'adult' }" @click="setLvl(s, 'adult')">成人</button></div>
+          <span class="muted small" v-if="s.id">key: {{ s.id }}</span></div>
+        <div v-for="(x, di) in s.dirs" :key="di" class="src" style="padding:10px 0">
+          <div class="info">
+            <input type="text" v-model="x.path" placeholder="/Volumes/NAS/电影  或  D:\\Movies" spellcheck="false">
+            <div class="row" style="margin-top:6px"><input type="text" v-model="x.name" placeholder="分类名(默认文件夹名)" style="flex:1;min-width:130px">
+              <label class="row"><input type="checkbox" class="chk" :checked="!!x.sub" @change="flag(x, 'sub', $event.target.checked)"> 子目录分类</label>
+              <label class="row"><input type="checkbox" class="chk" :checked="!!x.flat" @change="flag(x, 'flat', $event.target.checked)"> 逐个文件</label>
+              <label class="row"><input type="checkbox" class="chk" :checked="!!x.kids" @change="flag(x, 'kids', $event.target.checked)"> 少儿</label>
+              <label class="row"><input type="checkbox" class="chk" :checked="!!x.adult" @change="flag(x, 'adult', $event.target.checked)"> 成人</label></div>
+            <div class="small" v-if="stOf(s, x.path)" :class="stOf(s, x.path).error ? '' : 'muted'" :style="stOf(s, x.path).error ? 'color:#ff7b7e' : ''">{{ stOf(s, x.path).error || (stOf(s, x.path).items + ' 部 · ' + stOf(s, x.path).files + ' 个文件') }}</div></div>
+          <button class="btn sm ghost" @click="s.dirs.splice(di, 1)">删除</button></div>
+        <button class="btn sm" @click="addDir(s)">＋ 添加目录</button>
+      </div>
+      <div class="card"><div class="row gap"><label class="row"><span class="muted small">每</span><input type="text" v-model.number="cfg.rescan" style="width:70px"><span class="muted small">分钟自动重扫(0=不自动)</span></label></div>
+        <label class="fld" style="margin-top:10px"><span>视频后缀</span><input type="text" :value="cfg.exts.join(', ')" @change="cfg.exts = $event.target.value.split(/[\\s,，;；]+/).filter(Boolean)"></label></div>
+      <div class="row gap"><button class="btn" @click="scan">重新扫描</button><span class="muted small">{{ stText(d.status) }}</span></div>
+      <div class="savebar" v-if="dirty"><span class="grow">有未保存的修改</span><button class="btn ghost" @click="revert">放弃</button><button class="btn red" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存并扫描' }}</button></div>
+    </template>
+  </div>`
+};
+
 // ---------- 系统 ----------
 const System = {
   setup() {
@@ -312,40 +393,21 @@ const System = {
 };
 
 // ---------- 登录门 ----------
+// 管理员只认令牌 (服务启动窗口里显示, 也存在 web/.env 的 TVBOX_ADMIN_TOKEN)。输入后服务端种 Cookie, 之后一直记住。
 const Gate = {
-  props: ['me'],
   emits: ['done'],
-  setup(props, { emit }) {
-    const f = reactive({ username: '', password: '', token: '' }), busy = ref(false), mode = ref(props.me.user ? 'claim' : 'login');
-    const run = async fn => { busy.value = true; try { await fn(); } catch (e) { oops(e); } finally { busy.value = false; } };
-    const login = () => run(async () => { const r = await post('acct/login', { username: f.username, password: f.password }); enroll(r.user, r.token); emit('done'); });
-    const tokenLogin = () => run(async () => { await post('admin/login', { token: f.token }); emit('done'); });
-    const claim = () => run(async () => { await post('acct/claim', { token: f.token }); toast('已升为管理员'); emit('done'); });
-    const other = () => { leaveAccount(); mode.value = 'login'; emit('done'); };
-    return { f, busy, mode, login, tokenLogin, claim, other };
+  setup(_, { emit }) {
+    const f = reactive({ token: '' }), busy = ref(false);
+    const go = async () => { busy.value = true; try { await post('admin/login', { token: f.token }); localStorage.adminToken = f.token; emit('done'); } catch (e) { oops(e); } finally { busy.value = false; } };
+    return { f, busy, go };
   },
   template: `<div class="gate">
     <div class="logo">TVBOX</div><div class="sub">管理后台</div>
-    <div class="card" v-if="me.user">
-      <p style="margin-top:0">当前登录的是「<b>{{ me.user.name }}</b>」, 它还不是管理员。</p>
-      <label class="fld"><span>输入管理员令牌, 把它升为管理员</span><input type="password" v-model="f.token" placeholder="管理员令牌" autocomplete="off" @keyup.enter="claim"></label>
-      <div class="row"><button class="btn red" :disabled="busy || !f.token" @click="claim">升为管理员</button><button class="btn ghost" @click="other">换个账号</button><a class="btn ghost" href="/">回到网站</a></div>
-      <p class="muted small">管理员令牌在服务启动窗口里显示, 也存在 web/.env 的 TVBOX_ADMIN_TOKEN。</p>
+    <div class="card">
+      <label class="fld"><span>管理员令牌</span><input type="password" v-model="f.token" autocomplete="off" @keyup.enter="go" autofocus></label>
+      <div class="row"><button class="btn red" :disabled="busy || !f.token" @click="go">进入</button><a class="btn ghost" href="/">回到网站</a></div>
+      <p class="muted small">令牌在启动服务的窗口里显示, 也存在服务端 web/.env 的 TVBOX_ADMIN_TOKEN。账号没有管理员身份, 只有令牌能进后台。</p>
     </div>
-    <template v-else>
-      <div class="seg" style="margin-bottom:12px"><button :class="{ on: mode === 'login' }" @click="mode = 'login'">管理员账号</button><button :class="{ on: mode === 'token' }" @click="mode = 'token'">管理员令牌</button></div>
-      <div class="card" v-if="mode === 'login'">
-        <label class="fld"><span>用户名</span><input type="text" v-model.trim="f.username" autocomplete="username" autocapitalize="off"></label>
-        <label class="fld"><span>密码</span><input type="password" v-model="f.password" autocomplete="current-password" @keyup.enter="login"></label>
-        <div class="row"><button class="btn red" :disabled="busy || !f.username || !f.password" @click="login">登录</button><a class="btn ghost" href="/">回到网站</a></div>
-        <p class="muted small">用管理员账号登录。还没有管理员？先在网站里注册账号, 再到「设置 → 账号管理」用管理员令牌升级。</p>
-      </div>
-      <div class="card" v-else>
-        <label class="fld"><span>管理员令牌</span><input type="password" v-model="f.token" autocomplete="off" @keyup.enter="tokenLogin"></label>
-        <div class="row"><button class="btn red" :disabled="busy || !f.token" @click="tokenLogin">进入</button><a class="btn ghost" href="/">回到网站</a></div>
-        <p class="muted small">令牌方式没有账号身份: 能管理账号和源, 但不能改自己的级别。</p>
-      </div>
-    </template>
   </div>`
 };
 
@@ -354,34 +416,41 @@ const TABS = [
   ['overview', '概览', '<path d="M4 13h6V4H4zM14 20h6V4h-6zM4 20h6v-3H4z"/>'],
   ['users', '账号', '<circle cx="12" cy="8" r="3.6"/><path d="M5 20c0-3.6 3-6 7-6s7 2.4 7 6"/>'],
   ['vod', '点播源', '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9.5v5l4.5-2.5z"/>'],
+  ['local', '本地媒体', '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'],
   ['live', '直播源', '<circle cx="12" cy="12" r="2"/><path d="M7.5 7.5a6.4 6.4 0 0 0 0 9M16.5 7.5a6.4 6.4 0 0 1 0 9M4.5 4.5a10.5 10.5 0 0 0 0 15M19.5 4.5a10.5 10.5 0 0 1 0 15"/>'],
   ['system', '系统', '<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/>'],
 ];
 const App = {
-  components: { Overview, Users, Sources, System, Gate, Avatar },
+  components: { Overview, Users, Sources, Local, System, Gate, Avatar },
   setup() {
     const me = ref(null), tab = ref((location.hash || '#overview').slice(1));
     if (!TABS.some(t => t[0] === tab.value)) tab.value = 'overview';
-    const load = async () => { try { me.value = await get('console/me'); } catch (e) { me.value = { admin: false, error: e.message }; } };
+    const load = async () => {
+      try { me.value = await get('console/me'); } catch (e) { me.value = { admin: false, error: e.message }; }
+      if (!me.value.admin && localStorage.adminToken) {   // Cookie 丢了: 用记住的令牌静默登录
+        try { await post('admin/login', { token: localStorage.adminToken }); me.value = await get('console/me'); } catch (e) { if (/不对/.test(e.message)) delete localStorage.adminToken; }
+      }
+    };
     onMounted(load);
     watch(tab, v => { history.replaceState(null, '', '#' + v); window.scrollTo(0, 0); });
     window.addEventListener('hashchange', () => { const h = location.hash.slice(1); if (h !== tab.value && TABS.some(t => t[0] === h)) tab.value = h; });
     window.addEventListener('beforeunload', e => { if (dirty.value) { e.preventDefault(); e.returnValue = ''; } });
     const go = t => { if (t === tab.value) return; if (dirty.value && /^(vod|live)$/.test(tab.value) && !/^(vod|live)$/.test(t)) toast('源的修改还没保存', true); tab.value = t; };
-    const logout = async () => { await post('admin/logout').catch(() => {}); if (me.value.user) leaveAccount(); location.reload(); };
+    const logout = async () => { await post('admin/logout').catch(() => {}); delete localStorage.adminToken; location.reload(); };
     return { me, tab, TABS, go, load, logout, toast: toastState, dlg, dlgDone, LV, hue };
   },
   template: `
   <div v-if="!me" class="boot">加载中…</div>
-  <Gate v-else-if="!me.admin" :me="me" @done="load" />
+  <Gate v-else-if="!me.admin" @done="load" />
   <div v-else class="shell">
     <header class="top"><h1>TV<b>BOX</b> 管理后台</h1><span class="grow"></span>
-      <div class="who"><span v-if="me.user">{{ me.user.name }} · {{ LV[me.level] }}</span><span v-else>管理员令牌</span><a class="btn sm ghost" href="/">网站</a><button class="btn sm ghost" @click="logout">退出</button></div></header>
+      <div class="who"><span>管理员</span><a class="btn sm ghost" href="/">网站</a><button class="btn sm ghost" @click="logout">退出</button></div></header>
     <nav class="tabs"><button v-for="t in TABS" :key="t[0]" :class="{ on: tab === t[0] }" @click="go(t[0])"><svg viewBox="0 0 24 24" v-html="t[2]"></svg><span>{{ t[1] }}</span></button></nav>
     <main>
       <Overview v-if="tab === 'overview'" @go="go" />
-      <Users v-else-if="tab === 'users'" :me="me" />
+      <Users v-else-if="tab === 'users'" />
       <Sources v-else-if="tab === 'vod'" kind="vod" />
+      <Local v-else-if="tab === 'local'" />
       <Sources v-else-if="tab === 'live'" kind="live" />
       <System v-else-if="tab === 'system'" />
     </main>

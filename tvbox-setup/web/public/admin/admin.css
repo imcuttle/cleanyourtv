@@ -123,3 +123,5 @@ pre.log { margin: 10px 0 0; padding: 10px; border-radius: 8px; background: #0d0d
 .kv > span { color: var(--muted); }
 .bar { height: 6px; border-radius: 3px; background: #333; overflow: hidden; margin-top: 8px; }
 .bar i { display: block; height: 100%; background: var(--red); }
+
+.sheet h4.sec { margin: 18px 0 8px; font-size: 14px; color: #ddd; }

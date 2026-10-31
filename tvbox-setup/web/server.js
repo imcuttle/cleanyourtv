@@ -45,6 +45,7 @@ const zlib = require('zlib');
 
 const PORT = Number(process.env.PORT) || 9988;
 const HOST = process.env.HOST || '0.0.0.0';
+const LOCAL_KEY = /^local\d*$/;   // 本地媒体源的 key: local (第一个) / local2 / local3 …，点播源不能占用
 const HTTPS_PORT = process.env.TVBOX_HTTPS === '0' ? 0 : Number(process.env.HTTPS_PORT) || PORT;   // 0 = 不开 https; 默认和 http 共用 PORT (按第一个字节区分, 见下面 front); 设成别的端口则单独监听 (见 tls.js)
 const ROOT = __dirname;
 const CONFIG = path.join(ROOT, '..', 'config');
@@ -289,7 +290,7 @@ function normalize(cfg) {
     if (sigKey.has(sig)) { if (!remap.has(written)) remap.set(written, sigKey.get(sig)); continue; }
     const name = str(s.name || s.key || api).trim();
     let key = written, n = 2;
-    while (keys.has(key)) key = `${written}${n++}`;
+    while (keys.has(key) || LOCAL_KEY.test(key)) key = `${written}${n++}`;
     keys.add(key);
     sigKey.set(sig, key);
     if (!remap.has(written)) remap.set(written, key);
@@ -378,19 +379,18 @@ function visibleSites() {
     const memberSites = s.members.map(k => all.get(k)).filter(m => m && (s.kids && safety.level === 'kids' ? true : ok(m)));
     if (memberSites.length) sites.push({ ...s, memberSites });
   }
-  const loc = localSite();
-  return loc ? [loc, ...sites] : sites;
+  return [...localSites(), ...sites];
 }
 function catAllowed(site, name) {
-  if (site.local) return true; // 本地媒体 filters by its folders' 少儿/成人 flags itself
+  if (site.local) return true; // 本地媒体 filters by its source's / folders' 少儿/成人 flags itself
   if (site.categories && !site.categories.includes(name)) return false;
   if (safety.level === 'all') return true;
   if (ADULT.test(name)) return false;
   if (safety.level === 'kids' && !site.categories && !KIDS_CATS.test(name)) return false;
   return true;
 }
-// 源数据 (点播源 / 直播源 / 导入 / 本地媒体目录) 只有管理员账号能改，而且要在安全级别「全部」下改：成人标记要靠它看全，免得在过滤过的视图上保存把成人源冲掉。
-const srcWriteOk = req => adminAuthed(req) && safety.level === 'all';
+// 源数据 (点播源 / 直播源 / 导入 / 本地媒体目录) 只有管理员 (令牌) 能改，不看账号级别：管理员读到的配置永远是完整的 (含成人源)，保存不会冲掉它们。
+const srcWriteOk = req => adminAuthed(req);
 
 // ======================= live: text, check, covers =======================
 const LIVES = path.join(DATA, 'lives');
@@ -790,7 +790,7 @@ if (IS_LEADER) setInterval(async () => {
   } catch {}
 }, 600e3).unref();
 async function cmsGet(site, params, fresh = false, ms = 15000) {
-  if (site.local) return localCms(params, '');
+  if (site.local) return localCms(params, '', site.key);
   if (LOCAL_VOD.test(str(site.api))) return fileCms(site.api, params);
   const u = new URL(site.api);
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') u.searchParams.set(k, v);
@@ -985,7 +985,7 @@ function speedOf(u, fresh) {
 
 // 成人判定：本地源看文件夹标记；整站标成人的源全算；混合源按分类名（伦理/写真/无码…）识别。
 function adultOf(site, d) {
-  if (site.local) return localIndex().catById.get(str(d.type_id))?.adult ? 1 : 0;
+  if (site.local) return catAdult(localIndex().catById.get(str(d.type_id))) ? 1 : 0;
   if (site.adult) return 1;
   return ADULT.test(str(d.type_name)) ? 1 : 0;
 }
@@ -2296,12 +2296,9 @@ const SKIP_SAMPLE = /(^|[\s._-])sample\.\w+$/i;
 const IMG_RE = /\.(jpe?g|png|webp)$/i;
 const POSTERS = ['poster', 'folder', 'cover', 'movie', 'show', 'fanart', 'thumb', 'landscape'];
 
-function normLocal(c) {
-  c = c && typeof c === 'object' ? c : {};
-  const extList = Array.isArray(c.exts) ? c.exts : str(c.exts).split(/[\s,，;；]+/);
-  const exts = [...new Set([...extList.map(e => str(e).trim().toLowerCase().replace(/^\./, '')).filter(e => MEDIA_EXT.has(e)), ...SNIFFED_EXT])];
+function normDirs(list) {
   const dirs = [];
-  for (const d of Array.isArray(c.dirs) ? c.dirs : []) {
+  for (const d of Array.isArray(list) ? list : []) {
     let p = str(d && d.path).trim().replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim(); // Windows "复制为路径" wraps it in quotes
     if (p === '~' || p.startsWith('~\\')) p = path.join(os.homedir(), p.slice(1));
     if (p === '~' || p.startsWith('~/')) p = path.join(os.homedir(), p.slice(1));
@@ -2309,10 +2306,36 @@ function normLocal(c) {
     dirs.push({ path: path.resolve(p), name: str(d.name).trim().slice(0, 30), ...(Number(d.sub) ? { sub: 1 } : {}),
       ...(Number(d.flat) ? { flat: 1 } : {}), ...(Number(d.kids) ? { kids: 1 } : {}), ...(Number(d.adult) ? { adult: 1 } : {}) });
   }
-  const rescan = Math.round(Number(c.rescan ?? LOCAL_DEFAULT.rescan));
-  return { enabled: c.enabled !== false, name: str(c.name).trim().slice(0, 20) || LOCAL_DEFAULT.name,
-    exts: exts.length > SNIFFED_EXT.length ? exts : LOCAL_DEFAULT.exts, rescan: Math.max(0, Math.min(rescan || 0, 1440)), dirs };
+  return dirs;
 }
+// 本地媒体可以有多个源: sources = [{ id: 'local' | 'local2' …, name, enabled, kids?, adult?, dirs }]。
+// 源自己的 少儿 / 成人 标记管它下面所有目录 (整体定级), 目录自己的标记还在 (成人 = 任一为成人; 少儿 = 源标了, 或这个分类的目录都标了)。
+// 旧配置是单个源 { name, enabled, dirs }，读进来当作第一个源 (id local)。
+function normLocal(c) {
+  c = c && typeof c === 'object' ? c : {};
+  const extList = Array.isArray(c.exts) ? c.exts : str(c.exts).split(/[\s,，;；]+/);
+  const exts = [...new Set([...extList.map(e => str(e).trim().toLowerCase().replace(/^\./, '')).filter(e => MEDIA_EXT.has(e)), ...SNIFFED_EXT])];
+  const raw = Array.isArray(c.sources) ? c.sources : [{ id: 'local', name: c.name, enabled: c.enabled, dirs: c.dirs }];
+  const used = new Set(), sources = [];
+  for (const s of raw.slice(0, 20)) {
+    if (!s || typeof s !== 'object') continue;
+    let id = str(s.id).trim();
+    if (!LOCAL_KEY.test(id) || used.has(id)) id = '';
+    if (!id) { if (!used.has('local')) id = 'local'; else for (let n = 2; !id; n++) if (!used.has('local' + n)) id = 'local' + n; }
+    used.add(id);
+    const adult = Number(s.adult) ? 1 : 0, kids = !adult && Number(s.kids) ? 1 : 0;
+    sources.push({ id, name: str(s.name).trim().slice(0, 20) || (id === 'local' ? LOCAL_DEFAULT.name : `${LOCAL_DEFAULT.name} ${id.slice(5)}`),
+      enabled: s.enabled !== false, ...(kids ? { kids } : {}), ...(adult ? { adult } : {}), dirs: normDirs(s.dirs) });
+  }
+  if (!sources.length) sources.push({ id: 'local', name: LOCAL_DEFAULT.name, enabled: true, dirs: [] });
+  const rescan = Math.round(Number(c.rescan ?? LOCAL_DEFAULT.rescan));
+  return { exts: exts.length > SNIFFED_EXT.length ? exts : LOCAL_DEFAULT.exts, rescan: Math.max(0, Math.min(rescan || 0, 1440)), sources,
+    // 以下是算出来的 (不写进文件): 有没有开着的源 / 所有开着的源的目录 (带上所属源)
+    enabled: sources.some(s => s.enabled && s.dirs.length),
+    dirs: sources.filter(s => s.enabled).flatMap(s => s.dirs.map(d => ({ ...d, src: s.id }))) };
+}
+const localPersist = c => ({ exts: c.exts, rescan: c.rescan, sources: c.sources });
+const localView = c => localPersist(c);
 function readLocalCfg() { return normLocal(readJson(LOCAL_CFG, LOCAL_DEFAULT)); }
 let localCfg = readLocalCfg();
 
@@ -2329,19 +2352,28 @@ function localIndex() {
   }
   return localSnap;
 }
-// 儿童: only folders marked 少儿; 标准: everything but folders marked 成人; 全部: all.
-const localCatOk = c => !!c && (safety.level === 'all' || (safety.level === 'kids' ? !!c.kids && !c.adult : !c.adult));
-function localSite() {
-  if (!localCfg.enabled || !localCfg.dirs.length || !localIndex().cats.some(localCatOk)) return null;
-  return { key: 'local', name: localCfg.name, type: 1, api: '', local: 1, ...(safety.level === 'kids' ? { kids: 1 } : {}) };
+const localSrcOf = c => localCfg.sources.find(x => x.id === ((c && c.src) || 'local'));
+// 一个分类的最终定级: 所属源标了成人 → 成人; 源标了少儿或这个分类的目录都标了少儿 → 少儿。
+const catAdult = c => !!c && (!!c.adult || !!localSrcOf(c)?.adult);
+const catKids = c => !!c && (!!c.kids || !!localSrcOf(c)?.kids) && !catAdult(c);
+// 儿童: only 少儿 ones; 标准: everything but 成人; 全部: all. 源停用 / 被删掉了，它的分类也不可见。
+const localCatOk = c => { const src = c && localSrcOf(c); if (!src || !src.enabled) return false; return safety.level === 'all' || (safety.level === 'kids' ? catKids(c) : !catAdult(c)); };
+// 每个本地源是一个点播源 (key = 源 id)；这个级别下一个分类也看不到的源不出现。
+function localSites() {
+  const snap = localIndex(), out = [];
+  for (const s of localCfg.sources) {
+    if (!s.enabled || !s.dirs.length || !snap.cats.some(c => (c.src || 'local') === s.id && localCatOk(c))) continue;
+    out.push({ key: s.id, name: s.name, type: 1, api: '', local: 1, ...(safety.level === 'kids' || s.kids ? { kids: 1 } : {}), ...(s.adult ? { adult: 1 } : {}) });
+  }
+  return out;
 }
 
 const LOCAL_PAGE = 30;
 const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB';
 // base '' = this web app (relative urls, HLS for what browsers can't play); 'http://host' = external CMS clients.
-function localCms(params, base) {
+function localCms(params, base, srcId) {
   const snap = localIndex();
-  const cats = localCfg.enabled ? snap.cats.filter(localCatOk) : [];
+  const cats = localCfg.enabled ? snap.cats.filter(c => localCatOk(c) && (!srcId || (c.src || 'local') === srcId)) : [];
   const ok = new Set(cats.map(c => c.id));
   const ids = str(params.ids).split(',').map(s => s.trim()).filter(Boolean);
   let list;
@@ -2372,7 +2404,7 @@ function localVod(it, type, base) {
 const natural = (a, b) => a.localeCompare(b, 'zh-CN', { numeric: true, sensitivity: 'base' });
 const hashId = (s, n) => crypto.createHash('sha1').update(s).digest('hex').slice(0, n);
 // Category identity: same-named folders merge regardless of case, surrounding spaces or unicode form (NFC/NFD from NAS/macOS).
-const catId = name => hashId('c|' + str(name).normalize('NFC').trim().toLowerCase(), 8);
+const catId = (name, src) => hashId('c|' + (src && src !== 'local' ? src + '|' : '') + str(name).normalize('NFC').trim().toLowerCase(), 8);   // 第一个源 (local) 的分类 id 和以前一样; 别的源各算各的，同名分类不跨源合并
 const noDelim = s => str(s).replace(/[$#]+/g, ' ').trim(); // $ and # separate episodes in 苹果CMS play lists
 const SEASON = /^(?:season|series|s)[\s._-]*(\d{1,2})$|^第\s*([一二三四五六七八九十\d]+)\s*季$/i;
 const EP_MARK = /S\d{1,2}[\s._-]?E\d{1,3}|第\s*\d+\s*[集话話期]|(^|[^a-z])EP?[\s._-]?\d{1,3}(\D|$)/i;
@@ -2533,7 +2565,7 @@ async function scanLocal() {
     // Every configured folder and category root is scanned in parallel (I/O is gated by io()); results are
     // merged afterwards in configuration order so the outcome doesn't depend on which finished first.
     const perDir = await Promise.all(cfg.dirs.map(async d => {
-      const ds = { path: d.path, items: 0, files: 0, error: '' };
+      const ds = { path: d.path, src: d.src, items: 0, files: 0, error: '' };
       dirs.push(ds);
       const st = await io(() => fsp.stat(d.path)).catch(() => null);
       if (!st || !st.isDirectory()) { ds.error = '目录不存在或没有权限'; return []; }
@@ -2549,7 +2581,7 @@ async function scanLocal() {
         const groups = [];
         await walkMedia(r.dir, exts, groups, r.deep);
         groups.sort((a, b) => natural(a.dir, b.dir));
-        const found = (await Promise.all(groups.map(g => groupItems(g, r.dir, catId(r.cat), d.flat)))).flat();
+        const found = (await Promise.all(groups.map(g => groupItems(g, r.dir, catId(r.cat, d.src), d.flat)))).flat();
         for (const it of found) { ds.items++; ds.files += it.files.length; }
         return { d, r, found };
       }));
@@ -2558,8 +2590,8 @@ async function scanLocal() {
       if (!res.found.length) continue;
       const { d, r } = res;
       // The same name from several folders is one category: 成人 if any of them is, 少儿 only if all are.
-      const id = catId(r.cat);
-      const c = cats.get(id) || { id, name: r.cat, adult: 0, kids: 1 };
+      const id = catId(r.cat, d.src);
+      const c = cats.get(id) || { id, name: r.cat, src: d.src, adult: 0, kids: 1 };
       if (d.adult) c.adult = 1;
       if (!d.kids) c.kids = 0;
       cats.set(id, c);
@@ -2600,10 +2632,10 @@ rpcHandlers.localStatus = () => localStatus();
 rpcHandlers.localScan = () => { if (localCfg.enabled) scanLocal(); return localStatus(); };
 rpcHandlers.localSave = b => {
   localCfg = normLocal(b);
-  writeJson(LOCAL_CFG, localCfg);
+  writeJson(LOCAL_CFG, localPersist(localCfg));
   broadcastReload();
   if (localCfg.enabled) scanLocal();
-  return { cfg: localCfg, status: localStatus() };
+  return { cfg: localView(localCfg), status: localStatus() };
 };
 // ---- 管理员删除本地资源: 文件(连同同名的 nfo / 字幕 / 海报)移到系统回收站, 不是直接删除 ----
 // 系统回收站调不起来时宁可失败也不硬删。返回仍留在原地的路径。
@@ -3198,9 +3230,7 @@ function readBody(req, max = 2e6) {
     req.on('error', fail);
   });
 }
-const needAdmin = (res, req) => send(res, 403, adminAuthed(req)
-  ? { error: '源设置只能在安全级别「全部」下修改（管理员可以在后台把自己的级别调成「全部」）', locked: true }
-  : { error: '源设置只有管理员才能修改', admin: true });
+const needAdmin = (res, req) => send(res, 403, { error: '源设置只有管理员才能修改', admin: true });
 
 // ---- batch support ----
 const BATCH_MAX = 60, BATCH_PAR = 6;
@@ -3288,39 +3318,32 @@ async function api(route, q, res, req) {
   if (route === 'acct' || route.startsWith('acct/')) {
     const sub = route.slice(5), body = write ? await readBody(req, 4e6) : {};
     const ip = req.socket.remoteAddress || '';
-    let adminOk = false;
-    if (sub === 'claim' && write) {   // 用管理员令牌把当前账号升为管理员 (令牌错误次数和管理员登录共用限速)
-      const f = failures.get('a|' + ip);
-      if (f && f.n >= 5 && f.reset > Date.now()) { res.setHeader('Retry-After', '60'); return send(res, 429, { error: '管理员令牌错误次数太多，请 1 分钟后再试' }); }
-      if (!adminTokenOk(str(body.token).trim())) {
-        const x = f && f.reset > Date.now() ? f : { n: 0, reset: Date.now() + 60000 };
-        x.n++; failures.set('a|' + ip, x);
-        return send(res, 403, { error: '管理员令牌不对' });
-      }
-      failures.delete('a|' + ip); adminOk = true;
-    }
-    const r = await rpc('acct', { sub, method: req.method, body: sub === 'claim' ? {} : body, session: sessionToken(req), ip, ua: str(req.headers['user-agent']), adminOk });
-    if (sub === 'claim' || (write && (sub === 'password' || sub === 'delete' || sub === 'logout'))) broadcastReload();
+    const r = await rpc('acct', { sub, method: req.method, body, session: sessionToken(req), ip, ua: str(req.headers['user-agent']), adminOk: adminAuthed(req) });
+    if (write && (sub === 'password' || sub === 'delete' || sub === 'logout' || sub === 'level')) broadcastReload();
     return send(res, r.code || 200, r.body);
   }
 
   // ---- 管理后台 (public/admin/): 只有管理员 (管理员账号 / 管理员令牌) 能用；不受自己当前安全级别影响, 读写的都是完整数据 ----
   if (route.startsWith('console/')) {
     const sub = route.slice(8);
-    if (sub === 'me' && !write) return send(res, 200, { admin: adminAuthed(req), viaToken: !req.who?.admin && tokenAdmin(req), user: req.who || null, level: safety.level });
-    if (!adminAuthed(req)) return send(res, 403, { error: '需要管理员账号（或管理员令牌）', admin: true });
+    if (sub === 'me' && !write) return send(res, 200, { admin: adminAuthed(req), user: req.who || null, level: safety.level });
+    if (!adminAuthed(req)) return send(res, 403, { error: '需要管理员令牌', admin: true });
     if (sub === 'users' && !write) return leader('acctAdmin', { op: 'list' });
+    if (sub === 'users/detail' && !write) return leader('acctAdmin', { op: 'detail', body: { id: q.get('id') } });
     if (sub.startsWith('users/') && write) {
       const op = sub.slice(6);
       if (!['create', 'update', 'password', 'kick', 'delete'].includes(op)) return send(res, 404, { error: 'unknown api' });
-      return leader('acctAdmin', { op, body: await readBody(req), actor: req.who?.id || 0 });
+      return leader('acctAdmin', { op, body: await readBody(req) });
     }
+    if (sub === 'local' && !write) return send(res, 200, { cfg: localView(localCfg), status: await rpc('localStatus'), exts: [...MEDIA_EXT], ffmpeg: !!FFMPEG, urls: lanIps().map(ip => `http://${ip}:${PORT}/api/local/vod`) });
+    if (sub === 'local' && req.method === 'PUT') return send(res, 200, await rpc('localSave', await readBody(req)));
+    if (sub === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
     if (sub === 'config' && !write) return send(res, 200, config);   // 完整配置 (含成人源)
     if (sub === 'config' && req.method === 'PUT') return leader('config', { op: 'put', body: await readBody(req) });
     if (sub === 'overview' && !write) {
       const ul = await rpc('acctAdmin', { op: 'list' });
       const us = ul.body.users || [];
-      return send(res, 200, { users: us.length, admins: us.filter(u => u.admin).length, byLevel: { kids: us.filter(u => u.level === 'kids').length, standard: us.filter(u => u.level === 'standard').length, all: us.filter(u => u.level === 'all').length },
+      return send(res, 200, { users: us.length, byLevel: { kids: us.filter(u => u.level === 'kids').length, standard: us.filter(u => u.level === 'standard').length, all: us.filter(u => u.level === 'all').length }, unlimited: us.filter(u => u.unlimited).length,
         sites: config.sites.filter(s => !s.members).length, groups: config.sites.filter(s => s.members).length, lives: config.lives.length, adultSites: config.sites.filter(s => s.adult).length, kidsSites: config.sites.filter(s => s.kids).length,
         register: ul.body.register, sessions: us.reduce((n, u) => n + u.sessions, 0), history: us.reduce((n, u) => n + u.history, 0), favs: us.reduce((n, u) => n + u.favs, 0) });
     }
@@ -3377,11 +3400,11 @@ async function api(route, q, res, req) {
   if (route === 'safety') {
     // 安全级别属于账号, 不能在这里改 (管理员在后台改账号的级别); 这里只告诉页面「我现在是什么级别、是不是管理员」
     if (write) return send(res, 405, { error: '安全级别由管理员在后台按账号设置' });
-    return send(res, 200, { level: safety.level, admin: adminAuthed(req), acctAdmin: !!req.who?.admin, guest: !req.who });
+    return send(res, 200, { level: safety.level, admin: adminAuthed(req), guest: !req.who, unlimited: !!req.who?.unlimited });
   }
   if (route.startsWith('config')) {
     if (!write) {
-      if (safety.level === 'all') return send(res, 200, config);
+      if (safety.level === 'all' || adminAuthed(req)) return send(res, 200, config);   // 管理员永远拿完整配置
       // Outside 全部 the 成人 sources are not even listed (live sources keep their index: a key is a position).
       const keys = new Set(SITES.flatMap(s => [s.key, ...(s.memberSites || []).map(m => m.key)]));
       return send(res, 200, { sites: config.sites.filter(s => keys.has(s.key)).map(s => s.members ? { ...s, members: s.members.filter(k => keys.has(k)) } : s),
@@ -3432,7 +3455,8 @@ async function api(route, q, res, req) {
 
   // ---- 本地媒体: folders, scan, and the CMS API for TVBox / FongMi ----
   if (route === 'local') {
-    if (!write) return send(res, 200, { cfg: localCfg, status: await rpc('localStatus'), exts: [...MEDIA_EXT], ffmpeg: !!FFMPEG,
+    if (!adminAuthed(req)) return needAdmin(res, req);   // 目录路径只给管理员看
+    if (!write) return send(res, 200, { cfg: localView(localCfg), status: await rpc('localStatus'), exts: [...MEDIA_EXT], ffmpeg: !!FFMPEG,
       urls: lanIps().map(ip => `http://${ip}:${PORT}/api/local/vod`) });
     if (!srcWriteOk(req)) return needAdmin(res, req);
     return send(res, 200, await rpc('localSave', await readBody(req)));
@@ -3483,7 +3507,7 @@ async function api(route, q, res, req) {
   if (route === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
   if (route === 'local/vod') {
     const host = /^([\w-]+\.)*[\w-]+(:\d+)?$|^\[[\da-f:]+\](:\d+)?$/i.test(req.headers.host || '') ? req.headers.host : `${lanIps()[0] || '127.0.0.1'}:${PORT}`;
-    return send(res, 200, localCms(Object.fromEntries(q), `${req.socket.encrypted ? 'https' : 'http'}://${host}`));
+    return send(res, 200, localCms(Object.fromEntries(q), `${req.socket.encrypted ? 'https' : 'http'}://${host}`, LOCAL_KEY.test(q.get('src') || '') ? q.get('src') : ''));
   }
 
   // ---- live: speed test, raw text editing, covers ----
@@ -3713,8 +3737,8 @@ const getUsers = () => usersDb || (usersDb = require('./users')({ file: path.joi
 rpcHandlers.acct = args => getUsers().handle(args);
 rpcHandlers.who = ({ token }) => getUsers().who(token);
 // 管理员后台的账号管理: 改完让所有 worker 丢掉缓存的会话信息 (级别 / 管理员身份马上生效)
-rpcHandlers.acctAdmin = async ({ op, body, actor }) => {
-  const r = await getUsers().admin(op, body, actor);
+rpcHandlers.acctAdmin = async ({ op, body }) => {
+  const r = await getUsers().admin(op, body);
   if (op !== 'list') broadcastReload();
   return r;
 };
@@ -3878,7 +3902,7 @@ rpcHandlers.downloads = async ({ method, id, action, body: b }) => {
   try { const st = await fsp.statfs(DL); free = st.bavail * st.bsize; } catch {}
   const queue = jobs.filter(x => x.status === 'queued').sort((a, b) => (a.qat ?? a.at) - (b.qat ?? b.at)).map(x => x.id);
   // 成人 downloads (flagged, or from a source that is hidden at this level) are not listed outside 全部.
-  const shown = j => { if (safety.level === 'all') return true; if (j.adult) return false; if (j.site === 'local') return safety.level !== 'kids'; const s = config.sites.find(x => x.key === j.site); return !!s && !s.adult && (safety.level !== 'kids' || !!s.kids); };
+  const shown = j => { if (safety.level === 'all') return true; if (j.adult) return false; if (LOCAL_KEY.test(j.site)) return safety.level !== 'kids'; const s = config.sites.find(x => x.key === j.site); return !!s && !s.adult && (safety.level !== 'kids' || !!s.kids); };
   return { body: { jobs: jobs.filter(shown).map(j => ({ ...jobView(j), qpos: queue.indexOf(j.id) + 1 })), free, dir: DL, maxJobs: MAX_JOBS } };
 };
 
@@ -4049,8 +4073,8 @@ const adminHash = crypto.createHash('sha256').update(ADMIN_TOKEN).digest();
 const adminTokenOk = v => typeof v === 'string' && v.length > 0 && v.length < 512 &&
   crypto.timingSafeEqual(crypto.createHash('sha256').update(v).digest(), adminHash);
 const tokenAdmin = req => adminTokenOk(cookieOf(req, ADMIN_COOKIE)) || adminTokenOk(String(req.headers['x-admin-token'] || ''));
-// 管理员 = 管理员账号 (登录后 req.who.admin) 或者带着管理员令牌的浏览器
-const adminAuthed = req => !!req.who?.admin || tokenAdmin(req);
+// 管理员只认管理员令牌 (浏览器输入过令牌, 服务端种了 tvbox_admin Cookie)；没有「管理员账号」。
+const adminAuthed = req => tokenAdmin(req);
 const SESS_COOKIE = 'tvbox_sess';   // 账号会话令牌: 页面 (acct.js) 登录 / 切换账号时种下, <img> <video> 这类带不了请求头的请求也靠它认出是谁
 const sessionToken = req => str(req.headers['x-session']) || cookieOf(req, SESS_COOKIE);
 // 会话 -> 账号 { id, name, level, admin }；worker 里缓存 20 秒, 账号有改动时 reloadState 会清掉

@@ -97,6 +97,8 @@ const DB_ROW_CHART = { tv: '#/charts/c/tv_real_time_hotest', movie: '#/charts/c/
 const dbRows = () => { try { return { tv: true, movie: true, show: true, anime: true, ...JSON.parse(localStorage.dbRows || '{}') }; } catch { return { tv: true, movie: true, show: true, anime: true }; } };
 
 const state = { sites: [], lives: [], level: 'standard', site: localStorage.site || '', cats: [], downloads: [] };
+// 本地媒体可以有多个源，key 是 local / local2 / local3 …
+const isLocalKey = k => /^local\d*$/.test(k || '');
 // 封面卡片: 竖版 (poster, 2:3) or 宽版 (wide, 16:9). One class on <html> restyles every card, the home banner and the detail sheet.
 // 封面设置 (竖版 / 横版 + 大小) 属于账号 (UD, 见 acct.js)：登录后同步到服务端、账号之间互不影响；访客存在本机。
 const cardMode = () => (PV ? localStorage.cardMode : UD.get('cardMode')) === 'wide' ? 'wide' : 'poster';
@@ -421,7 +423,7 @@ const hist = {
   del(site, id) { tabKeep.clear(); UD.set('history', JSON.stringify(hist.all().filter(h => !(h.site === site && h.id === id)))); ACCT.op({ t: 'hist.del', site, id }); prog.delTitle(site, id); },
   clear() { tabKeep.clear(); UD.set('history', '[]'); ACCT.op({ t: 'hist.clear' }); prog.clear(); },
   // The local source lists only its own history; 成人 titles follow showEntry (see below).
-  visible: (h, site = state.site) => (site === 'local' ? h.site === 'local' : true) && showEntry(h, site),
+  visible: (h, site = state.site) => (isLocalKey(site) ? h.site === site : true) && showEntry(h, site),
   list: () => hist.all().filter(h => hist.visible(h)),
 };
 
@@ -464,11 +466,12 @@ const prog = {
 // 成人 entries (history / favorites): a title is 成人 when it was saved with the flag, its source is a 成人 source, or it is
 // a local title that is not explicitly flagged clean (legacy entries). They appear nowhere in 儿童 / 标准 mode, and in
 // 全部 mode only while the current source is itself a 成人 source (or the local one) — never on an ordinary source's home.
-const entryAdult = e => !!e.adult || (e.site === 'local' ? e.adult !== 0 : !!state.sites.find(s => s.key === e.site)?.adult);
-const adultCtx = site => site === 'local' || !!state.sites.find(s => s.key === site)?.adult;
+const entryAdult = e => !!e.adult || (isLocalKey(e.site) ? e.adult !== 0 && !!state.sites.find(s => s.key === e.site)?.adult : !!state.sites.find(s => s.key === e.site)?.adult);
+// 当前源是成人源 (本地源要它自己标了成人) 才显示成人条目
+const adultCtx = site => !!state.sites.find(s => s.key === site)?.adult;
 // (Outside 全部 mode a 成人 source is not in state.sites at all, so an entry from an unknown source can't be told apart: hidden.)
 const showEntry = (e, site = state.site) => state.level === 'all' ? !entryAdult(e) || adultCtx(site)
-  : !entryAdult(e) && (e.site === 'local' || state.sites.some(s => s.key === e.site));
+  : !entryAdult(e) && (isLocalKey(e.site) || state.sites.some(s => s.key === e.site));
 
 // ---------- favorites (hidden in 儿童 mode) ----------
 const favs = {
@@ -590,9 +593,9 @@ const javLead = name => {
 // The picture a card ends up showing: javdb's cover when it has one for this 番号 (the card swaps it in), else the source's own.
 // javdb's cover replaces a title's picture only for 本地 media (frames cut from the file) or when the source gave no picture at all;
 // a remote source's own cover stays. javdb is still used for the score / cast / title either way.
-const javCoverWanted = it => !!it && (it.site === 'local' || !it.pic);
+const javCoverWanted = it => !!it && (isLocalKey(it.site) || !it.pic);
 const cardPic = it => { const c = it && isJav(it) && javCoverWanted(it) ? javCache[javCode(it.name)] : null; return (c && c.found && c.cover) || it?.pic || ''; };
-const isJav = it => !!(it && (it.adult || (it.site && it.site !== 'local' && state.sites.find(s => s.key === it.site)?.adult) || javLead(it.name)));
+const isJav = it => !!(it && (it.adult || (it.site && !isLocalKey(it.site) && state.sites.find(s => s.key === it.site)?.adult) || javLead(it.name)));
 const javCache = JSON.parse(localStorage.javdb || '{}');
 // Cached: found for 30 days; "javdb has no such code" for 3 days (a real answer). Errors / unreachable mirrors are never cached.
 // Concurrent asks for one code share a single request.
@@ -625,7 +628,7 @@ const javIO = new IntersectionObserver(es => es.forEach(e => {
     if (!el.isConnected) return;
     if (r.aborted) { delete el.dataset.jobs; setTimeout(() => { if (el.isConnected) observeJav(el.parentElement || document); }, 800); return; }   // 切页面时被取消: 这张卡还在屏幕上就重新排队
     if (!r.found) { douban(); return; }
-    if (r.cover && (el.dataset.site === 'local' || !el.querySelector('.img img'))) {
+    if (r.cover && (isLocalKey(el.dataset.site) || !el.querySelector('.img img'))) {
       const im = el.querySelector('.img img'); const ph = el.querySelector('.img');
       if (im) im.src = img(r.cover); else if (ph) ph.style.cssText = bg(r.cover);
     }
@@ -683,7 +686,7 @@ function renderMenu() {
   const top = state.sites.filter(s => !s.inGroup), nHid = top.filter(s => s.hidden).length;
   if (!nHid) menuTab = 'vis';
   $('#siteMenu').innerHTML = menuTabs(top.length - nHid, nHid, menuTab, 'data-mtab') + `<div class="msearch"><input id="menuQ" class="find" type="search" placeholder="搜点播源" autocomplete="off" value="${esc(menuQ)}"></div><div class="mhead">点播源 · <span class="mcount"></span><span class="mre" data-re="1" title="重新测速当前可见的源">重测</span></div>` + top.filter(s => !!s.hidden === (menuTab === 'hid')).map(s =>
-    `<button data-k="${esc(s.key)}" data-n="${esc((s.name + ' ' + s.key).toLowerCase())}" class="${s.key === state.site ? 'on' : ''}${isDead(s) ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, isBusy(s))}${s.key === 'local' || s.local || state.level !== 'all' ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('')
+    `<button data-k="${esc(s.key)}" data-n="${esc((s.name + ' ' + s.key).toLowerCase())}" class="${s.key === state.site ? 'on' : ''}${isDead(s) ? ' dead' : ''}"><span>${esc(s.name)}</span>${s.kids ? '<i>少儿</i>' : ''}${healthCell(s, isBusy(s))}${s.local || state.level !== 'all' ? '' : `<em class="x" data-del="${esc(s.key)}" title="删除这个源">×</em>`}</button>`).join('')
     + `<div class="mempty" hidden>没有匹配的点播源</div>`;
   filterMenu();
 }
@@ -1567,11 +1570,11 @@ function card(it, opts = {}) {
   const h = it.site && hist.get(it.site, it.id);
   const pct = opts.progress && h && h.dur ? Math.min(100, (h.t / h.dur) * 100) : 0;
   const href = it.douban ? `#/find/${encodeURIComponent(it.name)}` : vodHref(it.site, it.id);
-  const pv = it.site === 'local' && /^\/media\/p\//.test(it.pic || '') ? ` data-pv="${esc(it.pic.replace('/media/p/', '/media/g/'))}"` : '';
+  const pv = isLocalKey(it.site) && /^\/media\/p\//.test(it.pic || '') ? ` data-pv="${esc(it.pic.replace('/media/p/', '/media/g/'))}"` : '';
   const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"${isJav(it) ? ` data-jav="${esc(javCode(it.name))}"` : ''}`;
   const rate = it.douban ? (it.rate ? `<span class="db">${esc(it.rate)}</span>` : '')
     : isJav(it) ? `<span class="db" hidden data-javfb data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`
-    : it.site === 'local' ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
+    : isLocalKey(it.site) ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
   return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}${pv}${opts.removable ? ` data-rm="${opts.removable}"` : ''}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}
     <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${qChip(vodQ(it))}${rate}${opts.dup > 1 ? `<span class="dup" title="${esc(opts.dupTitle || '')}">${opts.dup} 源</span>` : ''}
       ${pct ? `<div class="prog"><i style="width:${pct}%"></i></div>` : ''}</div>
@@ -1593,7 +1596,7 @@ function cardMenuItems(c, touch) {
   const items = [['play', IC.play, '影片播放']];
   if (!touch && c.dataset.site) items.push(['newwin', IC.win, '新窗口播放']);
   items.push(['feed', IC.feed, '沉浸播放']);
-  if (c.dataset.site !== 'local') items.push(['share', IC.share, '分享']);
+  if (!isLocalKey(c.dataset.site)) items.push(['share', IC.share, '分享']);
   if (c.dataset.rm) items.push(['rm', IC.trash, c.dataset.rm === 'fav' ? '取消收藏' : '从观看历史删除', true]);
   return items;
 }
@@ -1888,7 +1891,7 @@ async function renderHome() {
   const cont = hist.list().filter(h => state.sites.some(s => s.key === h.site)).slice(0, 20);
   const favList = favs.list().filter(f => state.sites.some(s => s.key === f.site)).slice(0, 30);
   const kids = state.level === 'kids';
-  const own = site === 'local' || !!PV; // 本地媒体 / 预览: the source's own content only, no 豆瓣
+  const own = isLocalKey(site) || !!PV; // 本地媒体 / 预览: the source's own content only, no 豆瓣
   const adultSite = !!state.sites.find(x => x.key === site)?.adult; // 成人源: no 豆瓣 rows either
   view.innerHTML = `
     <div class="hero" id="hero"></div>
@@ -2640,7 +2643,7 @@ async function renderDownloads() {
     // 成人下载: 安全级别不是「全部」时一律不显示; 「全部」下只有当前源本身标了成人才显示 (本地源不因为是本地源就算成人, 看它自己有没有标)
     const curAdult = !!state.sites.find(s => s.key === state.site)?.adult;
     const isAdult = x => !!x.adult || !!state.sites.find(s => s.key === x.site)?.adult;
-    jobs = j.jobs.filter(x => state.level === 'all' ? !isAdult(x) || curAdult : !isAdult(x) && (x.site === 'local' || state.sites.some(s => s.key === x.site)));
+    jobs = j.jobs.filter(x => state.level === 'all' ? !isAdult(x) || curAdult : !isAdult(x) && (isLocalKey(x.site) || state.sites.some(s => s.key === x.site)));
   };
   const draw = async () => { await fetchJobs(); if (!jobs.length) selMode = false; paint(); };
   const tick = async () => {
@@ -4794,11 +4797,11 @@ async function initAdmin() {
   const paint = () => {
     if (!alive()) return;
     if (!st || !st.authed) {
-      box.innerHTML = `<h2>管理员</h2><p class="hint">管理员账号不用在这里登录。没有管理员账号时，用管理员令牌登录后，可以在网页里重启服务、检查更新、更新并重启、清理缓存。令牌在服务启动窗口里显示，也存在 <code>web/.env</code> 的 <code>TVBOX_ADMIN_TOKEN</code>（第一次启动自动生成）。要把账号升为管理员，用上面「账号管理」里的「升为管理员」。</p>
+      box.innerHTML = `<h2>管理员</h2><p class="hint">管理员只认管理员令牌（没有管理员账号）。用令牌登录后，可以改账号的安全级别、修改点播 / 直播 / 本地媒体源、打开管理后台，也能重启服务、检查更新、清理缓存。令牌在服务启动窗口里显示，也存在 <code>web/.env</code> 的 <code>TVBOX_ADMIN_TOKEN</code>（第一次启动自动生成）。</p>
         <div class="actions"><input type="password" id="admTok" placeholder="管理员令牌" autocomplete="off" style="max-width:280px"><button class="small" id="admLogin">登录</button></div>`;
       const go = async () => {
         const token = $('#admTok', box).value.trim(); if (!token) return;
-        try { await admApi('POST', 'login', { token }); localStorage.adminToken = token; await load(); paint(); toast('已登录管理员'); } catch (e) { toast(e.message); }
+        try { await admApi('POST', 'login', { token }); localStorage.adminToken = token; await load(); toast('已登录管理员'); renderSettings(); } catch (e) { toast(e.message); }
       };
       $('#admLogin', box).onclick = go;
       $('#admTok', box).onkeydown = e => { if (e.key === 'Enter') go(); };
@@ -4814,6 +4817,7 @@ async function initAdmin() {
         <span>缓存</span><div>转码 ${fmtSize(st.caches.transcode)} · 封面图片 ${fmtSize(st.caches.covers)}${st.caches.tmp ? ' · 更新临时文件 ' + fmtSize(st.caches.tmp) : ''}</div>
       </div>
       <div class="actions">
+        <a class="btn more" href="/admin/" target="_blank" rel="noopener" title="账号、安全级别、点播 / 直播 / 本地媒体源、系统维护">打开管理后台</a>
         ${j && j.status === 'running' && j.kind === 'update' ? '<button class="small" id="admCancel">取消更新</button>' : ''}
         <button class="small" id="admCheck" ${run ? 'disabled' : ''}>检查更新</button>
         <button class="btn ${u && u.available ? 'red' : 'more'}" id="admUpdate" ${run ? 'disabled' : ''}>更新并重启</button>
@@ -4824,11 +4828,11 @@ async function initAdmin() {
       <details class="admmore"><summary>更多：清理缓存 / 换令牌</summary>
         <div class="actions"><button class="small" data-adc="transcode" ${run ? 'disabled' : ''}>清理转码缓存</button><button class="small" data-adc="covers" ${run || !st.canRestart ? 'disabled' : ''} title="清理后会自动重启">清理封面图片缓存（会重启）</button>
           <button class="small" data-adr="admin" ${run || !st.canRestart ? 'disabled' : ''}>换管理员令牌</button></div>
-        <p class="hint">换管理员令牌后，用令牌登录管理后台 / 升级账号要用新的；已经是管理员的账号不受影响。</p></details>
+        <p class="hint">换管理员令牌后，登录管理员（设置页 / 管理后台）要用新的令牌。</p></details>
       ${j && j.progress ? (pg => `<div class="admprog"><div class="bar"><i style="width:${pg.total ? Math.min(100, pg.done / pg.total * 100).toFixed(1) : 100}%" class="${pg.total ? '' : 'ind'}"></i></div><span>${pg.total ? Math.round(pg.done / pg.total * 100) + '% · ' : ''}${(pg.done / 1048576).toFixed(1)}${pg.total ? ' / ' + (pg.total / 1048576).toFixed(1) : ''} MB · ${(pg.speed / 1048576).toFixed(2)} MB/s${pg.total && pg.speed > 0 ? ' · 剩余 ' + Math.max(0, Math.ceil((pg.total - pg.done) / pg.speed)) + ' 秒' : ''} · ${esc(pg.via)}</span></div>`)(j.progress) : ''}
       ${j ? `<pre class="admlog ${j.status}">${jobTxt(j)}${busy ? '\n' + esc(busy) : ''}</pre>` : busy ? `<pre class="admlog">${esc(busy)}</pre>` : ''}${last}`;
     const cn = $('#admCancel', box); if (cn) cn.onclick = async () => { cn.disabled = true; try { await admApi('POST', 'cancel', {}); } catch (e) { toast(e.message); } };
-    $('#admOut', box).onclick = async () => { delete localStorage.adminToken; await admApi('POST', 'logout', {}).catch(() => {}); st = { authed: false }; paint(); };
+    $('#admOut', box).onclick = async () => { delete localStorage.adminToken; await admApi('POST', 'logout', {}).catch(() => {}); st = { authed: false }; renderSettings(); };
     $('#admCheck', box).onclick = async () => {
       busy = '正在检查更新…'; paint(); checkErr = '';
       try { const r = await admApi('POST', 'check', { force: true }); checkErr = r.checkError || ''; await load(); if (!checkErr) toast(st.update?.available ? '有新版本' : '已是最新'); } catch (e) { checkErr = e.message; }
@@ -4844,7 +4848,7 @@ async function initAdmin() {
     $$('[data-adc]', box).forEach(b => b.onclick = () => { if (confirm(b.dataset.adc === 'covers' ? '清理封面和图片缓存，并重启服务？（封面会按需重新生成）' : '清理转码缓存？正在转码的会停掉，下次播放时重新转。')) runJob('clear', { what: b.dataset.adc }, '清理'); });
     $$('[data-adr]', box).forEach(b => b.onclick = async () => {
       const acc = false;
-      if (!confirm('换一个新的管理员令牌并重启？之后用令牌登录管理后台 / 升级账号要用新令牌。')) return;
+      if (!confirm('换一个新的管理员令牌并重启？之后登录管理员要用新令牌。')) return;
       let r;
       try { r = await admApi('POST', 'rotate', { which: b.dataset.adr }); } catch (e) { return toast(e.message); }
       if (!acc) localStorage.adminToken = r.token;   // 换的是管理员令牌: 浏览器记住新的, 重启后自动重新登录
@@ -4914,8 +4918,13 @@ async function renderSettings() {
   const localP = get('/api/local'); // sent together with the rest, so it never queues behind speed tests
   localP.catch(() => {});
   const [cfg, info, safety] = await Promise.all([get('/api/config'), get('/api/info').catch(() => ({ urls: [] })), get('/api/safety')]);
-  // 源设置 (点播源 / 直播源 / 导入 / 本地媒体) 只有管理员能改, 而且要在自己的安全级别为「全部」时: 非管理员或别的级别一律只读 (服务端同样拒绝)
-  const locked = !(safety.admin && safety.level === 'all');
+  // 源设置 (点播源 / 直播源 / 导入 / 本地媒体) 只有管理员 (令牌) 能改, 不看账号的安全级别; 其他人一律只读 (服务端同样拒绝)
+  const locked = !safety.admin;
+  // 当前这个人能把自己的账号调成哪几档：管理员（令牌）+ 已登录账号，或者账号被管理员开了「允许无限模式」，三档任选；
+  // 其它人一档也改不了，按钮整个不出现，只显示现在是哪一档。（「全部」也只对开了开关的账号出现）
+  const setLevels = ACCT.me && (safety.admin || safety.unlimited) ? ['kids', 'standard', 'all'] : [];
+  const levelHint = safety.guest ? '访客固定是「标准」；注册账号时可以选「儿童」或「标准」。'
+    : setLevels.length ? (safety.admin ? '你是管理员，可以把当前账号调成任意一档，也能在管理后台改别人的。' : '这个账号被管理员开了「允许无限模式」，三档可以自己选。') : '注册时选定，之后由管理员在后台设置（管理员也可以给账号开「允许无限模式」）。';
   const flags = x => `<label class="flag"><input type="checkbox" class="kids" ${x.kids ? 'checked' : ''}>少儿</label><label class="flag"><input type="checkbox" class="adult" ${x.adult ? 'checked' : ''}>成人</label><label class="flag" title="隐藏后只在点播源 / 直播源菜单的「隐藏」标签里"><input type="checkbox" class="hid" ${x.hidden ? 'checked' : ''}>隐藏</label>`;
   const cacheOf = x => testCache.get(String(x.api || x.url || '').trim());
   const stOf = x => { const t = cacheOf(x); return t ? `<span class="${t.cls}" title="${esc(t.title)}">${esc(t.text)}</span>` : '<span class="status"></span>'; };
@@ -4973,9 +4982,8 @@ async function renderSettings() {
       <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button></div></section>
     <section id="acctSec"><h2>账号管理</h2><p class="lan">加载中…</p></section>
     ${installSection()}
-    <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。安全级别属于账号：${safety.guest ? '访客固定是「标准」，注册账号时可以选「儿童」或「标准」。' : safety.acctAdmin ? '你是管理员，可以把自己调成任意级别，也能在管理后台改别人的级别。' : '由管理员在管理后台设置，自己不能改。'}</p>
-      <div class="seg big">${Object.entries(LEVELS).map(([k, v]) => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}" ${safety.acctAdmin ? '' : 'disabled'}>${v}</button>`).join('')}</div>
-      ${safety.admin ? '<div class="actions"><a class="btn more" href="/admin/" target="_blank" rel="noopener">打开管理后台</a><span class="lan">账号、安全级别、点播 / 直播源、系统维护</span></div>' : ''}
+    <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。安全级别属于账号：${levelHint}</p>
+      ${setLevels.length ? `<div class="seg big">${setLevels.map(k => `<button data-level="${k}" class="${k === safety.level ? 'on' : ''}">${LEVELS[k]}</button>`).join('')}</div>` : `<p class="lan">当前：<b>${LEVELS[safety.level]}</b></p>`}
     </section>
     <section><h2>封面</h2><p class="hint">竖版：2:3 海报；横版：16:9，一屏能放更多标题，详情页和首页大图同步变成横版。</p>
       <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">横版</button></div>
@@ -4983,7 +4991,7 @@ async function renderSettings() {
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
     <section id="adminSec"><h2>管理员</h2><p class="lan">加载中…</p></section>
-    ${locked ? `<section class="locklote"><h2>源设置已锁定</h2><p class="hint">${safety.admin ? `点播源、直播源、少儿 / 成人分类、导入和本地媒体文件夹只能在安全级别「全部」下修改（现在是「${LEVELS[safety.level]}」），免得误改成人分类。先在上面把自己调成「全部」，或者直接去管理后台。` : '点播源、直播源、少儿 / 成人分类、导入和本地媒体文件夹只有管理员才能修改。'}</p></section>` : ''}
+    ${locked ? `<section class="locklote"><h2>源设置已锁定</h2><p class="hint">点播源、直播源、少儿 / 成人分类、导入和本地媒体文件夹只有管理员才能修改。管理员在下面的「管理员」里用令牌登录。</p></section>` : ''}
     <div id="srcWrap" ${locked ? 'hidden' : ''}>
     <section><h2>点播源</h2><p class="hint">苹果CMS 接口（<code>…/api.php/provide/vod</code>，返回 JSON）。需要 spider jar / 解析的 type 3 源浏览器跑不了，导入时会自动跳过。</p>
       ${fold('site', cfg.sites.length)}<div class="foldbox" data-fold="site" ${cfg.sites.length > FOLD_AT && !foldOpen.site ? 'hidden' : ''}>${bulk('site')}<div id="sites">${siteRowsHtml()}</div></div>
@@ -5294,8 +5302,9 @@ async function renderSettings() {
     if (lv) {
       if (!leaveSettingsOk()) return;   // the page is rebuilt with the new level
       try {
-        if (!ACCT.me || !safety.acctAdmin) return toast('安全级别由管理员设置');
-        await req('POST', '/api/console/users/update', { id: ACCT.me.id, level: lv });   // 账号级别: 只有管理员能改
+        if (!ACCT.me || !(safety.admin || safety.unlimited)) return toast('安全级别由管理员设置');
+        if (safety.admin) await req('POST', '/api/console/users/update', { id: ACCT.me.id, level: lv, ...(lv === 'all' ? { unlimited: true } : {}) });   // 管理员: 改成「全部」时顺手给账号开上开关
+        else await req('POST', '/api/acct/level', { level: lv });   // 开了「允许无限模式」的账号: 自己改自己
         state.cats = []; await loadSites('net'); toast('安全级别：' + LEVELS[lv]); renderSettings(); }
       catch (err) { toast(err.message); }
       return;
@@ -5594,49 +5603,59 @@ async function renderSettings() {
   localSettings(localP).catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
 }
 
-// ---------- settings: 本地媒体 (built-in source from local folders) ----------
-async function localSettings(pre) {
-  const j = await (pre || get('/api/local'));
+// ---------- settings: 本地媒体 (built-in sources from local folders) ----------
+// 可以有多个本地源，每个源是一个独立的点播源: 自己的名字、自己的目录、整体的 少儿 / 成人 级别 (管它下面所有目录)，目录上还能再单独标。
+// api: 设置页读写 /api/local (要管理员且级别「全部」)；管理后台读写 /api/console/local (管理员令牌就行)。两处共用这一个函数。
+async function localSettings(pre, apiBase = '/api/local') {
+  const j = await (pre || get(apiBase));
   const box = $('#localSec'); if (!box) return;
-  const c = j.cfg;
   const flag = (cls, on, label, title) => `<label class="flag" title="${title}"><input type="checkbox" class="${cls}" ${on ? 'checked' : ''}>${label}</label>`;
   const dirRow = (d, i, st) => `<div class="srow lrow" data-i="${i}">
       <span class="lan">${i + 1}</span>
       <input class="nm" value="${esc(d.name || '')}" placeholder="分类名（默认文件夹名）">
       <input class="url" value="${esc(d.path || '')}" placeholder="${navigator.platform.startsWith('Win') ? 'D:\\Movies' : '/Volumes/NAS/电影'}">
-      <span class="ops">${flag('sub', d.sub, '子目录分类', '它下面每个一级子文件夹各是一个分类')}${flag('flat', d.flat, '逐个文件', '不合并成剧集：每个文件单独一部')}${flag('kids', d.kids, '少儿', '儿童模式下可见')}${flag('adult', d.adult, '成人', '只在安全级别「全部」时可见')}
+      <span class="ops">${flag('sub', d.sub, '子目录分类', '它下面每个一级子文件夹各是一个分类')}${flag('flat', d.flat, '逐个文件', '不合并成剧集：每个文件单独一部')}${flag('kids', d.kids, '少儿', '这个目录是少儿内容')}${flag('adult', d.adult, '成人', '这个目录是成人内容')}
         <span class="status ${st ? (st.error ? 'bad' : 'ok') : ''}" title="${esc(st?.error || '')}">${st ? (st.error ? esc(st.error) : `${st.items}部 · ${st.files}个文件`) : ''}</span>
         <button data-lop="del">删除</button></span></div>`;
+  const srcBlock = (src, si, status) => `<div class="lsrc" data-id="${esc(src.id || '')}" style="border:1px solid #ffffff1f;border-radius:10px;padding:10px 12px;margin-top:12px">
+      <div class="field"><label class="lan"><input type="checkbox" class="ls-on" ${src.enabled !== false ? 'checked' : ''}> 启用</label>
+        <input class="ls-name" value="${esc(src.name || '')}" placeholder="源名称" style="flex:0 1 180px;min-width:120px">
+        <span class="lan">整体级别</span>
+        <span class="seg"><button type="button" data-lvl="std" class="${!src.kids && !src.adult ? 'on' : ''}">标准</button><button type="button" data-lvl="kids" class="${src.kids ? 'on' : ''}">少儿</button><button type="button" data-lvl="adult" class="${src.adult ? 'on' : ''}">成人</button></span>
+        <button class="small danger" data-lsop="del" title="删除这个本地源（不会动磁盘上的文件）">删除源</button></div>
+      <div class="ls-dirs">${(src.dirs || []).map((d, i) => dirRow(d, i, status.dirs.find(x => x.path === d.path && (x.src || 'local') === (src.id || 'local')))).join('') || '<p class="lan">还没有目录。</p>'}</div>
+      <div class="actions"><button class="small" data-lsop="add">+ 添加目录</button></div></div>`;
   const statusText = s => s.running ? `扫描中… 已找到 ${s.dirs.reduce((n, d) => n + d.items, 0)} 部`
     : s.at ? `上次扫描 ${new Date(s.at).toLocaleString()}，${s.items} 部 / ${s.files} 个文件，用时 ${(s.ms / 1000).toFixed(1)} 秒${s.error ? ' · 出错：' + s.error : ''}` : '还没扫描过';
   const draw = (cfg, status) => {
-    const stOf = d => status.dirs.find(x => x.path === d.path);
     box.innerHTML = `<h2>本地媒体 <span class="tagl">内置源</span></h2>
-      <p class="hint">扫描这台电脑上（或挂载的 NAS 里）的文件夹，合成一个点播源。每个目录是一个分类，勾「子目录分类」后它下面的每个一级子文件夹各是一个分类。同一文件夹里带集数的视频合成一部剧，其他文件各算一部。封面优先用同目录的 poster / folder / 同名图片，没有就用 ffmpeg 截一帧；有 .nfo 会读片名、简介和演员。勾了「成人」的目录只在安全级别为「全部」时显示。
+      <p class="hint">扫描这台电脑上（或挂载的 NAS 里）的文件夹，每个本地源合成一个点播源，可以建多个。每个目录是一个分类，勾「子目录分类」后它下面的每个一级子文件夹各是一个分类。同一文件夹里带集数的视频合成一部剧，其他文件各算一部。封面优先用同目录的 poster / folder / 同名图片，没有就用 ffmpeg 截一帧；有 .nfo 会读片名、简介和演员。
+      「整体级别」管这个源下面所有目录：标成人的源只在安全级别「全部」时可见，标少儿的源在儿童模式下可见；目录上的标记是更细的补充（任一目录标成人，这个分类就算成人）。
       ${j.ffmpeg ? '浏览器放不了的格式（mkv / avi / rmvb 等）会由 ffmpeg 转成 HLS 边转边播，转好的缓存保留一天。' : '<b>没找到 ffmpeg</b>：mkv / avi 等格式在浏览器里可能放不了，电视端不受影响。'}</p>
-      <div class="field"><label class="lan"><input type="checkbox" id="lcOn" ${cfg.enabled ? 'checked' : ''}> 启用</label>
-        <input id="lcName" value="${esc(cfg.name)}" placeholder="源名称" style="flex:0 1 160px;min-width:120px">
-        <label class="lan">每 <input id="lcRescan" type="number" min="0" max="1440" value="${cfg.rescan}" style="width:70px;min-width:0;flex:none"> 分钟自动重扫（0 = 不自动）</label></div>
-      <div class="field" style="margin-top:8px"><span class="lan">后缀</span><input id="lcExts" value="${esc(cfg.exts.join(', '))}" title="可选：${esc(j.exts.join(' '))}"></div>
-      <div id="lcDirs" style="margin-top:10px">${cfg.dirs.map((d, i) => dirRow(d, i, stOf(d))).join('') || '<p class="lan">还没有目录。</p>'}</div>
-      <div class="actions"><button class="small" id="lcAdd">+ 添加目录</button><button class="btn red" id="lcSave">保存并扫描</button>
+      <div class="field"><label class="lan">每 <input id="lcRescan" type="number" min="0" max="1440" value="${cfg.rescan}" style="width:70px;min-width:0;flex:none"> 分钟自动重扫（0 = 不自动）</label>
+        <span class="lan">后缀</span><input id="lcExts" value="${esc(cfg.exts.join(', '))}" title="可选：${esc(j.exts.join(' '))}"></div>
+      <div id="lcSrcs">${cfg.sources.map((s, i) => srcBlock(s, i, status)).join('')}</div>
+      <div class="actions"><button class="small" id="lcAddSrc">+ 添加本地源</button><button class="btn red" id="lcSave">保存并扫描</button>
         <button class="small" id="lcScan">重新扫描</button><span class="lan" id="lcStatus">${esc(statusText(status))}</span></div>
-      ${j.urls.length ? `<details class="admmore" style="margin-top:12px"><summary>电视端使用</summary><p class="hint" style="margin-top:8px">在 TVBox / FongMi 里添加点播源，类型 1（苹果CMS JSON），地址 ${j.urls.map(u => `<code>${esc(u)}</code>`).join(' 或 ')}。电视端直接播原文件。</p></details>` : ''}`;
+      ${j.urls.length ? `<details class="admmore" style="margin-top:12px"><summary>电视端使用</summary><p class="hint" style="margin-top:8px">在 TVBox / FongMi 里添加点播源，类型 1（苹果CMS JSON），地址 ${j.urls.map(u => `<code>${esc(u)}</code>`).join(' 或 ')}（所有本地源合在一起）；只要某一个源，在地址后加 <code>?src=local2</code>（源 id 见各源的 key：第一个是 local，之后 local2、local3…）。电视端直接播原文件。</p></details>` : ''}`;
   };
   const collect = () => ({
-    enabled: $('#lcOn').checked, name: $('#lcName').value.trim(), rescan: Number($('#lcRescan').value) || 0,
-    exts: $('#lcExts').value.split(/[\s,，;；]+/).filter(Boolean),
-    dirs: $$('.lrow', box).map(r => ({ path: $('.url', r).value.trim(), name: $('.nm', r).value.trim(),
-      sub: +$('.sub', r).checked, flat: +$('.flat', r).checked, kids: +$('.kids', r).checked, adult: +$('.adult', r).checked })).filter(d => d.path),
+    rescan: Number($('#lcRescan').value) || 0, exts: $('#lcExts').value.split(/[\s,，;；]+/).filter(Boolean),
+    sources: $$('.lsrc', box).map(b => {
+      const lv = $('[data-lvl].on', b)?.dataset.lvl;
+      return { id: b.dataset.id, name: $('.ls-name', b).value.trim(), enabled: $('.ls-on', b).checked, kids: lv === 'kids' ? 1 : 0, adult: lv === 'adult' ? 1 : 0,
+        dirs: $$('.lrow', b).map(r => ({ path: $('.url', r).value.trim(), name: $('.nm', r).value.trim(),
+          sub: +$('.sub', r).checked, flat: +$('.flat', r).checked, kids: +$('.kids', r).checked, adult: +$('.adult', r).checked })).filter(d => d.path) };
+    }),
   });
-  let cfg = c, status = j.status, timer = 0;
+  let cfg = j.cfg, status = j.status, timer = 0;
   // While a scan runs, refresh the counts every second.
   const poll = () => {
     clearTimeout(timer);
     if (!status.running) return;
     timer = setTimeout(async () => {
       if (!box.isConnected) return;
-      try { status = (await get('/api/local')).status; } catch { return; }
+      try { status = (await get(apiBase)).status; } catch { return; }
       if (!box.isConnected) return;
       if (status.running) { $('#lcStatus').textContent = statusText(status); return poll(); }
       cfg = collect(); draw(cfg, status); bind();
@@ -5644,20 +5663,33 @@ async function localSettings(pre) {
     }, 1000);
   };
   const bind = () => {
-    $('#lcAdd').onclick = () => { cfg = collect(); cfg.dirs.push({ path: '', name: '' }); draw(cfg, status); bind(); $('#lcDirs .lrow:last-child .url').focus(); };
-    $('#lcDirs').onclick = e => { if (e.target.dataset.lop !== 'del') return; cfg = collect(); cfg.dirs.splice(+e.target.closest('.lrow').dataset.i, 1); draw(cfg, status); bind(); };
+    $('#lcAddSrc').onclick = () => { cfg = collect(); cfg.sources.push({ id: '', name: '', enabled: true, dirs: [{ path: '', name: '' }] }); draw(cfg, status); bind(); $$('#lcSrcs .lsrc:last-child .url')[0]?.focus(); };
+    $('#lcSrcs').onclick = e => {
+      const lv = e.target.dataset.lvl;
+      if (lv) { $$('[data-lvl]', e.target.parentElement).forEach(b => b.classList.toggle('on', b === e.target)); return; }
+      const op = e.target.dataset.lsop, lop = e.target.dataset.lop;
+      if (op === 'add') { const b = e.target.closest('.lsrc'); const si = $$('.lsrc', box).indexOf(b); cfg = collect(); cfg.sources[si].dirs.push({ path: '', name: '' }); draw(cfg, status); bind(); $$('#lcSrcs .lsrc')[si].querySelector('.lrow:last-child .url').focus(); }
+      else if (op === 'del') {
+        const b = e.target.closest('.lsrc'); const si = $$('.lsrc', box).indexOf(b);
+        if (cfg.sources.length <= 1 && !confirm('这是最后一个本地源，删除后本地媒体就没有了（会留一个空的）。继续？')) return;
+        cfg = collect(); cfg.sources.splice(si, 1); draw(cfg, status); bind();
+      } else if (lop === 'del') {
+        const b = e.target.closest('.lsrc'); const si = $$('.lsrc', box).indexOf(b);
+        cfg = collect(); cfg.sources[si].dirs.splice(+e.target.closest('.lrow').dataset.i, 1); draw(cfg, status); bind();
+      }
+    };
     $('#lcSave').onclick = async () => {
-      const bad = collect().dirs.find(d => !/^(\/|~|[a-z]:[\\/]|\\\\)/i.test(d.path));
+      const bad = collect().sources.flatMap(s => s.dirs).find(d => !/^(\/|~|[a-z]:[\\/]|\\\\)/i.test(d.path));
       if (bad) return toast('要写完整路径：' + bad.path);
       try {
-        const r = await req('PUT', '/api/local', collect());
+        const r = await req('PUT', apiBase, collect());
         cfg = r.cfg; status = r.status; draw(cfg, status); bind(); poll();
-        toast(cfg.enabled ? '已保存，开始扫描' : '已保存（已停用）');
-        if (!cfg.enabled) { state.cats = []; apiMemo.clear(); await loadSites(); }
+        toast(cfg.sources.some(s => s.enabled && s.dirs.length) ? '已保存，开始扫描' : '已保存（没有启用的源）');
+        if (!status.running) { state.cats = []; apiMemo.clear(); await loadSites(); }
       } catch (err) { toast(err.message); }
     };
     $('#lcScan').onclick = async () => {
-      try { status = await req('POST', '/api/local/scan', {}); $('#lcStatus').textContent = statusText(status); poll(); }
+      try { status = await req('POST', apiBase + '/scan', {}); $('#lcStatus').textContent = statusText(status); poll(); }
       catch (err) { toast(err.message); }
     };
   };

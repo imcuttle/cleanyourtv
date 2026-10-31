@@ -841,7 +841,7 @@ function act(a) {
   if (a === 'like') return doLike(!likes.has(keyOf(s.it)));
   if (a === 'fav') { if (!s.d || kidsMode()) return; return favAction(s.d, syncRail, () => bump(s.it, s.d, 2)); }
   if (a === 'eps') { if (!s.d) return; if (sheetEl.hidden) { renderSheet(); sheetEl.hidden = false; menuEl.hidden = true; } else sheetEl.hidden = true; return; }
-  if (a === 'share') { if (s.it.site === 'local') return; return shareNow(vodHref(s.it.site, s.it.id), s.it.name || s.d?.name || ''); }
+  if (a === 'share') { if (isLocalKey(s.it.site)) return; return shareNow(vodHref(s.it.site, s.it.id), s.it.name || s.d?.name || ''); }
   if (a === 'detail') { s.video.pause(); return openDetail(s.it.site, s.it.id); }
   if (a === 'del') return feedTrash(s);
   if (a === 'dislike') { bump(s.it, s.d, -3); markSeen(s.it); toast('已减少这类推荐'); s.judged = true; return go(1); }

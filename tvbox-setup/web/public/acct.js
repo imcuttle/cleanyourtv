@@ -202,12 +202,6 @@ const API = {
     if (!r.ok) throw new Error(r.j.error || '清空失败');
     box = []; persist(); await pull(); return r.j.stats;
   },
-  async claim(token) {   // 用管理员令牌把当前账号升为管理员
-    if (!me) throw new Error('先登录账号');
-    const r = await call('claim', 'POST', { token }, me.token);
-    if (!r.ok) throw new Error(r.j.error || '失败');
-    return r.j.user;
-  },
   async password(old, next) { const r = await call('password', 'POST', { old, next }, me.token); if (!r.ok) throw new Error(r.j.error || '修改失败'); },
   async destroy(password) {
     const who = me;
@@ -272,6 +266,7 @@ const hint = (ok, text) => `<span class="acct-msg ${ok ? 'ok' : ''}">${esc(text)
 async function mountSettings(el) {
   if (!el || PV) return;
   const st = await status();
+  if (typeof adminCheck === 'function') await adminCheck().catch(() => {});   // 管理员才有「全部」可选
   if (!el.isConnected) return;
   if (!st.enabled) {
     el.innerHTML = `<h2>账号管理</h2><p class="hint">${st.offline ? '连不上服务，稍后再试。' : st.stale ? '服务端还没更新到带账号功能的版本，重启一次服务就有了（设置页下面的「管理员」里可以重启）。' : '服务端的 Node 版本太旧（需要 22.13 以上，自带 node:sqlite），账号功能没有开启。升级 Node 后重启服务即可。'}当前是访客模式，数据只存在这个浏览器里。</p>`;
@@ -288,13 +283,12 @@ async function mountSettings(el) {
         ${a.guest ? '' : `<button class="small ghost" data-rm="${a.id}" title="从这台设备上退出这个账号（数据仍保留在服务端，下次输密码即可登录）">退出</button>`}</div>`).join('');
     const subForm = {
       pw: `<form class="acct-sub" data-f="pw"><input type="password" name="old" placeholder="旧密码" autocomplete="current-password" required><input type="password" name="next" placeholder="新密码（6 位以上）" autocomplete="new-password" minlength="6" required><button class="small" type="submit">保存</button><button class="small ghost" type="button" data-sub="">取消</button></form>`,
-      claim: `<form class="acct-sub" data-f="claim"><span class="acct-warn" style="color:inherit">输入管理员令牌（服务启动窗口里显示，也存在 web/.env 的 TVBOX_ADMIN_TOKEN），这个账号就升为管理员。</span><input type="password" name="tok" placeholder="管理员令牌" autocomplete="off" required><button class="small" type="submit">升为管理员</button><button class="small ghost" type="button" data-sub="">取消</button></form>`,
       del: `<form class="acct-sub" data-f="del"><span class="acct-warn">会删除这个账号的全部观看历史、收藏和偏好，不可恢复。</span><input type="password" name="pw" placeholder="输入密码确认" autocomplete="current-password" required><button class="small danger" type="submit">永久删除</button><button class="small ghost" type="button" data-sub="">取消</button></form>`,
     }[sub] || '';
     el.innerHTML = `<h2>账号管理</h2>
       <p class="hint">用用户名和密码注册账号，观看历史、播放进度、收藏、沉浸推荐偏好都归账号所有，账号之间互不可见。同一台设备可以登录多个账号随时切换；换一台设备登录同一个账号，进度和收藏跟着走。</p>
       <div class="acct-now">${me ? avatar(me.name, 'lg') : guestAv.replace('class="av guest"', 'class="av guest lg"')}
-        <div class="nm"><b>${me ? esc(me.name) : '访客（本机）'}${info && info.user.admin ? ' <span class="acct-tag">管理员</span>' : ''}</b><small>${me ? `注册于 ${info ? fmtDate(info.user.created) : '…'}${info ? ' · 安全级别「' + (LV[info.user.level] || info.user.level) + '」' : ''}` : '还没登录：数据只存在这个浏览器里，安全级别固定是「标准」；登录后才会同步、才能跨设备'}</small></div>
+        <div class="nm"><b>${me ? esc(me.name) : '访客（本机）'}${info && info.user.unlimited ? ' <span class="acct-tag" title="管理员给这个账号开了「允许无限模式」">可用无限模式</span>' : ''}</b><small>${me ? `注册于 ${info ? fmtDate(info.user.created) : '…'}${info ? ' · 安全级别「' + (LV[info.user.level] || info.user.level) + '」' : ''}` : '还没登录：数据只存在这个浏览器里，安全级别固定是「标准」；登录后才会同步、才能跨设备'}</small></div>
         ${stats ? `<div class="acct-stats"><span><b>${stats.history}</b>观看记录</span><span><b>${stats.favs}</b>收藏</span><span><b>${stats.liveFavs}</b>直播收藏</span></div>` : ''}</div>
       <div class="acct-list">${rows}</div>
       <div class="acct-box">
@@ -303,13 +297,12 @@ async function mountSettings(el) {
           <input name="username" placeholder="用户名（2~20 个字）" autocomplete="username" autocapitalize="off" spellcheck="false" required>
           <input name="password" type="password" placeholder="密码${tab === 'reg' ? '（6 位以上）' : ''}" autocomplete="${tab === 'reg' ? 'new-password' : 'current-password'}" required>
           ${tab === 'reg' ? '<input name="again" type="password" placeholder="再输一次密码" autocomplete="new-password" required>' : ''}
-          ${tab === 'reg' ? '<div class="acct-lv"><span class="lan">安全级别</span><div class="seg"><button type="button" data-lv="standard" class="on">标准</button><button type="button" data-lv="kids">儿童</button></div><span class="lan">注册后只有管理员能改；「全部」只有管理员账号能用</span></div>' : ''}
+          ${tab === 'reg' ? `<div class="acct-lv"><span class="lan">安全级别</span><div class="seg"><button type="button" data-lv="standard" class="on">标准</button><button type="button" data-lv="kids">儿童</button>${typeof ADMIN !== 'undefined' && ADMIN.on ? '<button type="button" data-lv="all">全部</button>' : ''}</div><span class="lan">注册后由管理员在后台设置</span></div>` : ''}
           ${tab === 'reg' && guestHasData() ? '<label class="flag acct-imp"><input type="checkbox" name="imp" checked>把这个浏览器里的观看记录和收藏带到新账号</label>' : ''}
           <button class="small primary" type="submit">${tab === 'reg' ? '注册并登录' : '登录'}</button><span class="acct-msg" aria-live="polite"></span>
         </form></div>
       ${me ? `<div class="actions acct-acts">
         <button class="small" data-sub="pw">修改密码</button>
-        ${info && info.user.admin ? '<a class="btn more" href="/admin/" target="_blank" rel="noopener">管理后台</a>' : '<button class="small" data-sub="claim" title="用管理员令牌把这个账号升为管理员">升为管理员</button>'}
         ${guestHasData() ? '<button class="small" data-act="imp" title="把这个浏览器作为访客时留下的记录并入当前账号（同一部片取较新的一条）">导入访客数据</button>' : ''}
         <button class="small" data-act="clr-hist">清空观看历史</button><button class="small" data-act="clr-favs">清空收藏</button>
         <button class="small danger" data-sub="del">删除账号</button></div>${subForm}` : ''}`;
@@ -340,10 +333,6 @@ async function mountSettings(el) {
     el.querySelector('[data-f=pw]')?.addEventListener('submit', async e => {
       e.preventDefault(); const f = new FormData(e.target);
       try { await API.password(String(f.get('old')), String(f.get('next'))); sub = ''; say('密码已修改，其它设备需要重新登录'); render(); } catch (err) { say(err.message); }
-    });
-    el.querySelector('[data-f=claim]')?.addEventListener('submit', async e => {
-      e.preventDefault();
-      try { await API.claim(String(new FormData(e.target).get('tok'))); sub = ''; say('已升为管理员'); await refresh(); } catch (err) { say(err.message); }
     });
     el.querySelector('[data-f=del]')?.addEventListener('submit', async e => {
       e.preventDefault();
