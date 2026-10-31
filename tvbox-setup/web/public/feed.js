@@ -625,7 +625,7 @@ async function moreCands(gen) {
     if (!F.once) {
       F.once = true;
       const ok = it => state.sites.some(s => s.key === it.site);
-      poolAdd((m === 'fav' ? favs : hist).list().filter(ok));
+      poolAdd((m === 'fav' ? favs : hist).list().filter(ok).filter(it => m !== 'fav' || favInCol(it, F.extra?.col)));
     }
     return drainPool(6);
   }
@@ -837,7 +837,7 @@ function act(a) {
     return;
   }
   if (a === 'like') return doLike(!likes.has(keyOf(s.it)));
-  if (a === 'fav') { if (!s.d || kidsMode()) return; const on = favs.toggle(s.d); if (on) bump(s.it, s.d, 2); toast(on ? '已收藏' : '已取消收藏'); return syncRail(); }
+  if (a === 'fav') { if (!s.d || kidsMode()) return; return favAction(s.d, syncRail, () => bump(s.it, s.d, 2)); }
   if (a === 'eps') { if (!s.d) return; if (sheetEl.hidden) { renderSheet(); sheetEl.hidden = false; menuEl.hidden = true; } else sheetEl.hidden = true; return; }
   if (a === 'share') { if (s.it.site === 'local') return; return shareNow(vodHref(s.it.site, s.it.id), s.it.name || s.d?.name || ''); }
   if (a === 'detail') { s.video.pause(); return openDetail(s.it.site, s.it.id); }
@@ -1080,7 +1080,7 @@ function openFeed(o = {}, restore = false) {
   if (!root.hidden) return;
   if (!state.sites.length) return toast('还没有可用的点播源');
   const mode = o.mode === 'fav' && kidsMode() ? 'rec' : (o.mode || 'rec');
-  F.mode = mode; F.extra = o.mode === 'cat' || o.mode === 'search' || o.mode === 'list' ? o : null;
+  F.mode = mode; F.extra = o.mode === 'cat' || o.mode === 'search' || o.mode === 'list' || o.mode === 'fav' ? o : null;
   F.atNext = o.at || null;
   if (!restore) pushOverlay('feed', feedUrl());
   feedAt = { state: history.state, url: location.href };
@@ -1122,7 +1122,7 @@ document.addEventListener('click', e => {
   const b = e.target.closest('[data-feed]'); if (!b) return;
   e.preventDefault();
   const d = b.dataset;
-  openFeed({ mode: d.feed, t: d.t || '', name: d.name || '', site: d.site || state.site, q: d.q || '', scope: d.scope || '' });
+  openFeed({ mode: d.feed, t: d.t || '', name: d.name || '', site: d.site || state.site, q: d.q || '', scope: d.scope || '', col: d.col || '' });
 });
 window.openFeed = openFeed;
 window.feedOpen = () => !root.hidden;

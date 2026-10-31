@@ -455,9 +455,42 @@ const favs = {
     return true;
   },
   list: () => favs.all().filter(f => showEntry(f)),
+  // 改合集归属: keys = 'site|id' 的集合 (null = 全部); fn(旧的合集 id 列表) → 新的列表。合集 id 写在收藏条目自己的 cols 里, 跟着账号走
+  edit(keys, fn) {
+    const out = favs.all().map(f => {
+      if (keys && !keys.has(f.site + '|' + f.id)) return f;
+      const cs = fn(f.cols || []), e = { ...f };
+      if (cs.join() === (f.cols || []).join()) return f;
+      if (cs.length) e.cols = cs; else delete e.cols;
+      ACCT.op({ t: 'fav.put', e }); return e;
+    });
+    UD.set('favs', JSON.stringify(out)); tabKeep.clear();
+  },
+  setCols: (site, id, cols) => favs.edit(new Set([site + '|' + id]), () => cols),
   del(site, id) { tabKeep.clear(); UD.set('favs', JSON.stringify(favs.all().filter(f => !(f.site === site && f.id === id)))); ACCT.op({ t: 'fav.del', site, id }); },
   clear() { tabKeep.clear(); UD.set('favs', '[]'); ACCT.op({ t: 'fav.clear' }); },
 };
+// ---------- 收藏合集 (账号数据: 存在 favCols 这个键里, 登录后跟着账号同步) ----------
+const favCols = {
+  all: () => UD.json('favCols', []),
+  save(a) { UD.set('favCols', JSON.stringify(a)); tabKeep.clear(); },
+  add(name) {
+    name = String(name || '').trim().slice(0, 20); if (!name) return null;
+    const a = favCols.all(), ex = a.find(c => c.name === name); if (ex) return ex;
+    if (a.length >= 50) { toast('合集最多 50 个'); return null; }
+    const c = { id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name, at: Date.now() };
+    favCols.save([...a, c]); return c;
+  },
+  rename(id, name) {
+    name = String(name || '').trim().slice(0, 20); const a = favCols.all();
+    if (!name || a.some(c => c.id !== id && c.name === name)) return false;
+    favCols.save(a.map(c => c.id === id ? { ...c, name } : c)); return true;
+  },
+  del(id) { favCols.save(favCols.all().filter(c => c.id !== id)); favs.edit(null, cs => cs.filter(x => x !== id)); },
+  count: id => favs.list().filter(f => f.cols?.includes(id)).length,
+};
+// 在不在某个合集里 ('_' = 没放进任何合集的)
+const favInCol = (f, col) => { if (!col) return true; const ids = new Set(favCols.all().map(c => c.id)); return col === '_' ? !(f.cols || []).some(x => ids.has(x)) : !!f.cols?.includes(col); };
 const kidsMode = () => state.level === 'kids';
 const liveFavs = {
   all: () => UD.json('liveFavs', []),
@@ -1060,21 +1093,118 @@ const chartLanding = h => { const [, pg, tab, ...p] = (h || '').split('?')[0].sp
 const subInfo = new Map();   // 子页面历史记录 sk → { snap?, below? } (转场时垫在下面的东西)
 let catOrigin = 'home';   // 当前分类页是从哪个 tab 进来的
 let lastSearch = '';       // 最近一次的搜索结果页地址: 点底部「搜索」tab 直接回到它
+// ---------- 收藏合集的浮窗 ----------
+const popAt = () => matchMedia('(max-width: 760px)').matches ? {} : { x: Math.max(8, (innerWidth - 340) / 2), y: Math.max(60, (innerHeight - 460) / 2) };
+const fcNewForm = ph => `<form class="fcnew"><input maxlength="20" placeholder="${ph || '合集名称，如：周末看 / 经典老片'}" enterkeyhint="done" autocomplete="off"><button type="submit">创建</button></form>`;
+// 收藏 / 取消收藏 的统一入口: 没收藏 → 先收藏上, 再弹出合集选择; 已收藏 → 直接弹出 (里面有「取消收藏」)
+function favAction(d, after, onAdd) {
+  if (kidsMode()) return;
+  if (!favs.has(d.site, d.id)) { favs.toggle(d); onAdd?.(); }
+  after?.();
+  favPick(d, after);
+}
+function favPick(d, onDone) {
+  let adding = false, p = null;
+  const entry = () => favs.all().find(f => f.site === d.site && f.id === d.id);
+  const body = () => {
+    const cols = favCols.all(), mine = new Set(entry()?.cols || []);
+    return (cols.length ? `<div class="fcrows">${cols.map(c => `<button type="button" class="fcrow${mine.has(c.id) ? ' on' : ''}" data-c="${esc(c.id)}"><i class="fcchk"></i><span>${esc(c.name)}</span><small>${favCols.count(c.id)}</small></button>`).join('')}</div>` : '<p class="fcnone">还没有合集。新建一个，把收藏分分类。</p>')
+      + (adding ? fcNewForm() : '<button type="button" class="fcadd" data-a="new">＋ 新建合集</button>');
+  };
+  const paint = () => { const top = p.$body.scrollTop; p.$body.innerHTML = body(); p.$body.scrollTop = top; if (adding) $('.fcnew input', p.el)?.focus(); };
+  p = Pop.open({ title: '已收藏 · 放进合集', cls: 'favpick', ...popAt(), body: body(),
+    foot: '<div class="fcfoot"><button type="button" class="fcun" data-a="un">取消收藏</button><button type="button" class="fcok" data-a="ok">完成</button></div>',
+    onClose: () => onDone?.(),
+    onClick: (e, close) => {
+      const r = e.target.closest('.fcrow');
+      if (r) { const cs = entry()?.cols || [], id = r.dataset.c; favs.setCols(d.site, d.id, cs.includes(id) ? cs.filter(x => x !== id) : [...cs, id]); return paint(); }
+      const a = e.target.closest('[data-a]')?.dataset.a;
+      if (a === 'new') { adding = true; paint(); }
+      else if (a === 'un') { favs.del(d.site, d.id); toast('已取消收藏'); close(); }
+      else if (a === 'ok') close();
+    } });
+  p?.el.addEventListener('submit', e => {
+    e.preventDefault();
+    const c = favCols.add($('.fcnew input', p.el).value); if (!c) return;
+    favs.setCols(d.site, d.id, [...(entry()?.cols || []), c.id]); adding = false; paint();
+  });
+}
+// 收藏页的「管理合集」: 新建 / 重命名 / 删除 (删合集不删里面的收藏, 它们回到「未分组」)
+function colManage(onChange) {
+  let adding = false, editing = '', p = null;
+  const body = () => {
+    const cols = favCols.all();
+    return (cols.length ? `<div class="cmrows">${cols.map(c => editing === c.id
+      ? `<form class="cmrow edit" data-c="${esc(c.id)}"><input maxlength="20" value="${esc(c.name)}" enterkeyhint="done"><button type="submit">保存</button></form>`
+      : `<div class="cmrow" data-c="${esc(c.id)}"><span class="cmn">${esc(c.name)}</span><small>${favCols.count(c.id)} 部</small><button type="button" data-a="ren" title="重命名" aria-label="重命名"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/></svg></button><button type="button" class="danger" data-a="del" title="删除合集" aria-label="删除合集">${IC.trash}</button></div>`).join('')}</div>` : '<p class="fcnone">还没有合集。</p>')
+      + (adding ? fcNewForm() : '<button type="button" class="fcadd" data-a="new">＋ 新建合集</button>');
+  };
+  const paint = () => { p.$body.innerHTML = body(); $('input', p.$body)?.focus(); if (editing) $('.cmrow.edit input', p.$body)?.select(); };
+  p = Pop.open({ title: '管理合集', cls: 'favpick', ...popAt(), body: body(), foot: '<div class="fcfoot"><span class="fchint">删除合集不会删除里面的收藏</span><button type="button" class="fcok" data-a="ok">完成</button></div>',
+    onClose: () => onChange?.(),
+    onClick: (e, close) => {
+      const a = e.target.closest('[data-a]')?.dataset.a, id = e.target.closest('[data-c]')?.dataset.c;
+      if (a === 'ok') return close();
+      if (a === 'new') { adding = true; editing = ''; return paint(); }
+      if (a === 'ren') { editing = id; adding = false; return paint(); }
+      if (a === 'del') {
+        const c = favCols.all().find(x => x.id === id), n = favCols.count(id);
+        if (c && confirm(`删除合集「${c.name}」？${n ? `\n\n里面的 ${n} 部收藏不会删除，会回到「未分组」。` : ''}`)) { favCols.del(id); paint(); }
+      }
+    } });
+  p?.el.addEventListener('submit', e => {
+    e.preventDefault();
+    const f = e.target.closest('form'), v = $('input', f).value;
+    if (f.classList.contains('edit')) { if (!favCols.rename(f.dataset.c, v)) return toast('名称不能为空，也不能和别的合集重名'); editing = ''; }
+    else { if (!favCols.add(v)) return; adding = false; }
+    paint();
+  });
+}
+// 多选以后「合集」: 加入某个合集 / 新建并加入 / 从当前合集移出 / 移出所有合集
+function colMove(keys, from, onDone) {
+  let adding = false, p = null;
+  const body = () => {
+    const cols = favCols.all();
+    return `<div class="fcrows">${cols.map(c => `<button type="button" class="fcrow plain" data-c="${esc(c.id)}"><i class="fcfolder"></i><span>加入「${esc(c.name)}」</span><small>${favCols.count(c.id)}</small></button>`).join('')}</div>`
+      + (adding ? fcNewForm() : '<button type="button" class="fcadd" data-a="new">＋ 新建合集并加入</button>')
+      + `<div class="fcsep"></div>`
+      + (from && from !== '_' ? `<button type="button" class="fcrow plain" data-a="out"><i class="fcout"></i><span>从当前合集移出</span></button>` : '')
+      + `<button type="button" class="fcrow plain" data-a="none"><i class="fcout"></i><span>移出所有合集（放回未分组）</span></button>`;
+  };
+  const paint = () => { p.$body.innerHTML = body(); if (adding) $('.fcnew input', p.el)?.focus(); };
+  const done = (msg, close) => { toast(msg); close ? close() : p.close(); onDone?.(); };
+  p = Pop.open({ title: `${keys.size} 项 · 放进合集`, cls: 'favpick', ...popAt(), body: body(),
+    onClick: (e, close) => {
+      const c = e.target.closest('.fcrow[data-c]');
+      if (c) { favs.edit(keys, cs => cs.includes(c.dataset.c) ? cs : [...cs, c.dataset.c]); return done(`已加入「${favCols.all().find(x => x.id === c.dataset.c)?.name}」`, close); }
+      const a = e.target.closest('[data-a]')?.dataset.a;
+      if (a === 'new') { adding = true; paint(); }
+      else if (a === 'out') { favs.edit(keys, cs => cs.filter(x => x !== from)); done('已移出', close); }
+      else if (a === 'none') { favs.edit(keys, () => []); done('已放回未分组', close); }
+    } });
+  p?.el.addEventListener('submit', e => {
+    e.preventDefault();
+    const c = favCols.add($('.fcnew input', p.el).value); if (!c) return;
+    favs.edit(keys, cs => cs.includes(c.id) ? cs : [...cs, c.id]); done(`已加入「${c.name}」`);
+  });
+}
 // ---------- 多选 (下载 / 收藏页共用): 底部一条操作栏盖在 tab 栏上 —— 全选 / 已选 N 项 / 删除 ----------
 function selBarSet(on, o = {}) {
   let el = document.getElementById('selbar');
   if (!on) { el?.remove(); return; }
   if (!el) {
     el = document.createElement('div'); el.id = 'selbar';
-    el.innerHTML = '<button type="button" class="sa"></button><span class="sn"></span><button type="button" class="sd"></button>';
+    el.innerHTML = '<button type="button" class="sa"></button><span class="sn"></span><button type="button" class="sc" hidden>合集</button><button type="button" class="sd"></button>';
     document.body.append(el);
     el.querySelector('.sa').onclick = () => el._o.onAll();
     el.querySelector('.sd').onclick = () => el._o.onDel();
+    el.querySelector('.sc').onclick = () => el._o.onCol?.();
   }
   el._o = o;
   el.querySelector('.sa').textContent = o.total && o.count >= o.total ? '取消全选' : '全选';
   el.querySelector('.sn').textContent = o.count ? `已选 ${o.count} 项` : '请选择';
   const d = el.querySelector('.sd'); d.textContent = o.delLabel || '删除'; d.disabled = !o.count;
+  const c = el.querySelector('.sc'); c.hidden = !o.onCol; c.disabled = !o.count;
 }
 function newPage() {
   selBarSet(false); view.classList.remove('selmode');
@@ -1349,7 +1479,7 @@ async function route(opts = {}) {
     if (page === 'charts') return await renderCharts();
     if (!state.sites.length) return renderNoSites();
     if (page === 'history') return renderHistory();
-    if (page === 'favorites') return renderFavorites();
+    if (page === 'favorites') return renderFavorites(a);
     if (page === 'person') return await renderPerson(a, decodeURIComponent(b || ''), decodeURIComponent(c || ''));
     if (page === 'site') {
       const k = decodeURIComponent(a || '');
@@ -1514,7 +1644,7 @@ async function feedFromCard(c) {
   const pg = $('#view [data-feed]');
   if (pg && ['cat', 'search', 'fav', 'hist'].includes(pg.dataset.feed)) {
     const d = pg.dataset;
-    return window.openFeed({ mode: d.feed, t: d.t || '', name: d.name || '', site: d.site || state.site, q: d.q || '', scope: d.scope || '', at });
+    return window.openFeed({ mode: d.feed, t: d.t || '', name: d.name || '', site: d.site || state.site, q: d.q || '', scope: d.scope || '', col: d.col || '', at });
   }
   if (document.body.dataset.page === 'home') return window.openFeed({ mode: 'rec', at });
   const items = [...box.querySelectorAll('.card')].map(el => el.dataset.db === undefined ? cardItems.get(el.dataset.site + '|' + el.dataset.id) : null).filter(Boolean);
@@ -1824,33 +1954,48 @@ function hero(items) {
 // ---------- watch history ----------
 // 观看历史 / 我的收藏 共用一套页面。顶栏右侧只有两个图标按钮: 沉浸观看、多选 (没有「清空全部」—— 要清就 多选 → 全选 → 删除);
 // 多选里底部一条操作栏 (全选 / 已选 N 项 / 删除), 点卡片勾选。小屏是 返回 + 居中标题 + 右侧图标, 大屏是 标题 + 右侧图标。
-function renderCollection(kind) {
+function renderCollection(kind, focusId = '') {
   const fav = kind === 'fav', store = fav ? favs : hist;
   const T = fav ? { name: '我的收藏', pick: '选择收藏', empty: '还没有收藏。打开影片，点封面页的「♡」。', del: '取消收藏', ask: n => `取消收藏选中的 ${n} 项？`, done: n => `已取消收藏 ${n} 项` }
     : { name: '观看历史', pick: '选择记录', empty: '还没有观看记录。', del: '删除', ask: n => `从观看历史删除选中的 ${n} 项？`, done: n => `已删除 ${n} 项记录` };
   if (fav && kidsMode()) { view.innerHTML = '<div class="page"><h1>我的收藏</h1><p class="empty">儿童模式下收藏不可见。</p></div>'; return; }
   const names = Object.fromEntries(state.sites.map(s => [s.key, s.name]));
-  let list = store.list(), selMode = false; const sel = new Set();
+  let list = store.list(), selMode = false, focus = fav ? focusId : ''; const sel = new Set();
   const key = c => c.dataset.site + '|' + c.dataset.id;
   const sub = it => fav ? [it.siteName, it.type].filter(Boolean).join(' · ') : `${names[it.site] || it.siteName} · ${it.epName || ''}`;
+  const focusCol = () => !focus ? null : focus === '_' ? { id: '_', name: '未分组' } : favCols.all().find(c => c.id === focus) || null;
+  // 收藏按合集分组: 每个合集一行 (同首页的横向滚动行), 没放进任何合集的归「未分组」; 只有一组有内容时不分行, 直接平铺
+  const groups = () => {
+    const cs = favCols.all(), g = cs.map(c => ({ id: c.id, name: c.name, items: list.filter(f => favInCol(f, c.id)) }));
+    g.push({ id: '_', name: cs.length ? '未分组' : T.name, items: list.filter(f => favInCol(f, '_')) });
+    return g.filter(x => x.items.length);
+  };
   const paint = () => {
     view.classList.toggle('selmode', selMode);
+    if (focus && !focusCol()) focus = '';
+    const fc = focusCol(), shown = fc ? list.filter(f => favInCol(f, fc.id)) : list;
+    const gs = fav && !fc ? groups() : null, rows = gs && gs.length > 1;
+    const title = fc ? fc.name : T.name;
     const head = selMode ? '<div class="hact"><button type="button" class="selok" data-sel="done">完成</button></div>'
-      : list.length ? `<div class="hact"><button class="small ibs" data-feed="${kind}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button><button class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button></div>` : '';
-    view.innerHTML = `<div class="page coll"><div class="pagehead cathead">${BACK_BTN}<h1>${selMode ? T.pick : T.name}</h1>${head}</div>
-      ${list.length ? `<p class="lan csum">${list.length} 部</p>` : ''}
-      <p class="empty hempty" ${list.length ? 'hidden' : ''}>${T.empty}</p>
-      ${list.length ? `<div class="grid">${list.map(it => card(it, { removable: kind, progress: !fav, sub: sub(it) })).join('')}</div>` : ''}</div>`;
-    if (selMode) $$('.grid .card .img', view).forEach(i => i.insertAdjacentHTML('beforeend', '<i class="selchk"></i>'));
+      : (list.length || (fav && favCols.all().length)) ? `<div class="hact">${list.length ? `<button class="small ibs" data-feed="${kind}" ${fc ? `data-col="${esc(fc.id)}"` : ''} title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button>` : ''}${fav ? `<button class="small ibs" data-colmgr title="管理合集" aria-label="管理合集">${IC.folder}</button>` : ''}${list.length ? `<button class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button>` : ''}</div>` : '';
+    const body = !shown.length ? `<p class="empty hempty">${fc ? '这个合集还没有内容。收藏影片时可以放进来，或在多选里选「合集」。' : T.empty}</p>`
+      : rows ? gs.map(g => row(g.name, g.items, `#/favorites/${encodeURIComponent(g.id)}`, sub, { removable: 'fav', extra: `<small class="rcount">${g.items.length}</small>` })).join('')
+      : `<div class="grid">${shown.map(it => card(it, { removable: kind, progress: !fav, sub: sub(it) })).join('')}</div>`;
+    view.innerHTML = `<div class="page coll${rows ? ' colrows' : ''}"><div class="pagehead cathead">${BACK_BTN}<h1>${esc(selMode ? T.pick : title)}</h1>${head}</div>
+      ${shown.length ? `<p class="lan csum">${fc ? '合集 · ' : gs && gs.length === 1 && gs[0].id !== '_' ? `合集「${esc(gs[0].name)}」· ` : ''}${shown.length} 部${rows ? ` · ${gs.length} 个分组` : ''}</p>` : ''}${body}</div>`;
+    if (selMode) $$('.card .img', view).forEach(i => i.insertAdjacentHTML('beforeend', '<i class="selchk"></i>'));
     observeRatings(view); if (!fav) observeJav(view);
     syncSel();
   };
   const syncSel = () => {
     if (!selMode) return selBarSet(false);
-    $$('.grid .card', view).forEach(c => c.classList.toggle('picked', sel.has(key(c))));
+    const fc = focusCol(), all = fc ? list.filter(f => favInCol(f, fc.id)) : list;
+    for (const k of [...sel]) if (!all.some(it => it.site + '|' + it.id === k)) sel.delete(k);
+    $$('.card', view).forEach(c => c.classList.toggle('picked', sel.has(key(c))));
     const h = $('.cathead h1', view); if (h) h.textContent = sel.size ? `已选择 ${sel.size} 项` : T.pick;
-    selBarSet(true, { count: sel.size, total: list.length, delLabel: sel.size ? `${T.del}(${sel.size})` : T.del,
-      onAll: () => { if (sel.size >= list.length) sel.clear(); else list.forEach(it => sel.add(it.site + '|' + it.id)); syncSel(); },
+    selBarSet(true, { count: sel.size, total: all.length, delLabel: sel.size ? `${T.del}(${sel.size})` : T.del,
+      onAll: () => { if (sel.size >= all.length) sel.clear(); else all.forEach(it => sel.add(it.site + '|' + it.id)); syncSel(); },
+      onCol: fav ? () => colMove(new Set(sel), fc?.id || '', () => { selMode = false; sel.clear(); list = store.list(); paint(); }) : null,
       onDel: () => {
         if (!sel.size || !confirm(T.ask(sel.size))) return;
         const n = sel.size;
@@ -1863,6 +2008,7 @@ function renderCollection(kind) {
   view.onclick = e => {
     const sb = e.target.closest('[data-sel]');
     if (sb) { selMode = sb.dataset.sel === 'on'; sel.clear(); paint(); return; }
+    if (e.target.closest('[data-colmgr]')) { colManage(() => { list = store.list(); const gone = focus && !focusCol(); if (gone) history.replaceState(history.state, '', '#/favorites'); paint(); }); return; }
     const c = selMode && e.target.closest('.card'); if (!c) return;
     e.preventDefault(); e.stopPropagation();
     const k = key(c); if (sel.has(k)) sel.delete(k); else sel.add(k);
@@ -1870,7 +2016,7 @@ function renderCollection(kind) {
   };
 }
 const renderHistory = () => renderCollection('hist');
-const renderFavorites = () => renderCollection('fav');
+const renderFavorites = id => renderCollection('fav', id ? decodeURIComponent(id) : '');
 
 // ---------- people (演员 / 导演) ----------
 async function renderPerson(role, name, scopeKey = '') {
@@ -2368,6 +2514,7 @@ const IC = {
   save: svgI('M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3M4 3h4M16 3h4'),
   wait: svgI('M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'),
   sel: svgI('M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM7.8 12.3l3 3 5.4-5.8'),
+  folder: svgI('M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'),
 };
 
 async function enqueue(d, line, eps) {
@@ -2708,7 +2855,7 @@ async function openDetail(site, id, autoplay = false, replace = false, quiet = f
       $('#extReveal', m).onclick = () => openLocal(eps[resumeIdx]?.url, 'reveal');
     }
     $('#shareBtn', m).onclick = () => shareNow(vodHref(site, id), d.name);
-    if ($('#favBtn', m)) $('#favBtn', m).onclick = () => { toast(favs.toggle(d) ? '已收藏' : '已取消收藏'); render(); };
+    if ($('#favBtn', m)) $('#favBtn', m).onclick = () => favAction(d, render);
     $$('[data-more-people]', m).forEach(b => b.onclick = () => { b.parentElement.classList.add('all'); b.remove(); });
     if ($('#dlAll', m)) $('#dlAll', m).onclick = () => enqueue(d, line, eps.map((_, i) => i)).then(render, e => toast(e.message));
     const doubanDetail = r => {
@@ -2967,7 +3114,7 @@ function openPlayer(startAt) {
   syncMedia();
   $('[data-act=star]').hidden = !live;
   $('[data-act=share]').hidden = cur.kind === 'local';   // 下载列表里的本地文件没有可分享的页面
-  paintVodActs(); paintDelAct();
+  paintVodActs(); paintDelAct(); paintPmode();
   srcAlts = []; syncSrcAct();                       // 先不显示「切换源」, 查到别的源再出现
   if (cur.kind === 'vod' && !cur.d.local) {
     const nm = cur.d.name;
@@ -3276,7 +3423,24 @@ let wdAt = 0, wdT = 0;
 // 排查用: 控制台里运行 avDiag(), 听到电流声时看一眼 音频 / 视频 的缓冲区是否对得上、有没有空洞、hls 报过什么
 window.avDiag = () => { const sb = hls?.bufferController?.sourceBuffer || {}, r = b => b ? [...Array(b.length).keys()].map(i => [+b.start(i).toFixed(2), +b.end(i).toFixed(2)]) : null;
   return { t: +video.currentTime.toFixed(2), rate: video.playbackRate, audio: r(sb.audio?.buffered), video: r(sb.video?.buffered), errors: hls?.errs, dirty: !!hls?.dirty, lastRebuild: lastRebuild && Math.round((Date.now() - lastRebuild) / 1000) + 's ago' }; };
-video.addEventListener('ended', () => { if (cur && cur.ep < cur.eps.length - 1) step(1); });
+// 播放模式 (普通播放器的「更多」里, 点一下换下一个): 顺序播放 (默认, 放完最后一集就停) → 列表循环 (最后一集放完回到第一集) → 单集循环。沉浸模式不用这个
+const PMODES = [['seq', '顺序播放', 'M3 12h15M13 6l6 6-6 6'], ['loop', '列表循环', 'M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3'], ['one', '单集循环', 'M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3M11 10l1.6-1v6.4']];
+const pmode = () => PMODES.find(m => m[0] === localStorage.playMode) || PMODES[0];
+function paintPmode() {
+  const b = $('[data-act=pmode]'); if (!b) return;
+  const m = pmode();
+  b.hidden = !cur || cur.kind === 'live';
+  $('svg', b).innerHTML = `<path d="${m[2]}"/>`; setL('pmode', m[1]); b.title = '播放模式：' + m[1] + '（点一下切换）';
+  syncMore?.();
+}
+function cyclePmode() { const m = PMODES[(PMODES.indexOf(pmode()) + 1) % PMODES.length]; localStorage.playMode = m[0]; paintPmode(); toast(m[1]); }
+video.addEventListener('ended', () => {
+  if (!cur || cur.kind === 'live') return;
+  const m = pmode()[0], last = cur.ep >= cur.eps.length - 1;
+  if (m === 'one') { video.currentTime = 0; video.play().catch(() => {}); return; }
+  if (!last) return step(1);
+  if (m === 'loop') { if (cur.eps.length > 1) { cur.ep = 0; openPlayer(0); } else { video.currentTime = 0; video.play().catch(() => {}); } }
+});
 let lastSave = 0;
 video.addEventListener('timeupdate', () => {
   if (!cur || cur.kind !== 'vod' || Date.now() - lastSave < 4000 || !vdur(video)) return;
@@ -3484,7 +3648,7 @@ player.addEventListener('click', e => {
     const nm = live ? c.name || '' : [cur.d.name, cur.eps.length > 1 ? c.name : ''].filter(Boolean).join(' ');
     return shareNow(hash, nm);
   }
-  if (act === 'vfav') { toast(favs.toggle(cur.d) ? '已收藏' : '已取消收藏'); return paintVodActs(); }
+  if (act === 'vfav') return favAction(cur.d, paintVodActs);
   if (act === 'dl') {
     const e = cur.eps[cur.ep], j = dlFor(cur.d.site, cur.d.id, e.url);
     if (j?.status === 'done') return toast('已下载，播放时会自动用本地文件');
@@ -3494,6 +3658,7 @@ player.addEventListener('click', e => {
   if (act === 'star') { const c = cur.eps[cur.ep]; toast(liveFavs.toggle(c) ? '已收藏' : '已取消收藏'); paintStar(liveFavs.has(c.url)); return; }
   if (act === 'more') { sysClose(); const m = $('.pmore'); m.hidden = !m.hidden; e.target.closest('[data-act]').setAttribute('aria-expanded', !m.hidden); return; }
   if (act === 'del') return playerTrash();
+  if (act === 'pmode') return cyclePmode();
   if (act === 'rate') return cycleRate();
   if (act === 'skipt') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSkipSheet(); }
   if (act === 'fs') return toggleFs();

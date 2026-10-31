@@ -12,7 +12,7 @@
 const PV = new URLSearchParams(location.search).get('pv');
 const ls = window.localStorage;
 const LIST = 'tvbox_accts', ACTIVE = 'tvbox_acct', LOST = 'tvbox_acct_lost', ON = 'tvbox_acct_on';
-const KV = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches']);
+const KV = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols']);
 const rj = (k, d) => { try { const v = JSON.parse(ls.getItem(k)); return v ?? d; } catch { return d; } };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));

@@ -2191,3 +2191,56 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .pop.dlmenu button svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .pop.dlmenu .p-head b { font-weight: 600; font-size: 14px; color: #aeaeb2; display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dlpage > .pagehead { max-width: 1000px; }   /* 下载页内容限宽 1000, 顶栏按钮跟着靠内容右缘 */
+
+
+/* ---------- 收藏合集: 放进合集的浮窗 / 管理合集 / 多选里的「合集」 ---------- */
+.pop.favpick { width: 340px; }
+.pop.favpick.pop-sheet { width: auto; }
+.pop.favpick .p-head { justify-content: center; padding-top: 14px; }
+.pop.favpick .p-body { padding: 6px 10px 10px; }
+.fcrows, .cmrows { display: flex; flex-direction: column; gap: 4px; }
+.favpick button { font: inherit; }
+.fcrow { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; padding: 0 12px; border: 0; border-radius: 12px; background: none; color: #e8e8ea; font-size: 15px; text-align: left; transition: background .12s; }
+.fcrow:hover, .fcrow:active { background: #ffffff14; }
+.fcrow span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fcrow small, .cmrow small { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.fcchk { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 2px solid #ffffff59; box-sizing: border-box; transition: background .12s, border-color .12s; }
+.fcrow.on .fcchk { background: var(--red) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 12.5l4 4 8-9'/%3E%3C/svg%3E") center/15px no-repeat; border-color: var(--red); }
+.fcrow.on { color: #fff; font-weight: 600; }
+.fcfolder, .fcout { flex: none; width: 22px; height: 22px; background: #aeaeb2; -webkit-mask: center/contain no-repeat; mask: center/contain no-repeat; }
+.fcfolder { -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E"); mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E"); }
+.fcout { -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M9 8l-4 4 4 4'/%3E%3C/svg%3E"); mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M9 8l-4 4 4 4'/%3E%3C/svg%3E"); }
+.fcsep { height: 1px; margin: 6px 12px; background: #ffffff14; }
+.fcnone { margin: 14px 8px; text-align: center; color: var(--muted); font-size: 14px; }
+.fcadd { display: flex; align-items: center; width: 100%; min-height: 50px; padding: 0 12px; margin-top: 4px; border: 1px dashed #ffffff33; border-radius: 12px; background: none; color: #d1d1d6; font-size: 15px; }
+.fcadd:hover, .fcadd:active { background: #ffffff10; color: #fff; }
+.fcnew, .cmrow.edit { display: flex; gap: 8px; margin-top: 4px; }
+.fcnew input, .cmrow.edit input { flex: 1; min-width: 0; height: 46px; padding: 0 14px; border: 1px solid #ffffff2e; border-radius: 12px; background: #ffffff0f; color: #fff; font-size: 16px; outline: none; }
+.fcnew input:focus, .cmrow.edit input:focus { border-color: var(--red); }
+.fcnew button, .cmrow.edit button { flex: none; height: 46px; padding: 0 18px; border: 0; border-radius: 12px; background: var(--red); color: #fff; font-size: 15px; font-weight: 600; }
+.fcfoot { display: flex; align-items: center; gap: 10px; }
+.fcfoot button { flex: 1; height: 46px; border: 0; border-radius: 12px; font-size: 16px; font-weight: 600; }
+.fcfoot .fcok { background: #fff; color: #000; }
+.fcfoot .fcun { background: #ffffff14; color: #ff453a; }
+.fcfoot .fchint { flex: 1; color: var(--muted); font-size: 12px; }
+.fcfoot .fchint + .fcok { flex: none; padding: 0 28px; }
+.cmrow { display: flex; align-items: center; gap: 6px; min-height: 50px; padding: 0 6px 0 14px; border-radius: 12px; background: #ffffff0d; }
+.cmrow .cmn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+.cmrow > button { flex: none; width: 40px; height: 40px; border: 0; border-radius: 50%; background: none; color: #aeaeb2; display: grid; place-items: center; }
+.cmrow > button:hover, .cmrow > button:active { background: #ffffff1c; color: #fff; }
+.cmrow > button.danger { color: #ff6b6b; }
+.cmrow > button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.cmrow.edit { padding: 0; background: none; }
+
+/* 收藏页按合集分行: 行标题后面带个数 */
+.coll .row h2 .rcount { margin-left: 8px; font-size: 12px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.coll.colrows .row { margin-bottom: 22px; }
+
+/* 多选栏: 全选 / 已选 N 项 / 合集 / 删除 */
+#selbar .sc { color: #fff; min-width: 0; padding-left: 10px; padding-right: 10px; }
+#selbar .sc:disabled { color: #ffffff4d; }
+#selbar .sn { font-size: 13px; }
+/* 分行时让横滚行贴满屏宽 (页面左右各有 4% 内边距), 标题和第一张卡片仍和上面的文字左对齐 */
+.coll.colrows .row { margin-left: -4vw; margin-right: -4vw; }
+.coll.colrows .row h2 { margin-left: 4vw; margin-right: 4vw; }
+.coll.colrows .scroller { padding-left: 4vw; padding-right: 4vw; scroll-padding-left: 4vw; }

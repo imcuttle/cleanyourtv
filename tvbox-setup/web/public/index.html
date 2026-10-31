@@ -16,7 +16,7 @@
 <link rel="icon" href="icon.svg">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=20261031p">
+<link rel="stylesheet" href="style.css?v=20261031q">
 <style>
 /* 访问令牌蒙层。html 的 data-auth 属性由服务端写：1 已登录（蒙层从头到尾不存在）、0 未登录（首帧就是登录框）；
    pending = 正在用浏览器里记住的令牌自动登录（只显示 logo，不闪登录框）。没有这个属性 = 离线缓存的页面，按 pending 处理。 */
@@ -213,6 +213,7 @@ html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
       <button class="pill morebtn" data-act="more" title="更多" aria-label="更多" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg><span class="l">更多</span></button>
       <div class="pmore" hidden>
       <button class="pill" data-act="share" hidden title="分享链接"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2"/></svg><span class="l">分享</span></button>
+      <button class="pill" data-act="pmode" hidden title="播放模式"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h15M13 6l6 6-6 6"/></svg><span class="l">顺序播放</span></button>
       <button class="pill" data-act="rate" title="倍速"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a9 9 0 1 0 9 9M12 13l5-5"/></svg><span class="l">1x</span></button>
       <button class="pill" data-act="skipt" hidden title="自动跳过设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5l8.5 7L3 19zM12.5 5L21 12l-8.5 7z"/></svg><span class="l">自动跳过</span></button>
       <button class="pill danger" data-act="del" hidden title="删除这一集（移到回收站，Delete）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg><span class="l">删除</span></button>
@@ -252,8 +253,8 @@ html[data-auth="0"] #authMask form{opacity:1;visibility:visible}
 
 <script>if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));</script>
 <script src="vendor/hls.min.js"></script>
-<script src="acct.js?v=20261031p"></script>
-<script src="app.js?v=20261031p"></script>
-<script src="feed.js?v=20261031p"></script>
+<script src="acct.js?v=20261031q"></script>
+<script src="app.js?v=20261031q"></script>
+<script src="feed.js?v=20261031q"></script>
 </body>
 </html>

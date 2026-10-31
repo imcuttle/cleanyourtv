@@ -21,7 +21,7 @@ const path = require('path');
 const NAME_RE = /^[\p{L}\p{N}_-]{2,20}$/u;
 const MIN_PW = 6, MAX_PW = 64;
 const HIST_KEEP = 100, FAV_KEEP = 800, LFAV_KEEP = 800;
-const KV_KEYS = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches']);
+const KV_KEYS = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols']);   // favCols: 收藏合集 [{id,name,at}]; 哪部片在哪些合集里写在收藏条目自己的 cols 字段里
 const KV_MAX = 200e3;
 const ENTRY_MAX = 8e3;
 const SESSION_DAYS = 365;
@@ -244,7 +244,7 @@ module.exports = function createUsers({ file, allowRegister = true }) {
       const what = str(body.what);
       tx(() => {
         if (what === 'history' || what === 'all') run('DELETE FROM history WHERE user_id=?', me.id);
-        if (what === 'favs' || what === 'all') run('DELETE FROM favorites WHERE user_id=?', me.id);
+        if (what === 'favs' || what === 'all') { run('DELETE FROM favorites WHERE user_id=?', me.id); run("DELETE FROM kv WHERE user_id=? AND k='favCols'", me.id); }
         if (what === 'liveFavs' || what === 'all') run('DELETE FROM live_favs WHERE user_id=?', me.id);
         if (what === 'kv' || what === 'all') run('DELETE FROM kv WHERE user_id=?', me.id);
       });
