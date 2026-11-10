@@ -2823,22 +2823,51 @@ function dupCodeOf(base, adultCat) {
   const pm = /(?:^|[\s._\-[(])(?:CD|DISC|DISK|PART|PT|VOL)[\s._-]?(\d)|^[-_. ]?([AB])(?![A-Z0-9])|^[-_. ](\d)(?![A-Z0-9])|(上|下)\s*(?:集|部|段|篇)?$/.exec(rest);
   return { code, part: pm ? (pm[1] || pm[3] || (pm[4] ? (pm[4] === '上' ? '1' : '2') : (pm[2] === 'A' ? '1' : '2'))) : '' };
 }
+// ---- 豁免名单 (data/dups-skip.json): 记下的文件以后不再当重复, 「豁免名单」里随时可以恢复 ----
+const DUP_SKIP = path.join(DATA, 'dups-skip.json');
+const DUP_SKIP_MAX = 5000;
+let dupSkipCache = { at: -1, files: [] };
+function dupSkipAll() {
+  let st;
+  try { st = fs.statSync(DUP_SKIP); } catch { if (dupSkipCache.files.length) dupSkipCache = { at: -1, files: [] }; return dupSkipCache.files; }
+  if (st.mtimeMs === dupSkipCache.at) return dupSkipCache.files;
+  let files = [];
+  try {
+    const j = JSON.parse(fs.readFileSync(DUP_SKIP, 'utf8'));
+    files = (Array.isArray(j?.files) ? j.files : []).filter(x => x && typeof x.path === 'string' && x.path);
+  } catch {}
+  return (dupSkipCache = { at: st.mtimeMs, files }).files;
+}
+rpcHandlers.localSkip = ({ add, del, clear } = {}) => {
+  const snap = localIndex(), known = new Map();
+  for (const it of snap.items) for (const f of it.files) known.set(f.path, it);
+  let files = dupSkipAll().slice(), has = new Set(files.map(f => f.path));
+  if (clear) { files = []; has = new Set(); }
+  for (const p of (Array.isArray(del) ? del : []).map(str)) if (has.delete(p)) files = files.filter(f => f.path !== p);
+  let added = 0;
+  for (const p of (Array.isArray(add) ? add : []).map(str)) {
+    const it = p && known.get(p);
+    if (!it || has.has(p) || files.length >= DUP_SKIP_MAX) continue;   // 只收扫描索引里真有的文件, 别把闲杂路径记进来
+    has.add(p); files.push({ path: p, name: it.name || path.basename(p), at: Date.now() }); added++;
+  }
+  if (added || (Array.isArray(del) && del.length) || clear) writeJson(DUP_SKIP, { at: Date.now(), files });
+  return { files, added, n: files.length };
+};
 rpcHandlers.localDups = async ({ rule }) => {
   rule = ['size', 'mtime', 'ctime'].includes(rule) ? rule : 'size';
   const snap = localIndex(), files = [];
+  const skip = new Set(dupSkipAll().map(f => f.path));
   if (localCfg.enabled) {
     for (const it of snap.items) {
       const cat = snap.catById.get(it.cat);
       if (!cat || !localCatOk(cat)) continue;
-      for (const f of it.files) if (f.size >= DUP_MIN) files.push({ ...f, item: it, cat, adult: catAdult(cat) });
+      for (const f of it.files) if (f.size >= DUP_MIN && !skip.has(f.path)) files.push({ ...f, item: it, cat, adult: catAdult(cat) });
     }
   }
-  const perDir = new Map();
-  for (const f of files) perDir.set(path.dirname(f.path), (perDir.get(path.dirname(f.path)) || 0) + 1);
   const byCode = new Map(), rest = [];
   for (const f of files) {
-    let c = dupCodeOf(path.basename(f.path, path.extname(f.path)), f.adult);
-    if (!c && perDir.get(path.dirname(f.path)) === 1) c = dupCodeOf(path.basename(path.dirname(f.path)), f.adult);   // 一个文件夹只放这一部: 文件夹名是番号也算
+    // 番号只看文件名本身: 文件夹名不参与 (文件夹常是 "A盘" / "合集" / 站点名, 拿它当番号会张冠李戴)
+    const c = dupCodeOf(path.basename(f.path, path.extname(f.path)), f.adult);
     if (!c) { rest.push(f); continue; }
     f.code = c.code;
     const k = c.code + (c.part ? '#' + c.part : '');
@@ -2882,7 +2911,7 @@ rpcHandlers.localDups = async ({ rule }) => {
     list.forEach((f, i) => { f.keep = i === 0; });
     return { kind: g.kind, code: g.code || '', part: g.part || '', name: list[0].itemName, pic: list[0].pic, extra: list.slice(1).reduce((n, f) => n + f.size, 0), files: list };
   }).sort((a, b) => b.extra - a.extra);
-  return { rule, groups: out, extraFiles: out.reduce((n, g) => n + g.files.length - 1, 0), extraBytes: out.reduce((n, g) => n + g.extra, 0), at: Date.now() };
+  return { rule, groups: out, extraFiles: out.reduce((n, g) => n + g.files.length - 1, 0), extraBytes: out.reduce((n, g) => n + g.extra, 0), skip: skip.size, at: Date.now() };
 };
 if (IS_MEDIA) {
   setTimeout(() => { if (localCfg.enabled && localCfg.dirs.length) scanLocal(); }, 1500).unref();
@@ -3589,6 +3618,11 @@ async function api(route, q, res, req) {
   if (route === 'local/dups' && !write) {
     if (!adminAuthed(req)) return send(res, 403, { error: '重复视频带完整文件路径，只有管理员能看', admin: true });
     return send(res, 200, await rpc('localDups', { rule: q.get('rule') || 'size' }, 300000));
+  }
+  // 重复视频豁免名单: 记下的文件以后不再算重复 (可以恢复)。GET 看名单, POST {add:[]|del:[]|clear:true} 改
+  if (route === 'local/skip') {
+    if (!adminAuthed(req)) return send(res, 403, { error: '豁免名单只有管理员能改', admin: true });
+    return send(res, 200, await rpc('localSkip', write ? await readBody(req) : {}, 20000));
   }
   // Open a local file in this computer's default player / show it in the file manager. Only for a browser running
   // on this same machine (see isLoopback), and only for files in the scan index that the safety level lets through.

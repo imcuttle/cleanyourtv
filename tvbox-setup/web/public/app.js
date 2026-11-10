@@ -1240,13 +1240,14 @@ function selBarSet(on, o = {}) {
   el.querySelector('.sa').textContent = o.total && o.count >= o.total ? '取消全选' : '全选';
   el.querySelector('.sn').textContent = o.count ? `已选 ${o.count} 项` : '请选择';
   const d = el.querySelector('.sd'); d.textContent = o.delLabel || '删除'; d.disabled = !o.count;
-  const c = el.querySelector('.sc'); c.hidden = !o.onCol; c.disabled = !o.count;
+  const c = el.querySelector('.sc'); c.hidden = !o.onCol; c.disabled = !o.count; c.textContent = o.colLabel || '合集';
   // 大屏不用底部栏: 同样的操作在顶栏右侧 (全选 / 合集 / 删除 / 完成), 标题里写着已选几项
   const t = $('.cathead .seltools');
   if (t) {
     const all = $('[data-st=all]', t), col = $('[data-st=col]', t), del = $('[data-st=del]', t);
     all.textContent = o.total && o.count >= o.total ? '取消全选' : '全选'; all.onclick = () => o.onAll();
     col.hidden = !o.onCol; col.disabled = !o.count; col.onclick = () => o.onCol?.();
+    col.textContent = o.colLabel || '合集';
     del.textContent = o.delLabel || '删除'; del.disabled = !o.count; del.onclick = () => o.onDel();
   }
 }
@@ -2071,11 +2072,14 @@ const renderHistory = () => renderCollection('hist');
 const renderFavorites = id => renderCollection('fav', id ? decodeURIComponent(id) : '');
 
 // ---------- 重复视频 (本地媒体扫描之后检测; 管理员) ----------
-// 同一部的判断: 成人按番号 (分段 CD1 / part2 / -A 不算重复), 其他按「大小 + 头中尾指纹」相同。排版同收藏页的卡片网格。
-// 每组按规则留一份 (最大 / 最近修改 / 最近创建), 一键把其余的移到服务器的回收站。点卡片看每一份的完整路径。
+// 同一部的判断: 成人按文件名里的番号 (只看 basename, 不看文件夹名; 分段 CD1 / part2 / -A 不算重复), 其他按「大小 + 内容指纹」相同。
+// 每组按规则留一份 (最大 / 最近修改 / 最近创建); 可以一键删除全部, 也可以多选后只删 / 只豁免选中的组。
+// 豁免的组服务端记账 (data/dups-skip.json), 以后不再提示, 「已豁免」里随时恢复。
 const DUP_RULES = [['size', '最大'], ['mtime', '最近修改'], ['ctime', '最近创建']];
 async function renderDups() {
-  let rule = DUP_RULES.some(r => r[0] === localStorage.dupRule) ? localStorage.dupRule : 'size', groups = [];
+  let rule = DUP_RULES.some(r => r[0] === localStorage.dupRule) ? localStorage.dupRule : 'size', groups = [], skipN = 0;
+  let selMode = false;                 // 多选模式
+  const sel = new Set();               // 选中的组 (g.key = 组里所有文件 id 排序后拼起来)
   const ruleName = () => DUP_RULES.find(r => r[0] === rule)[1];
   const fmtT = t => t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '—';
   const kindOf = g => g.kind === 'code' ? `番号 ${g.code}${g.part ? ' · 第' + g.part + '段' : ''}` : '内容相同';
@@ -2091,26 +2095,98 @@ async function renderDups() {
   const head = (hact = '') => `<div class="pagehead cathead">${BACK_BTN}<h1>重复视频</h1>${hact}</div>`;
   const shell = (body, hact) => { view.innerHTML = `<div class="page coll dups">${head(hact)}${body}</div>`; };
   const extras = () => groups.flatMap(g => g.files.filter(f => !f.keep));
+  const skipBtn = () => skipN ? ` <button type="button" class="dupskip" data-dup="skip">已豁免 ${skipN}</button>` : '';
   const paint = () => {
     rank();
+    view.classList.toggle('selmode', selMode);
+    for (const g of groups) g.key = g.files.map(f => f.id).sort().join(',');
     const ex = extras(), bytes = groups.reduce((n, g) => n + g.extra, 0);
     // 触屏小屏: 右上角放「一键删除」(图标, 跟着页头吸顶, 滚多远都点得到), 重新检测交给全局下拉刷新;
-    // 桌面 / 窄窗口: 右上角是「重新检测」, 一键删除在下面工具栏里带文字
+    // 桌面 / 窄窗口: 右上角是「重新检测」, 一键删除在下面工具栏里带文字。多选在两种屏幕上都在右上角。
     const small = smallScreen.matches && !fineCursor;
-    const hRetry = `<div class="hact"><button class="small ibs" data-dup="re" title="重新检测" aria-label="重新检测">${IC.retry}</button></div>`;
-    const hDel = `<div class="hact"><button type="button" class="small ibs dupl" data-dup="go" title="一键删除重复" aria-label="一键删除重复">${IC.trash}</button></div>`;
-    if (!groups.length) return shell('<p class="empty hempty">没有发现重复视频。</p><p class="lan csum" style="text-align:center">成人资源按番号判同一部，其他视频只按大小和内容指纹判，内容不同不会算重复；小于 1 MB 的文件不比较。</p>', small ? '' : hRetry);
-    shell(`<div class="dupbar">
+    const hRetry = `<button class="small ibs" data-dup="re" title="重新检测" aria-label="重新检测">${IC.retry}</button>`;
+    const hDel = `<button type="button" class="small ibs dupl" data-dup="go" title="一键删除重复" aria-label="一键删除重复">${IC.trash}</button>`;
+    if (!groups.length) {
+      selMode = false; sel.clear(); selBarSet(false);
+      return shell(`<p class="empty hempty">没有发现重复视频。</p>
+        <p class="lan csum" style="text-align:center">成人资源按番号判同一部（只看文件名里的番号），其他视频只按大小和内容指纹判，内容不同不会算重复；小于 1 MB 的文件不比较。</p>
+        ${skipN ? `<p class="lan csum" style="text-align:center"><button type="button" class="dupskip" data-dup="skip">已豁免 ${skipN} 个文件 · 查看 / 恢复</button></p>` : ''}`,
+        small ? '' : `<div class="hact">${hRetry}</div>`);
+    }
+    const hact = selMode
+      ? `<div class="hact">${selTools}<button type="button" class="selok" data-sel="done">完成</button></div>`
+      : `<div class="hact"><button type="button" class="small ibs" data-sel="on" title="多选" aria-label="多选">${IC.sel}</button>${small ? hDel : hRetry}</div>`;
+    shell(`${selMode ? '' : `<div class="dupbar">
         <div class="duprule"><span class="lan">保留</span>${segHtml(DUP_RULES.map(([k, t]) => [k, t]), { attr: 'data-duprule', cur: rule })}</div>
-        ${small ? '' : `<button type="button" class="btn red dupgo" data-dup="go">${IC.trash}<span>一键删除重复</span></button>`}</div>
-      <p class="lan csum dupinfo">${groups.length} 组重复 · 多余 ${ex.length} 个文件 · 可释放约 ${fmtSize(bytes)} · 每组只保留${ruleName()}的那一份</p>
-      <div class="grid">${groups.map((g, i) => `<div class="dcard" role="button" data-g="${i}">
-        <div class="img${g.pic ? '' : ' noimg'}">${g.pic ? posterImg(g.pic) : ''}<span class="ph">${esc(g.name)}</span><span class="dup" title="${esc(kindOf(g))}">${g.files.length} 份</span></div>
-        <div class="name">${esc(g.name)}</div><div class="sub">${esc(kindOf(g))} · 多 ${fmtSize(g.extra)}</div></div>`).join('')}</div>`, small ? hDel : hRetry);
+        ${small ? '' : `<button type="button" class="btn red dupgo" data-dup="go">${IC.trash}<span>一键删除重复</span></button>`}</div>`}
+      <p class="lan csum dupinfo">${groups.length} 组重复 · 多余 ${ex.length} 个文件 · 可释放约 ${fmtSize(bytes)} · 每组只保留${ruleName()}的那一份${skipBtn()}</p>
+      <div class="grid">${groups.map((g, i) => `<div class="dcard" role="button" data-g="${i}" data-k="${esc(g.key)}">
+        <div class="img${g.pic ? '' : ' noimg'}">${g.pic ? posterImg(g.pic) : ''}<span class="ph">${esc(g.name)}</span><span class="dup" title="${esc(kindOf(g))}">${g.files.length} 份</span>${selMode ? '<i class="selchk"></i>' : ''}</div>
+        <div class="name">${esc(g.name)}</div><div class="sub">${esc(kindOf(g))} · 多 ${fmtSize(g.extra)}</div></div>`).join('')}</div>`, hact);
+    syncSel();
+  };
+  // 多选: 勾选组 → 底部栏 (手机) / 顶栏右侧 (大屏) 上「删除(N)」「豁免」
+  const syncSel = () => {
+    for (const k of [...sel]) if (!groups.some(g => g.key === k)) sel.delete(k);
+    $$('.dcard', view).forEach(c => c.classList.toggle('picked', sel.has(c.dataset.k)));
+    const h = $('.cathead h1', view); if (h) h.textContent = selMode && sel.size ? `已选择 ${sel.size} 组` : '重复视频';
+    if (!selMode) return selBarSet(false);
+    const exp = groups.filter(g => sel.has(g.key)).flatMap(g => g.files.filter(f => !f.keep));
+    selBarSet(true, {
+      count: sel.size, total: groups.length,
+      delLabel: exp.length ? `删除(${exp.length})` : '删除', colLabel: '豁免',
+      onAll: () => { if (sel.size >= groups.length) sel.clear(); else for (const g of groups) sel.add(g.key); syncSel(); },
+      onCol: () => exemptSel(),
+      onDel: () => delSel(),
+    });
+  };
+  const delSel = async () => {
+    const gs = groups.filter(g => sel.has(g.key)), ex = gs.flatMap(g => g.files.filter(f => !f.keep));
+    if (!ex.length) return;
+    const bytes = ex.reduce((n, f) => n + f.size, 0);
+    if (!await trashLocal(ex.map(f => f.id), `删除选中的 ${gs.length} 组里多余的 ${ex.length} 个文件（约 ${fmtSize(bytes)}），每组只保留${ruleName()}的那一份。`)) return;
+    if (trashLocal.last?.bad) { sel.clear(); return load(); }     // 有失败的: 重新检测, 看还剩什么
+    removed(ex, true); sel.clear(); paint();
+  };
+  // 豁免 = 这几组以后不再算重复 (记在服务端的名单里), 不影响文件本身
+  const exemptSel = async () => {
+    const gs = groups.filter(g => sel.has(g.key));
+    const paths = [...new Set(gs.flatMap(g => g.files.map(f => f.path)))];
+    if (!paths.length) return;
+    try { const j = await req('POST', '/api/local/skip', { add: paths }); skipN = j.n || skipN + paths.length; }
+    catch (e) { return toast(e.message); }
+    toast(`已豁免 ${gs.length} 组，以后不再提示`);
+    sel.clear(); selMode = false; await load();
+  };
+  const openSkipPop = async () => {
+    let list;
+    try { list = (await get('/api/local/skip')).files || []; } catch (e) { return toast(e.message); }
+    let dirty = false;
+    const body = () => `<p class="dd-sum">豁免的文件不再算重复，文件本身不动。恢复之后，下次检测会重新出现在列表里。</p>`
+      + (list.length ? list.map((s, i) => `<div class="dd-file sk-item" data-i="${i}">
+          <div class="dd-top"><b class="dd-name">${esc(s.name || s.path.split('/').pop())}</b><span class="dd-meta">${esc(fmtT(s.at))}</span></div>
+          <div class="dd-path">${esc(s.path)}</div>
+          <div class="dd-ops"><button type="button" data-op="back">恢复</button></div></div>`).join('')
+        : '<p class="empty hempty">还没有豁免任何文件。</p>');
+    const p = Pop.open({ title: '豁免名单', cls: 'dupdetail dupskip', ...popAt(), body: body(),
+      foot: `<div class="fcfoot"><button type="button" class="skall" data-a="all">全部恢复</button><button type="button" class="fcok" data-a="ok">完成</button></div>`,
+      onClick: async (e, close) => {
+        if (e.target.closest('[data-a=ok]')) return close();
+        const save = async b => {
+          try { const j = await req('POST', '/api/local/skip', b); list = j.files || []; skipN = list.length; dirty = true; }
+          catch (err) { return toast(err.message); }
+          p.$body.innerHTML = body();
+          const all = $('.skall', p.el); if (all) all.disabled = !list.length;
+        };
+        if (e.target.closest('[data-a=all]')) return save({ clear: true });
+        const btn = e.target.closest('[data-op=back]'), row = e.target.closest('.sk-item');
+        if (btn && row && list[+row.dataset.i]) await save({ del: [list[+row.dataset.i].path] });
+      },
+      onClose: () => { if (dirty) load(); } });
   };
   const load = async () => {
-    shell(spinner);
-    try { groups = (await get('/api/local/dups?rule=size')).groups; }
+    shell(spinner); selBarSet(false);
+    try { const j = await get('/api/local/dups?rule=size'); groups = j.groups; skipN = j.skip || 0; }
     catch (e) { if (isAbort(e)) return; shell(`<div class="err">检测失败：${esc(e.message)}${/管理员/.test(e.message) ? '。先去 <a href="#/settings"><u>设置</u></a> 用管理员令牌登录。' : ''}</div>`); return; }
     paint();
   };
@@ -2131,7 +2207,7 @@ async function renderDups() {
           <div class="dd-top"><b class="dd-tag">${f.keep ? '保留' : '将删除'}</b><span class="dd-meta">${fmtSize(f.size)}</span></div>
           <div class="dd-path">${esc(f.path)}</div>
           <div class="dd-meta">修改 ${esc(fmtT(f.mtime))} · 创建 ${esc(fmtT(f.ctime))} · 分类 ${esc(f.cat)}</div>
-          <div class="dd-ops"><button type="button" data-op="open">影片详情</button><button type="button" data-op="del" class="danger">删除这份</button></div></div>`).join('');
+          <div class="dd-ops"><button type="button" data-op="open">影片详情</button><button type="button" data-op="skip">豁免这组</button><button type="button" data-op="del" class="danger">删除这份</button></div></div>`).join('');
     const p = Pop.open({ title: g.name, cls: 'dupdetail', ...popAt(), body: body(),
       foot: '<div class="fcfoot"><span class="fchint">路径可长按 / 选中复制</span><button type="button" class="fcok" data-a="ok">完成</button></div>',
       onClick: async (e, close) => {
@@ -2140,6 +2216,13 @@ async function renderDups() {
         if (!op || !row) return;
         const f = g.files[+row.dataset.i];
         if (op.dataset.op === 'open') { close(); openDetail(f.src, f.itemId); return; }
+        if (op.dataset.op === 'skip') {           // 整组豁免: 文件不动, 只是以后不再当重复
+          close();
+          const paths = [...new Set(g.files.map(x => x.path))];
+          try { const j = await req('POST', '/api/local/skip', { add: paths }); skipN = j.n || skipN + paths.length; }
+          catch (err) { return toast(err.message); }
+          toast('已豁免这组，以后不再提示'); await load(); return;
+        }
         close();
         if (!await trashLocal([f.id], `删除这份${f.keep ? '（当前标为「保留」的一份）' : '重复文件'}：\n${f.path}`)) return;
         removed([f], !trashLocal.last?.bad);
@@ -2148,10 +2231,13 @@ async function renderDups() {
     return p;
   };
   view.onclick = async e => {
+    const sb = e.target.closest('[data-sel]');
+    if (sb) { selMode = sb.dataset.sel === 'on'; sel.clear(); paint(); return; }
     const seg = e.target.closest('[data-duprule]');
     if (seg) { rule = seg.dataset.duprule; localStorage.dupRule = rule; paint(); return; }
     const act = e.target.closest('[data-dup]')?.dataset.dup;
     if (act === 're') return load();
+    if (act === 'skip') return openSkipPop();
     if (act === 'go') {
       const ex = extras(); if (!ex.length) return;
       const bytes = groups.reduce((n, g) => n + g.extra, 0);
@@ -2162,7 +2248,10 @@ async function renderDups() {
       return;
     }
     const c = e.target.closest('.dcard');
-    if (c) { e.preventDefault(); e.stopPropagation(); openDetailPop(groups[+c.dataset.g]); }
+    if (!c) return;
+    e.preventDefault(); e.stopPropagation();
+    if (selMode) { const k = c.dataset.k; if (sel.has(k)) sel.delete(k); else sel.add(k); syncSel(); return; }
+    openDetailPop(groups[+c.dataset.g]);
   };
   await load();
 }

@@ -2285,6 +2285,19 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .dups .dupinfo { margin: -2px 0 14px; font-size: 13px; line-height: 1.6; }
 /* 小屏的一键删除在页头右上角: 红色图标, 和其他页头的白色图标区分开 (跟着页头吸顶, 滚多远都点得到) */
 .dups .cathead .hact .ibs.dupl { color: var(--red); }
+/* 「已豁免 N」: 跟在信息行后面的小文字按钮 */
+.dupskip { border: 0; background: none; padding: 0; color: var(--muted); font: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.dupskip:hover { color: #fff; }
+/* 多选: 组卡片左上角勾选圈 (收藏页那个在右上角, 这里右上角被「N 份」占着) */
+.selmode .dcard .selchk { display: block; position: absolute; z-index: 3; left: 6px; top: 6px; width: 22px; height: 22px; border-radius: 50%; border: 2px solid #ffffffb3; background: #0006; box-shadow: 0 1px 4px #0008; }
+.selmode .dcard.picked .selchk { background: var(--red) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 12.5l4 4 8-9'/%3E%3C/svg%3E") center/16px no-repeat; border-color: var(--red); }
+.selmode .dcard.picked .img { outline: 2px solid var(--red); outline-offset: -2px; }
+/* 豁免名单浮窗 */
+.pop.dupskip .dd-name { font-size: 13.5px; color: #eee; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pop.dupskip .dd-ops { justify-content: flex-end; }
+.pop.dupskip .dd-ops button { flex: none; padding: 0 22px; }
+.fcfoot .skall { flex: none; padding: 0 20px; background: #ffffff14; color: #fff; }
+.fcfoot .skall:disabled { opacity: .45; }
 /* 小屏: 「保留」规则一行, 删除按钮独占一行铺满 (好按), 数量那行跟在下面; 手机上规则按钮收窄, 三个还能挤在一行 */
 @media (max-width: 760px) {
   .dups .dupbar { flex-direction: column; align-items: stretch; gap: 10px; }
