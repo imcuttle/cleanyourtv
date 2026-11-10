@@ -1122,7 +1122,7 @@ const keepable = k => k.startsWith('#/|') || k.startsWith('#/charts|') || k.star
 const tabLast = new Map();
 const noteTab = h => { const m = /^#\/(charts|live)(\/|$)/.exec((h || '').split('?')[0]); if (m) tabLast.set(m[1], h); };
 const BACK_BTN = '<button type="button" class="cback" aria-label="返回"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>返回</button>';
-const isSubPage = p => p === 'cat' || p === 'person' || p === 'history' || p === 'favorites' || p === 'downloads';
+const isSubPage = p => p === 'cat' || p === 'person' || p === 'history' || p === 'favorites' || p === 'downloads' || p === 'dups';
 // 榜单里点进去的单个榜 (精选榜单的一个 / 某个类型 / 某年的榜) 也是子页面; 「类型排行」「年度榜」两个落地页本身不是 (它们是榜单页里的分段)
 const chartDetail = h => { const [, pg, tab, ...p] = (h || '').split('?')[0].split('/'); return pg === 'charts' && (tab === 'c' || ((tab === 'genre' || tab === 'year') && p.length > 0)); };
 const chartLanding = h => { const [, pg, tab, ...p] = (h || '').split('?')[0].split('/'); return pg === 'charts' && (tab === 'genre' || tab === 'year') && p.length === 0; };
@@ -1464,7 +1464,7 @@ async function route(opts = {}) {
   const H = opts.hash || location.hash;
   let [, page, a, b, c] = H.split('?')[0].split('/');
   if (PV?.kind === 'live' && page !== 'live' && page !== 'tv') { history.replaceState(null, '', '#/live'); page = 'live'; }
-  else if (PV?.kind === 'vod' && ['charts', 'live', 'tv', 'favorites', 'downloads', 'settings', 'me', 'history'].includes(page)) { history.replaceState(null, '', '#/'); page = ''; }
+  else if (PV?.kind === 'vod' && ['charts', 'live', 'tv', 'favorites', 'downloads', 'dups', 'settings', 'me', 'history'].includes(page)) { history.replaceState(null, '', '#/'); page = ''; }
   if (page === 'find') {
     history.replaceState(null, '', '#/');
     const name = decodeURIComponent(a || '');
@@ -1477,7 +1477,7 @@ async function route(opts = {}) {
   if (sub) { const sk = ensureSk(); if (!subInfo.has(sk)) setSubInfo(sk, { below: pageHash }); }
   if (sub && !prevSub) {
     const pp = (pageHash || '#/').split('?')[0].split('/')[1] || '';
-    catOrigin = page === 'favorites' || page === 'downloads' ? 'me' : ['charts', 'live', 'favorites', 'downloads', 'settings', 'search'].includes(pp) ? pp : !pageHash && page === 'charts' ? 'charts' : 'home';   // 收藏 / 下载是「我的」里的页面, 底部高亮「我的」; 其余: 从哪个 tab 点进来的 (首页点进来 pp 是空的 → 首页; 只有刷新直接落在榜单子页时才默认榜单)
+    catOrigin = page === 'favorites' || page === 'downloads' || page === 'dups' ? 'me' : ['charts', 'live', 'favorites', 'downloads', 'settings', 'search'].includes(pp) ? pp : !pageHash && page === 'charts' ? 'charts' : 'home';   // 收藏 / 下载是「我的」里的页面, 底部高亮「我的」; 其余: 从哪个 tab 点进来的 (首页点进来 pp 是空的 → 首页; 只有刷新直接落在榜单子页时才默认榜单)
     if (smallScreen.matches && !fineCursor) { view.classList.add('subin'); showUnder(); setTimeout(() => { view.classList.remove('subin'); hideUnder(); }, 380); }
   }
   document.body.dataset.sub = sub ? '1' : '';
@@ -1519,13 +1519,14 @@ async function route(opts = {}) {
   } else {
     view.scrollTo(0, 0);
     // Pages that wait for the network before drawing: show the title and a spinner right away, so the tap never looks dead.
-    const early = { settings: '设置', downloads: '下载', charts: '榜单' }[page];
+    const early = { settings: '设置', downloads: '下载', charts: '榜单', dups: '重复视频' }[page];
     if (early) view.innerHTML = `<div class="page"><h1>${early}</h1>${spinner}</div>`;
   }
   try {
     if (page === 'live') return await renderLive();
     if (page === 'settings') { settingsGoto = a || ''; return await renderSettings(); }
     if (page === 'downloads') return await renderDownloads();
+    if (page === 'dups') return await renderDups();
     if (page === 'charts') return await renderCharts();
     if (!state.sites.length) return renderNoSites();
     if (page === 'history') return renderHistory();
@@ -2068,6 +2069,99 @@ function renderCollection(kind, focusId = '') {
 }
 const renderHistory = () => renderCollection('hist');
 const renderFavorites = id => renderCollection('fav', id ? decodeURIComponent(id) : '');
+
+// ---------- 重复视频 (本地媒体扫描之后检测; 管理员) ----------
+// 同一部的判断: 成人按番号 (分段 CD1 / part2 / -A 不算重复), 其他按「大小 + 头中尾指纹」相同。排版同收藏页的卡片网格。
+// 每组按规则留一份 (最大 / 最近修改 / 最近创建), 一键把其余的移到服务器的回收站。点卡片看每一份的完整路径。
+const DUP_RULES = [['size', '最大'], ['mtime', '最近修改'], ['ctime', '最近创建']];
+async function renderDups() {
+  let rule = DUP_RULES.some(r => r[0] === localStorage.dupRule) ? localStorage.dupRule : 'size', groups = [];
+  const ruleName = () => DUP_RULES.find(r => r[0] === rule)[1];
+  const fmtT = t => t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '—';
+  const kindOf = g => g.kind === 'code' ? `番号 ${g.code}${g.part ? ' · 第' + g.part + '段' : ''}` : '内容相同';
+  const rank = () => {       // 按当前规则在每组里挑出要保留的一份 (服务端同一套比较)
+    for (const g of groups) {
+      g.files.sort((a, b) => (b[rule] - a[rule]) || (b.size - a.size) || (b.mtime - a.mtime) || (a.path.length - b.path.length) || (a.path < b.path ? -1 : 1));
+      g.files.forEach((f, i) => { f.keep = i === 0; });
+      g.extra = g.files.slice(1).reduce((n, f) => n + f.size, 0);
+      g.name = g.files[0].itemName; g.pic = g.files[0].pic;
+    }
+    groups.sort((a, b) => b.extra - a.extra);
+  };
+  const head = (hact = '') => `<div class="pagehead cathead">${BACK_BTN}<h1>重复视频</h1>${hact}</div>`;
+  const shell = (body, hact) => { view.innerHTML = `<div class="page coll dups">${head(hact)}${body}</div>`; };
+  const extras = () => groups.flatMap(g => g.files.filter(f => !f.keep));
+  const paint = () => {
+    rank();
+    const ex = extras(), bytes = groups.reduce((n, g) => n + g.extra, 0);
+    const hact = `<div class="hact"><button class="small ibs" data-dup="re" title="重新检测" aria-label="重新检测">${IC.retry}</button></div>`;
+    if (!groups.length) return shell('<p class="empty hempty">没有发现重复视频。</p><p class="lan csum" style="text-align:center">成人资源按番号判断，其他按大小和内容指纹判断；小于 1 MB 的文件不比较。</p>', hact);
+    shell(`<div class="dupbar">
+        <div class="duprule"><span class="lan">保留</span>${segHtml(DUP_RULES.map(([k, t]) => [k, t]), { attr: 'data-duprule', cur: rule })}</div>
+        <button type="button" class="btn red dupgo" data-dup="go">${IC.trash}<span>一键删除重复（${ex.length} 个 · 约 ${fmtSize(bytes)}）</span></button></div>
+      <p class="lan csum">${groups.length} 组重复 · 每组只保留${ruleName()}的那一份，其余 ${ex.length} 个文件移到回收站</p>
+      <div class="grid">${groups.map((g, i) => `<div class="dcard" role="button" data-g="${i}">
+        <div class="img${g.pic ? '' : ' noimg'}">${g.pic ? posterImg(g.pic) : ''}<span class="ph">${esc(g.name)}</span><span class="dup" title="${esc(kindOf(g))}">${g.files.length} 份</span></div>
+        <div class="name">${esc(g.name)}</div><div class="sub">${esc(kindOf(g))} · 多 ${fmtSize(g.extra)}</div></div>`).join('')}</div>`, hact);
+  };
+  const load = async () => {
+    shell(spinner);
+    try { groups = (await get('/api/local/dups?rule=size')).groups; }
+    catch (e) { if (isAbort(e)) return; shell(`<div class="err">检测失败：${esc(e.message)}${/管理员/.test(e.message) ? '。先去 <a href="#/settings"><u>设置</u></a> 用管理员令牌登录。' : ''}</div>`); return; }
+    paint();
+  };
+  // 删掉以后: 从列表里去掉; 一部影片的文件全没了, 它的观看记录 / 收藏也一起清掉
+  const removed = (files, allOk) => {
+    const gone = new Set(files.map(f => f.id));
+    if (allOk) {
+      const n = new Map();
+      for (const f of files) n.set(f.itemId, { f, c: (n.get(f.itemId)?.c || 0) + 1 });
+      for (const { f, c } of n.values()) if (c >= f.itemFiles) localGone({ site: f.src, id: f.itemId });
+    }
+    for (const g of groups) g.files = g.files.filter(f => !gone.has(f.id));
+    groups = groups.filter(g => g.files.length > 1);
+  };
+  const openDetailPop = g => {
+    const body = () => `<p class="dd-sum">${esc(kindOf(g))} · 共 ${g.files.length} 份 · 保留${esc(ruleName())}的一份，其余 ${g.files.length - 1} 份多出 ${fmtSize(g.extra)}</p>`
+      + g.files.map((f, i) => `<div class="dd-file ${f.keep ? 'keep' : 'del'}" data-i="${i}">
+          <div class="dd-top"><b class="dd-tag">${f.keep ? '保留' : '将删除'}</b><span class="dd-meta">${fmtSize(f.size)}</span></div>
+          <div class="dd-path">${esc(f.path)}</div>
+          <div class="dd-meta">修改 ${esc(fmtT(f.mtime))} · 创建 ${esc(fmtT(f.ctime))} · 分类 ${esc(f.cat)}</div>
+          <div class="dd-ops"><button type="button" data-op="open">影片详情</button><button type="button" data-op="del" class="danger">删除这份</button></div></div>`).join('');
+    const p = Pop.open({ title: g.name, cls: 'dupdetail', ...popAt(), body: body(),
+      foot: '<div class="fcfoot"><span class="fchint">路径可长按 / 选中复制</span><button type="button" class="fcok" data-a="ok">完成</button></div>',
+      onClick: async (e, close) => {
+        if (e.target.closest('[data-a=ok]')) return close();
+        const op = e.target.closest('[data-op]'), row = e.target.closest('.dd-file');
+        if (!op || !row) return;
+        const f = g.files[+row.dataset.i];
+        if (op.dataset.op === 'open') { close(); openDetail(f.src, f.itemId); return; }
+        close();
+        if (!await trashLocal([f.id], `删除这份${f.keep ? '（当前标为「保留」的一份）' : '重复文件'}：\n${f.path}`)) return;
+        removed([f], !trashLocal.last?.bad);
+        paint();
+      } });
+    return p;
+  };
+  view.onclick = async e => {
+    const seg = e.target.closest('[data-duprule]');
+    if (seg) { rule = seg.dataset.duprule; localStorage.dupRule = rule; paint(); return; }
+    const act = e.target.closest('[data-dup]')?.dataset.dup;
+    if (act === 're') return load();
+    if (act === 'go') {
+      const ex = extras(); if (!ex.length) return;
+      const bytes = groups.reduce((n, g) => n + g.extra, 0);
+      if (!await trashLocal(ex.map(f => f.id), `一键删除重复视频：${groups.length} 组里多余的 ${ex.length} 个文件（约 ${fmtSize(bytes)}），每组只保留${ruleName()}的那一份。`)) return;
+      const ok = !trashLocal.last?.bad;
+      if (ok) removed(ex, true); else return load();      // 有失败的: 重新检测, 看还剩什么
+      paint();
+      return;
+    }
+    const c = e.target.closest('.dcard');
+    if (c) { e.preventDefault(); e.stopPropagation(); openDetailPop(groups[+c.dataset.g]); }
+  };
+  await load();
+}
 
 // ---------- people (演员 / 导演) ----------
 async function renderPerson(role, name, scopeKey = '') {
@@ -2926,14 +3020,12 @@ async function openDetail(site, id, autoplay = false, replace = false, quiet = f
       const t = $('#dbtag', m); if (!t || !r.id) return;
       t.textContent = r.rate ? '豆瓣 ' + r.rate : '豆瓣 暂无评分'; t.href = `https://movie.douban.com/subject/${r.id}/`; t.hidden = false;
     };
-    // 成人条目: javdb 优先补全标题/封面/演员/评分，匹配不到或失败再走豆瓣兜底。
+    // 成人条目: javdb 优先补全封面/演员/评分 (标题保持源里的原样，不换成 javdb 的番号标题)，匹配不到或失败再走豆瓣兜底。
     if (isJav(d)) {
       const code = javCode(d.name);
       if (code) javMeta(code).then(r => {
         if (!m.isConnected) return;
         if (!r.found) { dbRate(d.name, d.year).then(doubanDetail); return; }
-        const h1 = $('.info h1', m);
-        if (h1 && r.title && r.title !== d.name) h1.textContent = r.title;
         const p = $('.top .poster', m);
         if (p && r.cover && javCoverWanted(d)) p.style.cssText = bgLayers(d.pic, r.cover, 'l');
         if (r.actors?.length) {
@@ -4276,23 +4368,28 @@ function adminCheck(force) {
 const fileIdOf = url => (/\/media\/[fh]\/([0-9a-f]+)/.exec(url || '') || [])[1] || '';
 async function trashLocal(ids, what) {
   ids = ids.filter(Boolean);
+  trashLocal.last = null;    // 这一次的结果 { trashed, bad }; 取消 / 出错时是 null
   if (!ids.length) { toast('找不到这个文件'); return false; }
   if (!confirm(`${what}\n\n文件会移到回收站（连同同名的 nfo / 字幕 / 海报），可以从回收站找回。`)) return false;
   const post = async body => { const busy = trashBusy(body.permanent ? '正在永久删除…' : '正在移到回收站…'); try { return await req('POST', '/api/local/trash', body); } finally { busy.done(); } };
   const fail = e => { if (/管理员/.test(e.message)) ADMIN.on = false; const t = toast(e.message, true); t.onclick = () => t.remove(); setTimeout(() => t.remove(), 12000); };
+  // 服务端一次最多收 500 个: 分批发
+  const chunks = (list, fn) => (async () => { const out = { trashed: 0, failed: 0, noBinIds: [] }; for (let i = 0; i < list.length; i += 500) { const r = await fn(list.slice(i, i + 500)); out.trashed += r.trashed; out.failed += r.failed; out.noBinIds.push(...(r.noBinIds || [])); } return out; })();
   let r;
-  try { r = await post({ ids }); } catch (e) { fail(e); return false; }
+  try { r = await chunks(ids, part => post({ ids: part })); } catch (e) { fail(e); return false; }
   apiMemo.clear(); tabKeep.clear();
   let trashed = r.trashed, bad = r.failed;
   // 回收站放不下 (文件太大 / 这个盘没有回收站): 第二次确认, 同意了才永久删除, 不可恢复
   if (r.noBinIds?.length) {
     const n = r.noBinIds.length;
     if (confirm(`回收站放不下${n > 1 ? `这 ${n} 个文件` : '这个文件'}（文件太大，或它所在的磁盘没有回收站）。\n\n要直接永久删除吗？\n⚠️ 永久删除后无法恢复！`)) {
-      try { const r2 = await post({ ids: r.noBinIds, permanent: true }); trashed += r2.trashed; bad += r2.failed; apiMemo.clear(); tabKeep.clear(); toast(bad ? `已删除 ${trashed} 个，${bad} 个失败` : '已永久删除'); }
+      try { const r2 = await chunks(r.noBinIds, part => post({ ids: part, permanent: true })); trashed += r2.trashed; bad += r2.failed; apiMemo.clear(); tabKeep.clear(); toast(bad ? `已删除 ${trashed} 个，${bad} 个失败` : '已永久删除'); }
       catch (e) { fail(e); }
     } else toast(trashed ? `已移到回收站 ${trashed} 个，其余保留` : '已取消，文件保留');
+    trashLocal.last = { trashed, bad: ids.length - trashed };
     return trashed > 0;
   }
+  trashLocal.last = { trashed, bad };
   toast(bad ? `已移到回收站 ${trashed} 个，${bad} 个失败` : '已移到回收站');
   return trashed > 0;
 }
@@ -5656,7 +5753,7 @@ async function localSettings(pre, apiBase = '/api/local') {
         <span class="lan">后缀</span><input id="lcExts" value="${esc(cfg.exts.join(', '))}" title="可选：${esc(j.exts.join(' '))}"></div>
       <div id="lcSrcs">${cfg.sources.map((s, i) => srcBlock(s, i, status)).join('')}</div>
       <div class="actions"><button class="small" id="lcAddSrc">+ 添加本地源</button><button class="btn red" id="lcSave">保存并扫描</button>
-        <button class="small" id="lcScan">重新扫描</button><span class="lan" id="lcStatus">${esc(statusText(status))}</span></div>
+        <button class="small" id="lcScan">重新扫描</button>${apiBase === '/api/local' ? '<button class="small" id="lcDups" title="扫描完以后，找出重复的视频（成人按番号，其他按内容），可以一键删除多余的">检测重复视频</button>' : ''}<span class="lan" id="lcStatus">${esc(statusText(status))}</span></div>
       ${j.urls.length ? `<details class="admmore" style="margin-top:12px"><summary>电视端使用</summary><p class="hint" style="margin-top:8px">在 TVBox / FongMi 里添加点播源，类型 1（苹果CMS JSON），地址 ${j.urls.map(u => `<code>${esc(u)}</code>`).join(' 或 ')}（所有本地源合在一起）；只要某一个源，在地址后加 <code>?src=local2</code>（源 id 见各源的 key：第一个是 local，之后 local2、local3…）。电视端直接播原文件。</p></details>` : ''}`;
   };
   const collect = () => ({
@@ -5708,6 +5805,7 @@ async function localSettings(pre, apiBase = '/api/local') {
         if (!status.running) { state.cats = []; apiMemo.clear(); await loadSites(); }
       } catch (err) { toast(err.message); }
     };
+    const dg = $('#lcDups'); if (dg) dg.onclick = () => { location.hash = '#/dups'; };
     $('#lcScan').onclick = async () => {
       try { status = await req('POST', apiBase + '/scan', {}); $('#lcStatus').textContent = statusText(status); poll(); }
       catch (err) { toast(err.message); }

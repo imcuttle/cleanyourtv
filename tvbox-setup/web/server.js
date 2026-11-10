@@ -2760,6 +2760,103 @@ rpcHandlers.localTrash = async ({ ids, permanent }) => {
   }
   return { done, failed, noBin, error: lastErr };
 };
+// ---- 重复视频检测 (只读, 管理员): 看扫描索引里的文件 ----
+//  · 番号相同 = 同一部: 文件名 (或独占一个文件夹时的文件夹名) 以番号开头, 或这个分类标了成人; 分段 (CD1 / part2 / -A / -B) 各算各的, 不互相算重复
+//  · 其他: 大小相同 + 头 / 中 / 尾各 64KB 的指纹相同 = 内容相同
+// 每组按规则留一个 (size 最大 / mtime 最近修改 / ctime 最近创建), 其余是多余的; 删除走 /api/local/trash (进回收站)。
+const DUP_MIN = 1 << 20;
+const dupSig = new Map();   // path|size|mtime → 指纹
+async function fileSig(p, size, mtime) {
+  const key = `${p}|${size}|${mtime}`;
+  if (dupSig.has(key)) return dupSig.get(key);
+  let fh;
+  try {
+    fh = await io(() => fsp.open(p));
+    const h = crypto.createHash('sha1'), buf = Buffer.alloc(65536);
+    h.update(String(size));
+    for (const off of [0, Math.max(0, Math.floor(size / 2) - 32768), Math.max(0, size - 65536)]) {
+      const { bytesRead } = await io(() => fh.read(buf, 0, buf.length, off));
+      h.update(buf.subarray(0, bytesRead));
+    }
+    const d = h.digest('hex');
+    if (dupSig.size > 20000) dupSig.clear();
+    dupSig.set(key, d);
+    return d;
+  } catch { return ''; } finally { await fh?.close().catch(() => {}); }
+}
+// 文件名里的番号 → { code, part }；没有 / 不是以番号开头 (成人分类除外) → null
+function dupCodeOf(base, adultCat) {
+  const code = javCode(base);
+  if (!code) return null;
+  const up = base.replace(/\\[A-Za-z]/g, ' ').toUpperCase(), ps = code.split('-');
+  const re = new RegExp(ps.length > 2 ? ps.join('[\\s\\-_]?') : ps[0] + '[\\s\\-_]?0*' + ps[ps.length - 1].replace(/^0+/, ''), 'i');
+  const m = re.exec(up);
+  if (!m || (!adultCat && m.index > 20)) return null;
+  const rest = up.slice(m.index + m[0].length);
+  const pm = /(?:^|[\s._\-[(])(?:CD|DISC|DISK|PART|PT)[\s._-]?(\d)|^[-_. ]?([AB])(?![A-Z0-9])|^[-_. ](\d)(?![A-Z0-9])/.exec(rest);
+  return { code, part: pm ? (pm[1] || pm[3] || (pm[2] === 'A' ? '1' : '2')) : '' };
+}
+rpcHandlers.localDups = async ({ rule }) => {
+  rule = ['size', 'mtime', 'ctime'].includes(rule) ? rule : 'size';
+  const snap = localIndex(), files = [];
+  if (localCfg.enabled) {
+    for (const it of snap.items) {
+      const cat = snap.catById.get(it.cat);
+      if (!cat || !localCatOk(cat)) continue;
+      for (const f of it.files) if (f.size >= DUP_MIN) files.push({ ...f, item: it, cat, adult: catAdult(cat) });
+    }
+  }
+  const perDir = new Map();
+  for (const f of files) perDir.set(path.dirname(f.path), (perDir.get(path.dirname(f.path)) || 0) + 1);
+  const byCode = new Map(), rest = [];
+  for (const f of files) {
+    let c = dupCodeOf(path.basename(f.path, path.extname(f.path)), f.adult);
+    if (!c && perDir.get(path.dirname(f.path)) === 1) c = dupCodeOf(path.basename(path.dirname(f.path)), f.adult);   // 一个文件夹只放这一部: 文件夹名是番号也算
+    if (!c) { rest.push(f); continue; }
+    f.code = c.code;
+    const k = c.code + (c.part ? '#' + c.part : '');
+    (byCode.get(k) || byCode.set(k, []).get(k)).push(f);
+  }
+  const bySize = new Map();
+  for (const f of rest) (bySize.get(f.size) || bySize.set(f.size, []).get(f.size)).push(f);
+  const cands = [];
+  for (const [k, g] of byCode) if (g.length > 1) cands.push({ kind: 'code', code: g[0].code, part: k.includes('#') ? k.split('#')[1] : '', files: g });
+  for (const g of bySize.values()) if (g.length > 1) cands.push({ kind: 'same', files: g });
+  // 现场 stat (拿最新的大小 / 时间, 文件已经不在的去掉; 同一个物理文件的硬链接只算一个); 内容相同的还要比指纹
+  const stats = new Map();
+  await Promise.all([...new Set(cands.flatMap(c => c.files))].map(async f => {
+    const st = await io(() => fsp.stat(f.path)).catch(() => null);
+    if (st && st.isFile()) stats.set(f.id, st);
+  }));
+  const groups = [];
+  for (const c of cands) {
+    const seen = new Set();
+    const live = c.files.filter(f => {
+      const st = stats.get(f.id); if (!st) return false;
+      if (!st.ino) return true;
+      const k = st.dev + ':' + st.ino; if (seen.has(k)) return false; seen.add(k); return true;
+    });
+    const sets = [];
+    if (c.kind === 'same') {
+      const sig = new Map();
+      await Promise.all(live.map(async f => { const st = stats.get(f.id), s = await fileSig(f.path, st.size, st.mtimeMs); if (s) (sig.get(s) || sig.set(s, []).get(s)).push(f); }));
+      for (const g of sig.values()) sets.push({ ...c, files: g });
+    } else sets.push({ ...c, files: live });
+    for (const s of sets) if (s.files.length > 1) groups.push(s);
+  }
+  const out = groups.map(g => {
+    const list = g.files.map(f => {
+      const st = stats.get(f.id);
+      return { id: f.id, path: f.path, size: st.size, mtime: Math.round(st.mtimeMs), ctime: Math.round(st.birthtimeMs || st.ctimeMs), itemId: f.item.id, itemName: f.item.name, itemFiles: f.item.files.length, src: f.cat.src || 'local', cat: f.cat.name,
+        pic: (f.item.pic || FFMPEG) ? `/media/p/${f.item.id}?v=${hashId(f.item.pic + '|' + f.item.mtime + '|' + f.item.files.length, 6)}` : '' };
+    });
+    // 留一个: 规则里最大的; 并列时依次看 大小 / 最近修改 / 路径短的 / 路径字典序, 结果稳定
+    list.sort((a, b) => (b[rule] - a[rule]) || (b.size - a.size) || (b.mtime - a.mtime) || (a.path.length - b.path.length) || (a.path < b.path ? -1 : 1));
+    list.forEach((f, i) => { f.keep = i === 0; });
+    return { kind: g.kind, code: g.code || '', part: g.part || '', name: list[0].itemName, pic: list[0].pic, extra: list.slice(1).reduce((n, f) => n + f.size, 0), files: list };
+  }).sort((a, b) => b.extra - a.extra);
+  return { rule, groups: out, extraFiles: out.reduce((n, g) => n + g.files.length - 1, 0), extraBytes: out.reduce((n, g) => n + g.extra, 0), at: Date.now() };
+};
 if (IS_MEDIA) {
   setTimeout(() => { if (localCfg.enabled && localCfg.dirs.length) scanLocal(); }, 1500).unref();
   setInterval(() => {
@@ -3460,6 +3557,11 @@ async function api(route, q, res, req) {
       urls: lanIps().map(ip => `http://${ip}:${PORT}/api/local/vod`) });
     if (!srcWriteOk(req)) return needAdmin(res, req);
     return send(res, 200, await rpc('localSave', await readBody(req)));
+  }
+  // 重复视频: 每组带完整文件路径, 所以只给管理员; rule = 留哪一个 (size 最大 / mtime 最近修改 / ctime 最近创建)
+  if (route === 'local/dups' && !write) {
+    if (!adminAuthed(req)) return send(res, 403, { error: '重复视频带完整文件路径，只有管理员能看', admin: true });
+    return send(res, 200, await rpc('localDups', { rule: q.get('rule') || 'size' }, 300000));
   }
   // Open a local file in this computer's default player / show it in the file manager. Only for a browser running
   // on this same machine (see isLoopback), and only for files in the scan index that the safety level lets through.

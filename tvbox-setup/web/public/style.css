@@ -2275,3 +2275,37 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .zoomtag:active { background: #000d; }
 #feed .fd-info, #feed .fd-shade { transition: opacity .2s; }
 #feed.zoomed .fd-info, #feed.zoomed .fd-shade { opacity: 0; }
+
+/* ---- 重复视频页 (#/dups) 和某一组的详情浮窗 ---- */
+.dups .dupbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; margin: 0 0 12px; }
+.dups .duprule { display: flex; align-items: center; gap: 8px; }
+.dups .dupgo { padding: 0 18px; height: 40px; font-size: 14px; background: var(--red); color: #fff; }
+.dups .dupgo svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.dcard { position: relative; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.dcard .img { aspect-ratio: 2/3; border-radius: 4px; position: relative; overflow: hidden; background: linear-gradient(160deg, #2a2a2e, #1b1b1e); transition: transform .2s; }
+.dcard:hover .img { transform: scale(1.03); }
+.dcard .img img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .35s; }
+.dcard .img img.ok { opacity: 1; }
+.dcard .img .ph { display: none; }
+.dcard .img.noimg .ph { display: flex; position: absolute; inset: 0; align-items: center; justify-content: center; padding: 10px; text-align: center; font-size: 14px; font-weight: 600; line-height: 1.3; color: #ffffffb0; overflow: hidden; word-break: break-all; }
+.dcard .dup { position: absolute; top: 6px; right: 6px; z-index: 1; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; color: #fff; background: #000b; border: 1px solid #ffffff33; }
+.dcard .name { font-size: 13px; color: #ddd; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dcard .sub { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pop.dupdetail { width: min(600px, 92vw); }
+.pop.dupdetail.pop-sheet { width: auto; }
+.pop.dupdetail .p-head { justify-content: center; padding-top: 14px; }
+.pop.dupdetail .p-head b { max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pop.dupdetail .p-body { padding: 6px 12px 10px; }
+.dd-sum { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.dd-file { margin-bottom: 10px; padding: 10px 12px; border-radius: 12px; background: #ffffff0f; border: 1px solid transparent; }
+.dd-file.keep { border-color: #30d15866; }
+.dd-file.del { border-color: #ff453a44; }
+.dd-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.dd-tag { font-size: 12px; padding: 1px 8px; border-radius: 8px; }
+.dd-file.keep .dd-tag { background: #30d15833; color: #5be07f; }
+.dd-file.del .dd-tag { background: #ff453a2e; color: #ff6a60; }
+.dd-path { font-size: 13px; line-height: 1.45; color: #eee; word-break: break-all; user-select: text; -webkit-user-select: text; }
+.dd-meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.dd-ops { display: flex; gap: 8px; margin-top: 8px; }
+.dd-ops button { flex: 1; height: 34px; border: 0; border-radius: 10px; background: #ffffff1a; color: #fff; font: inherit; font-size: 13px; }
+.dd-ops button.danger { color: #ff6a60; }
