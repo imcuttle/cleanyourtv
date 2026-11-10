@@ -1849,10 +1849,14 @@ function javText(url) {
 // 番号 shapes: ABC-123, ABCDEF-123, FC2-PPV-1234567, 123456_123 (Caribbean)… — normalized to UPPER with dashes.
 // Dash-required LETTERS-DIGITS comes before the no-dash fallback, so messy source names like
 // "第一会所…@SIS001@SONE-123" or "169bbs.com@SONE-645 [4k]" resolve to the real 番号, not the site id.
+// 番号解析前的统一清洗: 转义残留像 "\\bSNIS-989" 里的 "\\b"，站点域名前缀 (hhd800.com@…)，然后全大写。
+// 域名必须先去掉: "hhd800.com@300ABS-123" 里的 "HHD800" 会被当成 HHD-800, 真番号反被挡住。
+const JAV_DOMAIN = /(?:[A-Z0-9][A-Z0-9-]*\.)+(?:COM|NET|ORG|CC|TV|XYZ|ME|INFO|VIP|CLUB|TOP|LA|IO|CO)(?![A-Z0-9])/gi;
+const javUp = s => str(s).replace(/\\[A-Za-z]/g, ' ').replace(JAV_DOMAIN, ' ').toUpperCase();
 const javCode = s => {
   // Literal escape debris from mangled names ("SNIS-989\\b中文", "\\bSNIS-989", "\\w@…") must not glue onto the code
   // as a letter ("\\bSNIS" would read as BSNIS): a backslash + letter is just a separator.
-  const up = str(s).replace(/\\[A-Za-z]/g, ' ').toUpperCase();
+  const up = javUp(s);
   // Release-name words that look like LETTERS+DIGITS but are not a 番号.
   const STOP = /^(?:AAC|AC|DTS|DDP|HEVC|AVC|HDR|UHD|FHD|WEB|BD|DVD|MP|EP|HD|HQ|CD|VOL|NO|PART|CAM|TS|SE)$/;
   // IPX00988 → IPX-988, ABP-0123 → ABP-123 (zero-padded to 5 on some sites); real 4-digit codes (DV-1656) stay.
@@ -1861,11 +1865,13 @@ const javCode = s => {
   // (SNIS-989UC, MIDA-829restored, ABP-123C). The tag must end there so "ABC-123DEF" is not read as ABC-123.
   const MULTI = 'UNCENSORED|DECENSORED|RESTORED|RESTORE|MOSAIC|LEAKED|LEAK|SUBBED|SUB|ENG|CHS|CHT|CH|CN|JP|UC|UHD|FHD|HD|4K|8K|1080P|720P|60FPS|HEVC|H265|X265|REMUX|UNCUT';
   const tail = `(?=$|[^A-Z0-9]|(?:(?:${MULTI})+|[CURABDE])(?![A-Z0-9]))`; // several tags may be glued: SNIS-989UCrestored
+  // 数字直接粘在字母前面 (hhd800.com@300ABS-123 的 "300" / "300ABS-123") 也算边界: 那是体积 / 序号前缀, 不是番号的一部分
+  const pre = '(?:^|[^A-Z0-9]|\\d(?=[A-Z]))';
   const pats = [
-    [new RegExp(`(?:^|[^A-Z0-9])(FC2)[\\s\\-_]?(PPV)[\\s\\-_]?(\\d{5,8})${tail}`, 'g'), m => `${m[1]}-${m[2]}-${m[3]}`],
-    [new RegExp(`(?:^|[^A-Z0-9])([A-Z]{2,6})[\\-_](?:(?:${MULTI})[\\-_. ]?)*(\\d{2,5})${tail}`, 'g'), m => `${m[1]}-${num(m[2])}`], // tags may even sit inside: SNIS-UC-989
+    [new RegExp(`${pre}(FC2)[\\s\\-_]?(PPV)[\\s\\-_]?(\\d{5,8})${tail}`, 'g'), m => `${m[1]}-${m[2]}-${m[3]}`],
+    [new RegExp(`${pre}([A-Z]{2,6})[\\-_](?:(?:${MULTI})[\\-_. ]?)*(\\d{2,5})${tail}`, 'g'), m => `${m[1]}-${num(m[2])}`], // tags may even sit inside: SNIS-UC-989
     [new RegExp(`(?:^|[^A-Z0-9])(\\d{6})[\\-_](\\d{3})${tail}`, 'g'), m => `${m[1]}-${m[2]}`],
-    [new RegExp(`(?:^|[^A-Z0-9])([A-Z]{2,6})(\\d{2,5})${tail}`, 'g'), m => STOP.test(m[1]) ? '' : `${m[1]}-${num(m[2])}`],
+    [new RegExp(`${pre}([A-Z]{2,6})(\\d{2,5})${tail}`, 'g'), m => STOP.test(m[1]) ? '' : `${m[1]}-${num(m[2])}`],
   ];
   for (const [re, fmt] of pats) for (const m of up.matchAll(re)) { const c = fmt(m); if (c) return c; }
   return '';
@@ -2809,7 +2815,7 @@ function dupCodeOf(base, adultCat) {
   if (!adultCat) return null;                                 // 普通视频只按大小 + 内容指纹判, 名字像不算
   const code = javCode(base);
   if (!code || DUP_STOP.test(code.split('-')[0])) return null;
-  const up = base.replace(/\\[A-Za-z]/g, ' ').toUpperCase(), ps = code.split('-');
+  const up = javUp(base), ps = code.split('-');
   const re = new RegExp(ps.length > 2 ? ps.join('[\\s\\-_]?') : ps[0] + '[\\s\\-_]?0*' + ps[ps.length - 1].replace(/^0+/, ''), 'i');
   const m = re.exec(up);
   if (!m || m.index > 20) return null;
