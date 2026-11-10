@@ -2094,7 +2094,8 @@ async function renderDups() {
   const paint = () => {
     rank();
     const ex = extras(), bytes = groups.reduce((n, g) => n + g.extra, 0);
-    const hact = `<div class="hact"><button class="small ibs" data-dup="re" title="重新检测" aria-label="重新检测">${IC.retry}</button></div>`;
+    // 触屏小屏用全局的下拉刷新 (route() 会重新检测), 不放按钮; 桌面才有「重新检测」
+    const hact = smallScreen.matches && !fineCursor ? '' : `<div class="hact"><button class="small ibs" data-dup="re" title="重新检测" aria-label="重新检测">${IC.retry}</button></div>`;
     if (!groups.length) return shell('<p class="empty hempty">没有发现重复视频。</p><p class="lan csum" style="text-align:center">成人资源按番号判断，其他按大小和内容指纹判断；小于 1 MB 的文件不比较。</p>', hact);
     shell(`<div class="dupbar">
         <div class="duprule"><span class="lan">保留</span>${segHtml(DUP_RULES.map(([k, t]) => [k, t]), { attr: 'data-duprule', cur: rule })}</div>
