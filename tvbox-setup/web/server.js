@@ -2761,10 +2761,14 @@ rpcHandlers.localTrash = async ({ ids, permanent }) => {
   return { done, failed, noBin, error: lastErr };
 };
 // ---- 重复视频检测 (只读, 管理员): 看扫描索引里的文件 ----
-//  · 番号相同 = 同一部: 文件名 (或独占一个文件夹时的文件夹名) 以番号开头, 或这个分类标了成人; 分段 (CD1 / part2 / -A / -B) 各算各的, 不互相算重复
-//  · 其他: 大小相同 + 头 / 中 / 尾各 64KB 的指纹相同 = 内容相同
+// 两条判据, 各自独立, 都不轻易把内容不同的片子并成一组:
+//  · 番号相同 = 同一部 (只认「成人」分类): 文件名 (或独占一个文件夹时的文件夹名) 里带番号就算, 分段 (CD1 / part2 / -A / -B / 上集) 各算各的。
+//    普通视频不认番号: 电影 / 剧集 / 录屏 / 教程的名字里 "Movie-2024" "Demo-001" "Screen-2024" 这种「字母+数字」满地都是,
+//    光名字撞上就判重复, 会把内容完全不同的两个视频认成同一份。
+//  · 大小相同 + 内容指纹相同 = 同一份文件 (所有分类): ≤32 MB 整份比 sha1, 更大的在 16 个均匀位置各取 1 MB 比指纹。
 // 每组按规则留一个 (size 最大 / mtime 最近修改 / ctime 最近创建), 其余是多余的; 删除走 /api/local/trash (进回收站)。
 const DUP_MIN = 1 << 20;
+const SIG_FULL = 32 << 20, SIG_SPAN = 16, SIG_STEP = 1 << 20;
 const dupSig = new Map();   // path|size|mtime → 指纹
 async function fileSig(p, size, mtime) {
   const key = `${p}|${size}|${mtime}`;
@@ -2772,11 +2776,25 @@ async function fileSig(p, size, mtime) {
   let fh;
   try {
     fh = await io(() => fsp.open(p));
-    const h = crypto.createHash('sha1'), buf = Buffer.alloc(65536);
+    const h = crypto.createHash('sha1');
     h.update(String(size));
-    for (const off of [0, Math.max(0, Math.floor(size / 2) - 32768), Math.max(0, size - 65536)]) {
-      const { bytesRead } = await io(() => fh.read(buf, 0, buf.length, off));
-      h.update(buf.subarray(0, bytesRead));
+    if (size <= SIG_FULL) {
+      // 小文件整份读完: 「内容相同」不留猜的空间
+      const buf = Buffer.alloc(Math.min(size, 1 << 20));
+      let pos = 0;
+      for (;;) {
+        const { bytesRead } = await io(() => fh.read(buf, 0, buf.length, pos));
+        if (!bytesRead) break;
+        h.update(buf.subarray(0, bytesRead));
+        pos += bytesRead;
+      }
+    } else {
+      // 大文件抽 16 段: 只看头 / 中 / 尾三处时, 中间大段不同、这三处恰好一样也会被当成同一份
+      const buf = Buffer.alloc(SIG_STEP), span = size - SIG_STEP;
+      for (let i = 0; i < SIG_SPAN; i++) {
+        const { bytesRead } = await io(() => fh.read(buf, 0, SIG_STEP, Math.round(span * i / (SIG_SPAN - 1))));
+        h.update(buf.subarray(0, bytesRead));
+      }
     }
     const d = h.digest('hex');
     if (dupSig.size > 20000) dupSig.clear();
@@ -2784,17 +2802,20 @@ async function fileSig(p, size, mtime) {
     return d;
   } catch { return ''; } finally { await fh?.close().catch(() => {}); }
 }
-// 文件名里的番号 → { code, part }；没有 / 不是以番号开头 (成人分类除外) → null
+// 番号不像番号的样子: 字母部分是一堆普通词 (MOVIE / VIDEO / DEMO / SCREEN …) 的是片名或版本号, 不是厂牌
+const DUP_STOP = /^(?:MOVIE|VIDEO|DEMO|SCREEN|LESSON|CLASS|CHAPTER|CLIP|SAMPLE|TRAILER|FINAL|DRAFT|TEST|REC|RECORDING|CAPTURE|RENDER|EXPORT|OUTPUT|BACKUP|COPY|TEMP|TMP|FILE|RAW|EDIT|TAKE|SCENE|IMG|DSC|VID|SEASON|EP|EPISODE)$/;
+// 文件名里的番号 → { code, part }；普通分类 / 名字里没有番号 → null
 function dupCodeOf(base, adultCat) {
+  if (!adultCat) return null;                                 // 普通视频只按大小 + 内容指纹判, 名字像不算
   const code = javCode(base);
-  if (!code) return null;
+  if (!code || DUP_STOP.test(code.split('-')[0])) return null;
   const up = base.replace(/\\[A-Za-z]/g, ' ').toUpperCase(), ps = code.split('-');
   const re = new RegExp(ps.length > 2 ? ps.join('[\\s\\-_]?') : ps[0] + '[\\s\\-_]?0*' + ps[ps.length - 1].replace(/^0+/, ''), 'i');
   const m = re.exec(up);
-  if (!m || (!adultCat && m.index > 20)) return null;
+  if (!m || m.index > 20) return null;
   const rest = up.slice(m.index + m[0].length);
-  const pm = /(?:^|[\s._\-[(])(?:CD|DISC|DISK|PART|PT)[\s._-]?(\d)|^[-_. ]?([AB])(?![A-Z0-9])|^[-_. ](\d)(?![A-Z0-9])/.exec(rest);
-  return { code, part: pm ? (pm[1] || pm[3] || (pm[2] === 'A' ? '1' : '2')) : '' };
+  const pm = /(?:^|[\s._\-[(])(?:CD|DISC|DISK|PART|PT|VOL)[\s._-]?(\d)|^[-_. ]?([AB])(?![A-Z0-9])|^[-_. ](\d)(?![A-Z0-9])|(上|下)\s*(?:集|部|段|篇)?$/.exec(rest);
+  return { code, part: pm ? (pm[1] || pm[3] || (pm[4] ? (pm[4] === '上' ? '1' : '2') : (pm[2] === 'A' ? '1' : '2'))) : '' };
 }
 rpcHandlers.localDups = async ({ rule }) => {
   rule = ['size', 'mtime', 'ctime'].includes(rule) ? rule : 'size';

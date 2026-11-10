@@ -2281,6 +2281,8 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .dups .duprule { display: flex; align-items: center; gap: 8px; }
 .dups .dupgo { padding: 0 18px; height: 40px; font-size: 14px; background: var(--red); color: #fff; }
 .dups .dupgo svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* 组数 / 多余文件 / 可释放空间单独一行文字, 不塞进按钮里 */
+.dups .dupinfo { margin: -2px 0 14px; font-size: 13px; line-height: 1.6; }
 .dcard { position: relative; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .dcard .img { aspect-ratio: 2/3; border-radius: 4px; position: relative; overflow: hidden; background: linear-gradient(160deg, #2a2a2e, #1b1b1e); transition: transform .2s; }
 .dcard:hover .img { transform: scale(1.03); }
