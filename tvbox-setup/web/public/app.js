@@ -2094,16 +2094,19 @@ async function renderDups() {
   const paint = () => {
     rank();
     const ex = extras(), bytes = groups.reduce((n, g) => n + g.extra, 0);
-    // 触屏小屏用全局的下拉刷新 (route() 会重新检测), 不放按钮; 桌面才有「重新检测」
-    const hact = smallScreen.matches && !fineCursor ? '' : `<div class="hact"><button class="small ibs" data-dup="re" title="重新检测" aria-label="重新检测">${IC.retry}</button></div>`;
-    if (!groups.length) return shell('<p class="empty hempty">没有发现重复视频。</p><p class="lan csum" style="text-align:center">成人资源按番号判同一部，其他视频只按大小和内容指纹判，内容不同不会算重复；小于 1 MB 的文件不比较。</p>', hact);
+    // 触屏小屏: 右上角放「一键删除」(图标, 跟着页头吸顶, 滚多远都点得到), 重新检测交给全局下拉刷新;
+    // 桌面 / 窄窗口: 右上角是「重新检测」, 一键删除在下面工具栏里带文字
+    const small = smallScreen.matches && !fineCursor;
+    const hRetry = `<div class="hact"><button class="small ibs" data-dup="re" title="重新检测" aria-label="重新检测">${IC.retry}</button></div>`;
+    const hDel = `<div class="hact"><button type="button" class="small ibs dupl" data-dup="go" title="一键删除重复" aria-label="一键删除重复">${IC.trash}</button></div>`;
+    if (!groups.length) return shell('<p class="empty hempty">没有发现重复视频。</p><p class="lan csum" style="text-align:center">成人资源按番号判同一部，其他视频只按大小和内容指纹判，内容不同不会算重复；小于 1 MB 的文件不比较。</p>', small ? '' : hRetry);
     shell(`<div class="dupbar">
         <div class="duprule"><span class="lan">保留</span>${segHtml(DUP_RULES.map(([k, t]) => [k, t]), { attr: 'data-duprule', cur: rule })}</div>
-        <button type="button" class="btn red dupgo" data-dup="go">${IC.trash}<span>一键删除重复</span></button></div>
+        ${small ? '' : `<button type="button" class="btn red dupgo" data-dup="go">${IC.trash}<span>一键删除重复</span></button>`}</div>
       <p class="lan csum dupinfo">${groups.length} 组重复 · 多余 ${ex.length} 个文件 · 可释放约 ${fmtSize(bytes)} · 每组只保留${ruleName()}的那一份</p>
       <div class="grid">${groups.map((g, i) => `<div class="dcard" role="button" data-g="${i}">
         <div class="img${g.pic ? '' : ' noimg'}">${g.pic ? posterImg(g.pic) : ''}<span class="ph">${esc(g.name)}</span><span class="dup" title="${esc(kindOf(g))}">${g.files.length} 份</span></div>
-        <div class="name">${esc(g.name)}</div><div class="sub">${esc(kindOf(g))} · 多 ${fmtSize(g.extra)}</div></div>`).join('')}</div>`, hact);
+        <div class="name">${esc(g.name)}</div><div class="sub">${esc(kindOf(g))} · 多 ${fmtSize(g.extra)}</div></div>`).join('')}</div>`, small ? hDel : hRetry);
   };
   const load = async () => {
     shell(spinner);

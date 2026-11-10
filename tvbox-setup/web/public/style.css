@@ -2283,6 +2283,8 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .dups .dupgo svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 /* 组数 / 多余文件 / 可释放空间单独一行文字, 不塞进按钮里 */
 .dups .dupinfo { margin: -2px 0 14px; font-size: 13px; line-height: 1.6; }
+/* 小屏的一键删除在页头右上角: 红色图标, 和其他页头的白色图标区分开 (跟着页头吸顶, 滚多远都点得到) */
+.dups .cathead .hact .ibs.dupl { color: var(--red); }
 /* 小屏: 「保留」规则一行, 删除按钮独占一行铺满 (好按), 数量那行跟在下面; 手机上规则按钮收窄, 三个还能挤在一行 */
 @media (max-width: 760px) {
   .dups .dupbar { flex-direction: column; align-items: stretch; gap: 10px; }
