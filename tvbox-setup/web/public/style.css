@@ -663,7 +663,7 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 .fd-menu button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 12px 14px; border-radius: 8px; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fd-menu button:hover { background: #ffffff14; } .fd-menu button.on { font-weight: 800; box-shadow: inset 3px 0 0 var(--red); } .fd-menu .dim { color: #999; font-size: 13px; }
 .fd-menu hr { border: 0; border-top: 1px solid #ffffff1f; margin: 4px 6px; }
-.fd-sheet { position: absolute; z-index: 5; right: 0; top: 0; bottom: 0; width: min(380px, 100%); background: #181818f5; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); padding: calc(14px + env(safe-area-inset-top)) 14px calc(14px + var(--sb)); display: flex; flex-direction: column; gap: 12px; animation: fdIn .25s cubic-bezier(.32,.72,0,1); }
+.fd-sheet { position: absolute; z-index: 5; right: 0; top: 0; bottom: 0; width: min(380px, 100%); background: #181818f5; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); padding: calc(14px + env(safe-area-inset-top)) 14px calc(14px + var(--sb)); display: flex; flex-direction: column; gap: 12px; overflow: hidden; animation: fdIn .25s cubic-bezier(.32,.72,0,1); }
 @keyframes fdIn { from { transform: translateX(30px); opacity: 0; } }
 .sh-head { position: relative; display: flex; justify-content: space-between; align-items: center; gap: 10px; } .sh-head b { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sh-lines { display: flex; gap: 6px; flex-wrap: wrap; } .sh-lines button { padding: 6px 12px; border-radius: 16px; border: 1px solid #ffffff33; background: none; font-size: 13px; } .sh-lines .on { background: #fff; color: #000; }
@@ -675,12 +675,12 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 .fd-heart svg { width: 100%; height: 100%; fill: #ff2c55; filter: drop-shadow(0 4px 14px #0008); }
 @keyframes fdHeart { 0% { transform: scale(.3) rotate(var(--r)); opacity: 0; } 20% { transform: scale(1.15) rotate(var(--r)); opacity: 1; } 40% { transform: scale(1) rotate(var(--r)); } 100% { transform: translateY(-70px) scale(1.2) rotate(var(--r)); opacity: 0; } }
 /* 字幕 / 选集面板变成从底部上拉: 跟 .plist 对齐, 两个触发条件都要有 (触屏设备不管多宽 / 窄屏不管是不是触屏), 跟 .plist 的两处规则一一对应 */
-html.touchui .fd-sheet { top: auto; width: auto; left: 0; max-height: 62vh; border-radius: 16px 16px 0 0; animation-name: fdUp; }
+html.touchui .fd-sheet { top: auto; width: auto; left: 0; bottom: 0; height: min(64vh, 560px); border-radius: 16px 16px 0 0; animation-name: fdUp; }
 html.touchui .sh-head { padding-top: 18px; }
 html.touchui .sh-head .grab { position: absolute; left: 50%; top: 7px; width: 38px; height: 4px; margin-left: -19px; border-radius: 2px; background: #ffffff40; }
 @keyframes fdUp { from { transform: translateY(40px); opacity: 0; } }
 @media (max-width: 760px) {
-  .fd-sheet { top: auto; width: auto; left: 0; max-height: 62vh; border-radius: 16px 16px 0 0; animation-name: fdUp; }
+  .fd-sheet { top: auto; width: auto; left: 0; bottom: 0; height: min(64vh, 560px); border-radius: 16px 16px 0 0; animation-name: fdUp; }
   .fd-sheet .sh-head { padding-top: 18px; }
   .fd-sheet .sh-head .grab { position: absolute; left: 50%; top: 7px; width: 38px; height: 4px; margin-left: -19px; border-radius: 2px; background: #ffffff40; }
   .fd-info h2 { font-size: 15px; }
