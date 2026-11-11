@@ -638,6 +638,23 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 .fd-mode { height: 36px; padding: 0 12px 0 16px; border-radius: 18px; border: 0; background: none; text-shadow: 0 1px 4px #000a; font-size: 15px; font-weight: 700; display: inline-flex; align-items: center; gap: 4px; max-width: 56vw; }
 .fd-mode span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .fd-mode svg { width: 16px; height: 16px; flex: none; }
 [data-a=mute] .x { display: none; } [data-a=mute].off .w { display: none; } [data-a=mute].off .x { display: inline; }
+/* 音量: 鼠标停在喇叭上 → 左边拉出一条音量条, 按住横着拖调音量 (触屏没有悬停, 不出现) */
+.fd-vol { position: relative; display: flex; align-items: center; }
+.fd-vbar { position: absolute; z-index: 1; right: calc(100% + 6px); top: 50%; display: flex; align-items: center; gap: 8px;
+  height: 34px; padding: 0 12px; border-radius: 17px; background: #000000a6; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  opacity: 0; pointer-events: none; transform: translateY(-50%) translateX(6px) scaleX(.72); transform-origin: right center;
+  transition: opacity .15s ease, transform .18s cubic-bezier(.32,.72,0,1); }
+.fd-vol.open .fd-vbar { opacity: 1; pointer-events: auto; transform: translateY(-50%) scaleX(1); }
+.fd-vbar .rail { position: relative; display: block; width: 96px; height: 4px; border-radius: 2px; background: #ffffff45; }
+.fd-vbar .fill { position: absolute; left: 0; top: 0; bottom: 0; width: calc(var(--v, 1) * 100%); border-radius: 2px; background: #fff; }
+.fd-vbar .knob { position: absolute; top: 50%; left: calc(var(--v, 1) * 100%); width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px #0007; }
+.fd-vbar .pct { font-size: 12px; font-weight: 700; color: #fff; min-width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+@media (hover: none), (pointer: coarse) { .fd-vbar { display: none !important; } }
+/* 长时间没人动: 顶栏和上下切换按钮淡出, 动一下鼠标 / 手指立刻回来 (feed.js 里按空闲时间加 #feed.idle) */
+.fd-top, .fd-nav { transition: opacity .24s ease, transform .24s ease; }
+#feed.idle .fd-top { opacity: 0; transform: translateY(-10px); }
+#feed.idle .fd-nav { opacity: 0; transform: translateY(-50%) scale(.92); }
+#feed.idle .fd-top > *, #feed.idle .fd-nav button { pointer-events: none; }
 .fd-rail { position: absolute; z-index: 3; right: max(2px, env(safe-area-inset-right)); bottom: calc(60px + var(--sb)); display: flex; flex-direction: column; gap: 14px; align-items: center; }
 #feed .fd-rail button { background: none; border: 0; padding: 0; display: flex; flex-direction: column; align-items: center; gap: 1px; width: 48px; font-size: 12px; line-height: 1.3; text-shadow: 0 1px 4px #000a; }
 .fd-rail button[hidden] { display: none; }
@@ -2375,12 +2392,19 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
   text-shadow: 0 0 3px #000c, 0 1px 5px #000a, 0 0 14px #0006; transition: bottom .18s ease; }
 .subcap[hidden] { display: none; }
 .subtx { display: inline-block; max-width: 100%; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+/* 副字幕: 一段字幕里第二行及之后的行 (双语字幕文件常见)。字号是 subcap.js 按「主字幕 × 比例」算好写在 --subfs2 上的,
+   比例设成 0 时整个不显示 (只剩第一行) */
+.subtx2 { display: block; margin-top: .06em; font-size: var(--subfs2, 1em); line-height: 1.28;
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+.subov[data-s2=off] .subtx2 { display: none; }
+/* 放大 / 平移画面时位置每帧都变, 关掉「跟着控制条往下让」那条过渡, 不然字幕会慢半拍 */
+.subov[data-zoom="1"] .subcap { transition: none; }
 /* 描边: 用八方向的 text-shadow 画, iOS / 安卓 / 桌面一致 (text-stroke 会把字吃瘦) */
-.subov[data-edge=outline] .subtx { text-shadow: .05em 0 0 #000, -.05em 0 0 #000, 0 .05em 0 #000, 0 -.05em 0 #000,
+.subov[data-edge=outline] .subtx, .subov[data-edge=outline] .subtx2 { text-shadow: .05em 0 0 #000, -.05em 0 0 #000, 0 .05em 0 #000, 0 -.05em 0 #000,
   .035em .035em 0 #000, -.035em -.035em 0 #000, .035em -.035em 0 #000, -.035em .035em 0 #000; }
-.subov[data-edge=box] .subtx { padding: .06em .42em; border-radius: .22em; background: #000000a6; text-shadow: 0 1px 3px #0008;
+.subov[data-edge=box] .subtx, .subov[data-edge=box] .subtx2 { padding: .06em .42em; border-radius: .22em; background: #000000a6; text-shadow: 0 1px 3px #0008;
   -webkit-box-decoration-break: clone; box-decoration-break: clone; }
-.subov[data-edge=none] .subtx { text-shadow: none; }
+.subov[data-edge=none] .subtx, .subov[data-edge=none] .subtx2 { text-shadow: none; }
 
 /* iPhone 系统原生全屏 (这时 DOM 浮层看不见, 字幕交给系统画): ::cue 能改的很少, 只把字体 / 颜色 / 描边跟上。
    变量由 subcap.js 写到 <html> 上 (paintRoot) */

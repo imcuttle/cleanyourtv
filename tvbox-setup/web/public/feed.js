@@ -34,7 +34,10 @@ root.innerHTML = `
     <span class="fd-grow"></span>
     <button class="fd-mode" data-a="mode"><span></span>${I.caret}</button>
     <span class="fd-grow"></span>
-    <button class="fd-ic" data-a="mute" title="静音 (m)" aria-label="静音">${I.vol}</button>
+    <div class="fd-vol">
+      <div class="fd-vbar"><i class="rail"><b class="fill"></b><span class="knob"></span></i><span class="pct">100</span></div>
+      <button class="fd-ic" data-a="mute" title="静音 (m)" aria-label="静音">${I.vol}</button>
+    </div>
   </div>
   <div class="fd-rail">
     <button data-a="like" title="喜欢 (l)" aria-label="喜欢">${I.heart}</button>
@@ -58,6 +61,7 @@ root.innerHTML = `
 document.body.append(root);
 const q = s => root.querySelector(s);
 const slidesBox = q('.fd-slides'), prog = q('.fd-prog'), marksEl = q('.fd-prog .marks'), skipNote = q('.fd-skipnote'), tipEl = q('.fd-tip'), rateEl = q('.fd-rate'), menuEl = q('.fd-menu'), sheetEl = q('.fd-sheet'), bootEl = q('.fd-boot');
+const volWrap = q('.fd-vol'), volBar = q('.fd-vbar'), volRail = q('.fd-vbar .rail'), volPct = q('.fd-vbar .pct');
 
 // ---------- taste profile ----------
 // Flat map tag → score. Tags: t:类型 a:地区 y:年代 p:演员. Likes / long watches raise, quick skips / 不想看 lower.
@@ -381,12 +385,59 @@ function setRole(s, role) {
     else if (role > 0 && s.pre && !s.loading) { s.hls.startLoad(-1); s.loading = true; }
   } else s.video.preload = role === 0 || (s.pre && role > 0) ? 'auto' : 'metadata';
 }
-const paintMute = () => q('[data-a=mute]').classList.toggle('off', F.muted || F.autoMuted);
+const paintMute = () => { q('[data-a=mute]').classList.toggle('off', F.muted || F.autoMuted); paintVol(); };
 function setMuted(m, save = true) {
   F.muted = m; F.autoMuted = false;
   if (save) localStorage.feedMuted = m ? '1' : '0';
   ring.forEach(s => { s.video.muted = m; });
   paintMute();
+}
+// ---------- 音量: 鼠标停在右上角的喇叭上, 左边拉出一条音量条, 按住横着拖就调音量 ----------
+// 触屏没有悬停, 手势留给「点一下静音 / 恢复声音」, 音量条在这些设备上不出现 (CSS 里按 hover 能力藏掉)。
+// 音量和普通播放器共用一个值 (localStorage.playerVolume), 沉浸页三个 <video> 一起改, 划到下一屏音量不变。
+let volDrag = null, volCloseT = 0;
+const volNow = () => { const v = cur()?.video; return !v || F.muted || F.autoMuted ? 0 : v.volume; };
+function paintVol() {
+  if (!volBar) return;
+  const v = volNow();
+  volBar.style.setProperty('--v', v.toFixed(3));
+  if (volPct) volPct.textContent = String(Math.round(v * 100));
+}
+function setVolume(x) {
+  const v = Math.min(1, Math.max(0, x)), mute = v <= .001;
+  const wasMuted = F.muted || F.autoMuted;
+  F.autoMuted = false; F.muted = mute;
+  localStorage.feedMuted = mute ? '1' : '0';
+  if (!mute) localStorage.playerVolume = String(+v.toFixed(3));   // 静音时保留上一次的音量, 和普通播放器一样
+  ring.forEach(s => { try { s.video.volume = v; s.video.muted = mute; } catch {} });   // iOS 不让改 volume, 静音开关照常能用
+  paintMute();
+  if (wasMuted && !mute) tryPlay(cur());
+}
+if (!touchUi && volWrap) {
+  const volFrac = e => { const r = volRail.getBoundingClientRect(); return (e.clientX - r.left) / Math.max(1, r.width); };
+  const volOpen = on => { clearTimeout(volCloseT); volWrap.classList.toggle('open', !!on); if (on) paintVol(); };
+  volWrap.addEventListener('pointerenter', e => { if (e.pointerType !== 'touch') volOpen(true); });
+  volWrap.addEventListener('pointerleave', e => {
+    if (e.pointerType === 'touch' || volDrag !== null) return;
+    clearTimeout(volCloseT); volCloseT = setTimeout(() => volOpen(false), 240);   // 留一点时间, 从喇叭挪到音量条上不会闪
+  });
+  // 音量条上的按下 / 拖动都把事件留住: 底下的「点一下暂停」「上下切换」不该跟着响应
+  volBar.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'touch') return;
+    volDrag = e.pointerId; volOpen(true);
+    try { volBar.setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault(); e.stopPropagation();
+    setVolume(volFrac(e));
+  });
+  volBar.addEventListener('pointermove', e => { if (volDrag === e.pointerId) { e.stopPropagation(); setVolume(volFrac(e)); } });
+  const volEnd = e => {
+    if (volDrag !== e.pointerId) return;
+    volDrag = null;
+    if (!volWrap.matches(':hover')) volOpen(false);
+  };
+  volBar.addEventListener('pointerup', volEnd);
+  volBar.addEventListener('pointercancel', volEnd);
+  volBar.addEventListener('click', e => e.stopPropagation());
 }
 // The user's mute choice is only ever changed by the speaker button. When the browser blocks autoplay with sound
 // (NotAllowedError) the current video is muted temporarily and the sound comes back on the next tap / key press.
@@ -1198,6 +1249,28 @@ addEventListener('keydown', e => {
   if ((k === ']' || k === '[') && s?.eps.length > 1) { used(); switchEp(s, s.line, s.ep + (k === ']' ? 1 : -1)); }
 }, true);
 
+// ---------- 长时间没人动: 顶栏和上下切换按钮淡出 ----------
+// 鼠标停在顶栏 / 音量条上, 面板开着, 或者片子是暂停的, 都不算「没人用」——这些时候按钮得留着 (用户正要点)。
+// 动一下鼠标 / 手指 / 滚轮 / 按键就立刻回来 (触屏也一样, 点屏幕那一下本来就不会被当成暂停)。
+const IDLE_MS = 2600;
+let idleT = 0, overUi = false;
+function maybeIdle() {
+  if (root.hidden) return;                     // 已经收起来了: 不用再管 (下次进来会重新 poke)
+  if (covered() || overUi || volDrag !== null || !menuEl.hidden || !sheetEl.hidden || cur()?.video.paused) {
+    idleT = setTimeout(maybeIdle, IDLE_MS);    // 这会儿不算空闲: 过一会儿再看
+    return;
+  }
+  root.classList.add('idle');
+}
+function poke(e) {
+  if (e?.target?.closest) overUi = !!e.target.closest('.fd-top, .fd-nav, .fd-vol');
+  clearTimeout(idleT);
+  root.classList.remove('idle');
+  idleT = setTimeout(maybeIdle, IDLE_MS);
+}
+for (const ev of ['pointermove', 'pointerdown', 'wheel', 'touchstart']) root.addEventListener(ev, poke, { passive: true, capture: true });
+addEventListener('keydown', poke, true);
+
 // ---------- progress bar painting ----------
 let raf = 0, lastP = -1, lastB = -1;
 function tick() {
@@ -1249,6 +1322,7 @@ function openFeed(o = {}, restore = false) {
   root.hidden = false; document.body.style.overflow = 'hidden';
   root.style.setProperty('--dy', '0px'); root.style.setProperty('--p', 0); root.style.setProperty('--b', 0);
   setMuted(F.muted, false);
+  poke();                                    // 刚进来就开始计时: 不动鼠标的话过几秒顶栏自己收起来
   startMode(mode);
   lastP = lastB = -1; cancelAnimationFrame(raf); raf = requestAnimationFrame(tick);
 }
@@ -1259,6 +1333,7 @@ function hideFeed() {
   F.gen++;
   ring.forEach(s => { teardown(s); Object.assign(s, { i: -1, it: null, d: null }); s.el.classList.add('empty'); });
   root.hidden = true; closeOverlays(); tipEl.hidden = true; rateEl.hidden = true;
+  clearTimeout(idleT); root.classList.remove('idle'); overUi = false;
   ks = null; seekCancel(); root.classList.remove('scrubbing', 'dragging');
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   if (!$('#modal') && player.hidden) document.body.style.overflow = '';

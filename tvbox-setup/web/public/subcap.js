@@ -12,7 +12,9 @@
 (() => {
 'use strict';
 const KEY = 'subStyle';
-const DEF = { font: 'sans', size: 100, color: '#ffffff', edge: 'shadow', bottom: 7 };
+// size2: 副字幕 (一段字幕里第二行及之后的行, 双语文件常见) 相对主字幕的字号比例, 0 = 不展示副字幕。
+// 默认 100: 和以前一样每行一样大, 用户想区分主次再往下调。
+const DEF = { font: 'sans', size: 100, size2: 100, color: '#ffffff', edge: 'shadow', bottom: 7 };
 // 字体: 系统黑体 / 宋体 / 圆体 / 楷体 / 等宽。iOS 上有苹方 / 宋体 / 圆体 / 楷体, 安卓和桌面回落到各自最接近的
 const FONTS = {
   sans: '-apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif',
@@ -27,6 +29,8 @@ const norm = st => {
   const s = { ...DEF, ...(st && typeof st === 'object' ? st : {}) };
   s.font = FONTS[s.font] ? s.font : DEF.font;
   s.size = clamp(parseFloat(s.size) || DEF.size, 60, 200);
+  s.size2 = clamp(parseFloat(s.size2), 0, 100);      // 0 是合法值 (关掉副字幕), 不能像上面那样用 || 兜底
+  if (!Number.isFinite(s.size2)) s.size2 = DEF.size2;
   s.bottom = clamp(parseFloat(s.bottom), 0, 40);
   if (!Number.isFinite(s.bottom)) s.bottom = DEF.bottom;
   s.color = /^#[0-9a-f]{6}$/i.test(s.color || '') ? s.color : DEF.color;
@@ -112,13 +116,16 @@ const entries = new Map();
 function mkOverlay(video, after) {
   const ov = document.createElement('div');
   ov.className = 'subov';
-  ov.innerHTML = '<div class="subcap"><span class="subtx"></span></div>';
+  ov.innerHTML = '<div class="subcap"><span class="subtx"></span><span class="subtx2"></span></div>';
   (after && after.parentElement === video.parentElement ? after : video).after(ov);
   return ov;
 }
+// 副字幕 = 一段字幕里第二行及之后的行 (双语字幕文件常见: 中文 / 英文各占一行)。字号按比例跟着主字幕走, 0 = 不展示。
 function applyVars(ov, st, fs, gap) {
   ov.dataset.edge = st.edge;
+  ov.dataset.s2 = st.size2 > 0 ? 'on' : 'off';
   ov.style.setProperty('--subfs', fs.toFixed(1) + 'px');
+  ov.style.setProperty('--subfs2', Math.max(0, fs * st.size2 / 100).toFixed(1) + 'px');
   ov.style.setProperty('--subfont', FONTS[st.font]);
   ov.style.setProperty('--subcolor', st.color);
   ov.style.setProperty('--subgap', Math.round(gap) + 'px');
@@ -130,49 +137,74 @@ function box(el, host) {
   while (n && n !== host) { x += n.offsetLeft; y += n.offsetTop; n = n.offsetParent; }
   return { x, y, w: el.clientWidth, h: el.clientHeight };
 }
+// 放大镜的当前状态 (zoom.js 写的是 <video> 的 translate / scale 属性: 以元素中心为原点缩放 / 平移)。
+// 老浏览器不支持这两个独立属性时它退回写 transform, 那时整个矩阵都是缩放 / 平移, 样式里的位移已经被顶掉了。
+function zoomOf(v) {
+  const st = v.style;
+  if (st.scale || st.translate) {
+    const s = parseFloat(st.scale), t = String(st.translate || '').trim().split(/\s+/);
+    return { s: Number.isFinite(s) && s > 0 ? s : 1, x: parseFloat(t[0]) || 0, y: parseFloat(t[1]) || 0, inline: false };
+  }
+  if (st.transform && st.transform !== 'none') {
+    try { const m = new DOMMatrixReadOnly(st.transform); return { s: m.a > 0 ? m.a : 1, x: m.e, y: m.f, inline: true }; } catch {}
+  }
+  return { s: 1, x: 0, y: 0, inline: false };
+}
 // 画面区域 (不含黑边) 在「叠加层父元素」坐标系里的位置; 也顺手算好字号和字幕距画面底部的距离
 function layout(e) {
   const v = e.video, ov = e.ov;
   if (!ov || !ov.isConnected) return;
   const host = ov.parentElement;
   const b = box(v, host);
-  if (!b.w || !b.h || !host.clientWidth) { ov.hidden = true; e.sig = ''; return; }
-  ov.hidden = false;
+  const HW = host.clientWidth, HH = host.clientHeight;
+  if (!b.w || !b.h || !HW || !HH) { ov.hidden = true; e.sig = ''; return; }
   const fit = getComputedStyle(v).objectFit || 'contain';
   const vw = v.videoWidth, vh = v.videoHeight;
   let cw = b.w, ch = b.h;
   if (vw && vh && fit === 'contain') { const k = Math.min(b.w / vw, b.h / vh); cw = vw * k; ch = vh * k; }   // contain: 画面居中, 四周是黑边
   let left = b.x + (b.w - cw) / 2, top = b.y + (b.h - ch) / 2;
-  // 样式本身带的位移 (沉浸页的横屏片上提是写在 <video> 的 transform 上的)
-  const tf = getComputedStyle(v).transform;
-  if (tf && tf !== 'none') { try { const m = new DOMMatrixReadOnly(tf); left += m.e; top += m.f; } catch {} }
-  // 放大镜 (zoom.js 只写 <video> 的 translate / scale 属性): 以元素中心为原点缩放, 画面跟着放大 / 平移
-  const sc = parseFloat(v.style.scale) || 1;
-  const tr = String(v.style.translate || '').trim().split(/\s+/).map(parseFloat);
-  const tx = tr[0] || 0, ty = tr[1] || 0;
-  if (sc !== 1 || tx || ty) {
-    const cx = left + cw / 2 + tx, cy = top + ch / 2 + ty;
-    cw *= sc; ch *= sc; left = cx - cw / 2; top = cy - ch / 2;
+  // 放大镜: 以 <video> 元素中心为原点点缩放, 画面跟着放大 / 平移
+  const z = zoomOf(v);
+  // 样式本身带的位移 (沉浸页的横屏片上提是写在 <video> 的 transform 上的); 放大镜占了 transform 时以它为准
+  if (!z.inline) {
+    const tf = getComputedStyle(v).transform;
+    if (tf && tf !== 'none') { try { const m = new DOMMatrixReadOnly(tf); left += m.e; top += m.f; } catch {} }
   }
+  if (z.s !== 1 || z.x || z.y) {
+    const cx = left + cw / 2 + z.x, cy = top + ch / 2 + z.y;    // 缩放中心 = 画面中心 (contain 时画面在元素里居中)
+    cw *= z.s; ch *= z.s; left = cx - cw / 2; top = cy - ch / 2;
+  }
+  // 只画在容器看得见的那一块里: 画面放大到屏幕外时, 字幕跟着画面走, 但不会被 overflow 裁掉、也不会跑到画面外看不见。
+  // 画面没被裁时这块就是画面本身, 和以前的算法完全一样。
+  const x0 = Math.max(0, left), y0 = Math.max(0, top);
+  const bw = Math.min(HW, left + cw) - x0, bh = Math.min(HH, top + ch) - y0;
+  if (bw < 12 || bh < 12) { ov.hidden = true; e.sig = ''; return; }
+  ov.hidden = false;
   const st = style();
   // 字号跟画面高度走 (横屏片在竖屏手机上画面只有 200 多 px 高, 再兜一个按屏幕短边算的下限, 不然小得没法读)
-  const fs = clamp(Math.max(ch * 0.048, Math.min(host.clientWidth, host.clientHeight) * 0.036) * st.size / 100, 11, 96);
+  const fs = clamp(Math.max(ch * 0.048, Math.min(HW, HH) * 0.036) * st.size / 100, 11, 96);
   // 底部留白: 位置设置 (% 画面高度) + 调用方要求的避让 (普通播放器的控制条 / 沉浸页底部的标题, 见 app.js、feed.js)
   let gap = ch * st.bottom / 100;
-  if (e.reserve) { try { const r = +e.reserve({ x: left, y: top, w: cw, h: ch }); if (r > 0) gap += r; } catch {} }
-  gap = Math.min(gap, ch * 0.72);
+  if (e.reserve) { try { const r = +e.reserve({ x: x0, y: y0, w: bw, h: bh }); if (r > 0) gap += r; } catch {} }
+  gap = Math.min(gap, bh * 0.72);
   // 什么都没变就不碰 DOM (tick 里每 500ms 会重算一次, 免得白白触发样式重算)
-  const sig = [left, top, cw, ch, fs, gap].map(n => Math.round(n * 10)).join() + '|' + [st.font, st.size, st.color, st.edge, st.bottom].join();
+  const sig = [x0, y0, bw, bh, fs, gap].map(n => Math.round(n * 10)).join() + '|' + [st.font, st.size, st.size2, st.color, st.edge, st.bottom].join();
   if (sig === e.sig) return;
   e.sig = sig;
-  ov.style.left = left + 'px'; ov.style.top = top + 'px';
-  ov.style.width = cw + 'px'; ov.style.height = ch + 'px';
+  // 放大 / 平移的过程中位置每帧都在变: 把「跟着控制条平滑下移」那条过渡关掉, 不然字幕会慢半拍、看着像飘了
+  ov.dataset.zoom = z.s !== 1 || z.x || z.y ? '1' : '0';
+  ov.style.left = x0 + 'px'; ov.style.top = y0 + 'px';
+  ov.style.width = bw + 'px'; ov.style.height = bh + 'px';
   applyVars(ov, st, fs, gap);
 }
 function text(e, s) {
   if (!e.cap || e.txt === s) return;
   e.txt = s;
-  e.tx.textContent = s;
+  // 一段字幕里的换行就是「主 / 副」的分界: 第一行是主字幕, 第二行及之后是副字幕 (双语文件常见)。
+  // 副字幕字号由 --subfs2 (主字幕 × 比例) 决定, 比例设 0 时 CSS 直接把那一块藏掉, 只剩第一行。
+  const lines = s ? s.split('\n') : [];
+  e.tx.textContent = lines[0] || '';
+  e.tx2.textContent = lines.length > 1 ? lines.slice(1).join('\n') : '';
   e.cap.hidden = !s;
 }
 function paint(e) {
@@ -226,7 +258,7 @@ function bind(e) {
 }
 function ensure(e, url) {
   const v = e.video;
-  if (!e.ov || !e.ov.isConnected) { e.ov = mkOverlay(v, e.anchor); e.cap = e.ov.querySelector('.subcap'); e.tx = e.ov.querySelector('.subtx'); e.dirty = true; e.sig = ''; }
+  if (!e.ov || !e.ov.isConnected) { e.ov = mkOverlay(v, e.anchor); e.cap = e.ov.querySelector('.subcap'); e.tx = e.ov.querySelector('.subtx'); e.tx2 = e.ov.querySelector('.subtx2'); e.dirty = true; e.sig = ''; }
   // 原生全屏兜底用的 <track>: 平时 hidden (只加载不显示, 屏幕上由 .subov 画), 系统全屏时才交出去
   let tr = v.querySelector('track[data-sub]');
   if (!tr) { tr = document.createElement('track'); tr.dataset.sub = '1'; tr.kind = 'subtitles'; tr.srclang = 'zh'; tr.label = '字幕'; v.appendChild(tr); }
@@ -241,7 +273,7 @@ function mount(video, opt) {
   if (!video || !url) return unmount(video);
   let e = entries.get(video);
   if (!e) {
-    e = { video, ov: null, tr: null, cap: null, tx: null, cues: [], txt: null, raf: 0, gen: 0, url: '', reserve: null, anchor: null, dirty: true, at: 0, off: true, sig: '' };
+    e = { video, ov: null, tr: null, cap: null, tx: null, tx2: null, cues: [], txt: null, raf: 0, gen: 0, url: '', reserve: null, anchor: null, dirty: true, at: 0, off: true, sig: '' };
     entries.set(video, e); bind(e);
   }
   e.off = false;
@@ -260,7 +292,7 @@ function unmount(video) {
   if (e.raf) { cancelAnimationFrame(e.raf); e.raf = 0; }
   e.cues = []; e.url = ''; e.gen++;
   e.video.querySelector('track[data-sub]')?.remove(); e.tr = null;
-  e.ov?.remove(); e.ov = e.cap = e.tx = null; e.sig = '';
+  e.ov?.remove(); e.ov = e.cap = e.tx = e.tx2 = null; e.sig = '';
 }
 const unmountAll = () => [...entries.keys()].forEach(unmount);
 // 把「字体 / 颜色」挂到 <html> 上: iPhone 系统原生全屏时字幕由系统画 (DOM 浮层看不见),

@@ -5613,9 +5613,10 @@ const SUB_EDGE_NAMES = { shadow: '阴影', outline: '描边', box: '半透明底
 function subStyleSection() {
   const st = SUB.get();
   return `<section id="subStyleSec"><h2>字幕样式</h2>
-    <p class="hint">只改这台设备上「怎么显示」，不动字幕文件本身。默认贴着正在看的<strong>画面</strong>底部（上下有黑边时以黑边上沿为准），沉浸播放和普通播放器一致，换片换集都不用重设；播放器的控制条出来时字幕会自己往上让一点。</p>
-    <div class="subpv"><div class="subpv-frame"></div><span class="subpv-tag">画面预览</span><div class="subov"><div class="subcap"><span class="subtx">这是一行示例字幕<br>Subtitle sample</span></div></div></div>
+    <p class="hint">只改这台设备上「怎么显示」，不动字幕文件本身。默认贴着正在看的<strong>画面</strong>底部（上下有黑边时以黑边上沿为准），沉浸播放和普通播放器一致，换片换集都不用重设；播放器的控制条出来时字幕会自己往上让一点。双语字幕（一段字幕里有两行，比如中文 + 英文）的第二行起算<strong>副字幕</strong>，可以单独调小或直接关掉。</p>
+    <div class="subpv"><div class="subpv-frame"></div><span class="subpv-tag">画面预览</span><div class="subov"><div class="subcap"><span class="subtx">这是一行示例字幕</span><span class="subtx2">Subtitle sample</span></div></div></div>
     <div class="subrow"><span class="lb">大小</span><input class="subrange" type="range" min="60" max="200" step="5" data-subsz value="${st.size}"><span class="subval" data-subszv>${st.size}%</span></div>
+    <div class="subrow"><span class="lb">副字幕</span><input class="subrange" type="range" min="0" max="100" step="5" data-subsz2 value="${st.size2}"><span class="subval" data-subsz2v>${st.size2 ? st.size2 + '%' : '不显示'}</span></div>
     <div class="subrow"><span class="lb">位置</span><input class="subrange" type="range" min="0" max="35" step="1" data-subbot value="${st.bottom}"><span class="subval" data-subbotv>距底部 ${st.bottom}%</span></div>
     <div class="subrow"><span class="lb">字体</span><div class="seg">${Object.keys(SUB_FONT_NAMES).map(k => `<button data-subfont="${k}" class="${st.font === k ? 'on' : ''}">${SUB_FONT_NAMES[k]}</button>`).join('')}</div></div>
     <div class="subrow"><span class="lb">颜色</span><div class="subsw">${SUB_COLORS.map(c => `<button data-subsw="${c}" class="${c === st.color.toLowerCase() ? 'on' : ''}" style="background:${c}" title="${c}"></button>`).join('')}<input type="color" data-subcol value="${st.color}" title="自己挑一个颜色"></div></div>
@@ -5628,21 +5629,24 @@ function subStyleUi() {
   SUB.preview($('.subov', sec));
   const sync = () => {
     const st = SUB.get();
-    const sz = $('[data-subsz]', sec), bt = $('[data-subbot]', sec);
+    const sz = $('[data-subsz]', sec), bt = $('[data-subbot]', sec), sz2 = $('[data-subsz2]', sec);
     if (sz) sz.value = st.size;
     if (bt) bt.value = st.bottom;
-    const szv = $('[data-subszv]', sec), btv = $('[data-subbotv]', sec);
+    if (sz2) sz2.value = st.size2;
+    const szv = $('[data-subszv]', sec), btv = $('[data-subbotv]', sec), sz2v = $('[data-subsz2v]', sec);
     if (szv) szv.textContent = st.size + '%';
     if (btv) btv.textContent = '距底部 ' + st.bottom + '%';
+    if (sz2v) sz2v.textContent = st.size2 ? st.size2 + '%' : '不显示';
     $$('[data-subfont]', sec).forEach(x => x.classList.toggle('on', x.dataset.subfont === st.font));
     $$('[data-subedge]', sec).forEach(x => x.classList.toggle('on', x.dataset.subedge === st.edge));
     $$('[data-subsw]', sec).forEach(x => x.classList.toggle('on', String(x.dataset.subsw).toLowerCase() === st.color.toLowerCase()));
     const col = $('[data-subcol]', sec); if (col && col.value.toLowerCase() !== st.color.toLowerCase()) col.value = st.color;
     SUB.paintPreviews();
   };
-  const sz = $('[data-subsz]', sec), bt = $('[data-subbot]', sec), col = $('[data-subcol]', sec);
+  const sz = $('[data-subsz]', sec), bt = $('[data-subbot]', sec), sz2 = $('[data-subsz2]', sec), col = $('[data-subcol]', sec);
   if (sz) sz.oninput = e => { SUB.set({ size: +e.target.value }); sync(); };
   if (bt) bt.oninput = e => { SUB.set({ bottom: +e.target.value }); sync(); };
+  if (sz2) sz2.oninput = e => { SUB.set({ size2: +e.target.value }); sync(); };
   if (col) col.oninput = e => { SUB.set({ color: e.target.value }); sync(); };
   sec.addEventListener('click', e => {
     const b = e.target.closest('[data-subfont],[data-subedge],[data-subsw]'); if (!b) return;
