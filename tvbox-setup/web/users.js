@@ -26,7 +26,7 @@ const NAME_RE = /^[\p{L}\p{N}_-]{2,20}$/u;
 const MIN_PW = 6, MAX_PW = 64;
 const HIST_KEEP = 100, FAV_KEEP = 800, LFAV_KEEP = 800, PROG_KEEP = 3000;
 const PROG_MIN_DUR = 180;   // 总长不到 3 分钟的视频不记进度
-const KV_KEYS = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols', 'cardMode', 'cardScale']);   // cardMode / cardScale: 封面设置 (竖版 / 横版 + 大小) 跟账号走
+const KV_KEYS = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols', 'cardMode', 'cardScale', 'subGlobal']);   // cardMode / cardScale: 封面设置 (竖版 / 横版 + 大小) 跟账号走; subGlobal: 字幕全局偏好 (开/关、哪种语言), 没单独存过字幕的片/集按它来
 const LEVELS = ['kids', 'standard', 'all'];   // favCols: 收藏合集 [{id,name,at}]; 哪部片在哪些合集里写在收藏条目自己的 cols 字段里
 const KV_MAX = 200e3;
 const ENTRY_MAX = 8e3;
@@ -88,6 +88,9 @@ module.exports = function createUsers({ file, allowRegister = true }) {
     if (!cols.includes('level')) db.exec("ALTER TABLE users ADD COLUMN level TEXT NOT NULL DEFAULT 'standard'");
     if (!cols.includes('is_admin')) db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');   // 老列, 不再使用 (账号没有管理员概念)
     if (!cols.includes('unlimited')) { db.exec('ALTER TABLE users ADD COLUMN unlimited INTEGER NOT NULL DEFAULT 0'); db.exec("UPDATE users SET unlimited=1 WHERE level='all'"); }   // 原来就是「全部」的账号保持放开
+    // 老库升级: progress 补一列 sub (这一集自己选过的字幕, JSON 文本, 没选过是 NULL)
+    const progCols = db.prepare('PRAGMA table_info(progress)').all().map(c => c.name);
+    if (!progCols.includes('sub')) db.exec('ALTER TABLE progress ADD COLUMN sub TEXT');
     return db;
   };
   const q = (sql, ...a) => open().prepare(sql).all(...a);
@@ -155,7 +158,12 @@ module.exports = function createUsers({ file, allowRegister = true }) {
       if (!e || typeof e !== 'object' || !text(e.site) || !text(e.id)) return;
       const ep = Math.floor(+e.ep), t = +e.t, dur = +e.dur;
       if (!(ep >= 0 && ep < 100000) || !(dur > PROG_MIN_DUR) || !isFinite(dur) || !(t >= 0) || !isFinite(t)) return;
-      run(`INSERT INTO progress(user_id, site, vid, ep, at, t, dur, done) VALUES(?,?,?,?,?,?,?,?)
+      // sub: 这一集自己选过的字幕 (null/undefined = 这次没带字幕信息, 保留原来存的那条, 不要用 undefined 覆盖掉)
+      const subGiven = e.sub !== undefined, sub = subGiven ? (e.sub === null ? null : cleanEntry(e.sub)) : undefined;
+      if (subGiven) run(`INSERT INTO progress(user_id, site, vid, ep, at, t, dur, done, sub) VALUES(?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(user_id, site, vid, ep) DO UPDATE SET at=excluded.at, t=excluded.t, dur=excluded.dur, done=excluded.done, sub=excluded.sub`,
+      uid, text(e.site), text(e.id), ep, atOf(e), Math.min(t, dur), dur, e.done ? 1 : 0, sub);
+      else run(`INSERT INTO progress(user_id, site, vid, ep, at, t, dur, done) VALUES(?,?,?,?,?,?,?,?)
            ON CONFLICT(user_id, site, vid, ep) DO UPDATE SET at=excluded.at, t=excluded.t, dur=excluded.dur, done=excluded.done`,
       uid, text(e.site), text(e.id), ep, atOf(e), Math.min(t, dur), dur, e.done ? 1 : 0);
       run(`DELETE FROM progress WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM progress WHERE user_id=? ORDER BY at DESC LIMIT ${PROG_KEEP})`, uid, uid);
@@ -225,7 +233,7 @@ module.exports = function createUsers({ file, allowRegister = true }) {
   function snapshot(uid) {
     return {
       history: q('SELECT data FROM history WHERE user_id=? ORDER BY at DESC', uid).map(parse).filter(Boolean),
-      prog: q('SELECT site, vid id, ep, t, dur, at, done FROM progress WHERE user_id=? ORDER BY at DESC', uid).map(r => ({ site: r.site, id: r.id, ep: r.ep, t: r.t, dur: r.dur, at: r.at, done: r.done ? 1 : 0 })),
+      prog: q('SELECT site, vid id, ep, t, dur, at, done, sub FROM progress WHERE user_id=? ORDER BY at DESC', uid).map(r => { let sub; if (r.sub) try { sub = JSON.parse(r.sub); } catch {} return { site: r.site, id: r.id, ep: r.ep, t: r.t, dur: r.dur, at: r.at, done: r.done ? 1 : 0, ...(sub ? { sub } : {}) }; }),
       favs: q('SELECT data FROM favorites WHERE user_id=? ORDER BY at DESC', uid).map(parse).filter(Boolean),
       liveFavs: q('SELECT data FROM live_favs WHERE user_id=? ORDER BY at DESC', uid).map(parse).filter(Boolean),
       kv: Object.fromEntries(q('SELECT k, v FROM kv WHERE user_id=?', uid).map(r => [r.k, r.v])),

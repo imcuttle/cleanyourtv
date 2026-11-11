@@ -439,7 +439,28 @@ const prog = {
   put(site, id, ep, t, dur) {
     if (!(dur > PROG_MIN) || !isFinite(dur) || !(t >= 10) || !isFinite(t)) return;
     const done = dur - t <= 30 || t / dur >= 0.97 ? 1 : 0;
-    const e = { site, id, ep, t: Math.round(Math.min(t, dur)), dur: Math.round(dur), at: Date.now(), done };
+    // sub 是另一回事 (字幕选了哪个), 这里只管播放进度: 已经存过的 sub 原样带过去, 不要被这每 4 秒一次的调用冲掉。
+    const old = prog.get(site, id, ep);
+    const e = { site, id, ep, t: Math.round(Math.min(t, dur)), dur: Math.round(dur), at: Date.now(), done, ...(old?.sub !== undefined ? { sub: old.sub } : {}) };
+    const list = prog.all().filter(p => !(p.site === site && p.id === id && p.ep === ep));
+    list.unshift(e);
+    UD.set('prog', JSON.stringify(list.slice(0, PROG_KEEP_LOCAL)));
+    ACCT.op({ t: 'prog.put', e });
+  },
+  // 这一集单独选过的字幕 (site,id,ep): sub 是 null/undefined (没选过, 跟全局偏好走) 或 {mode:'off'} / {mode:'local',key,lang,label} / {mode:'remote',...}。
+  getSub(site, id, ep) { return prog.get(site, id, ep)?.sub; },
+  // 存这一集的字幕选择。视频总长要够 (>PROG_MIN) 才能单独记住 (跟 put 的限制一致——短视频本来就不记进度条目, 字幕选择也就没地方挂);
+  // 短视频仍然能正常播放字幕, 只是这个选择不会被这一集「记住」, 下次打开还是跟全局偏好走。
+  setSub(site, id, ep, sub, dur) {
+    const cur = prog.get(site, id, ep);
+    if (!cur) {
+      if (!(dur > PROG_MIN) || !isFinite(dur)) return;
+      const e = { site, id, ep, t: 0, dur: Math.round(dur), at: Date.now(), done: 0, sub };
+      UD.set('prog', JSON.stringify([e, ...prog.all()].slice(0, PROG_KEEP_LOCAL)));
+      ACCT.op({ t: 'prog.put', e });
+      return;
+    }
+    const e = { ...cur, sub, at: Date.now() };
     const list = prog.all().filter(p => !(p.site === site && p.id === id && p.ep === ep));
     list.unshift(e);
     UD.set('prog', JSON.stringify(list.slice(0, PROG_KEEP_LOCAL)));
@@ -464,6 +485,13 @@ const prog = {
 };
 
 window.epProg = prog;   // 沉浸看片 (feed.js 在自己的作用域里，那里 prog 是进度条元素) 通过它用同一套分集进度
+
+// ---------- 字幕的全局偏好 ----------
+// 最近一次手动选的字幕「长什么样」(跟哪部片无关)，跟账号走 (UD)。打开一部新片、这一集自己没单独存过字幕时，按它定默认选择。
+const subGlobalPref = {
+  get() { return UD.json('subGlobal', null); },
+  set(sub) { UD.set('subGlobal', JSON.stringify(sub)); },
+};
 
 // 成人 entries (history / favorites): a title is 成人 when it was saved with the flag, its source is a 成人 source, or it is
 // a local title that is not explicitly flagged clean (legacy entries). They appear nowhere in 儿童 / 标准 mode, and in
@@ -3322,13 +3350,13 @@ if (ms) {
   on('play', () => video.play().catch(() => {}));
   on('pause', () => video.pause());
   const vod = () => cur && cur.kind !== 'live' && isFinite(vdur(video));
-  on('seekbackward', d => { if (vod()) video.currentTime -= d?.seekOffset || 10; });
-  on('seekforward', d => { if (vod()) video.currentTime += d?.seekOffset || 10; });
-  on('seekto', d => { if (vod() && d.seekTime != null && isFinite(d.seekTime)) video.currentTime = d.seekTime; });
+  on('seekbackward', d => { if (vod()) seekTo(video, curT(video) - (d?.seekOffset || 10)); });
+  on('seekforward', d => { if (vod()) seekTo(video, curT(video) + (d?.seekOffset || 10)); });
+  on('seekto', d => { if (vod() && d.seekTime != null && isFinite(d.seekTime)) seekTo(video, d.seekTime); });
   on('enterpictureinpicture', () => { if (cur && !video.paused && !pipOn) togglePip(); });
   video.addEventListener('play', () => { ms.playbackState = 'playing'; });
   video.addEventListener('pause', () => { ms.playbackState = 'paused'; });
-  const pos = () => { if (isFinite(vdur(video)) && vdur(video) > 0) try { ms.setPositionState({ duration: vdur(video), position: Math.min(video.currentTime, vdur(video)), playbackRate: video.playbackRate || 1 }); } catch {} };
+  const pos = () => { if (isFinite(vdur(video)) && vdur(video) > 0) try { ms.setPositionState({ duration: vdur(video), position: Math.min(curT(video), vdur(video)), playbackRate: video.playbackRate || 1 }); } catch {} };
   video.addEventListener('loadedmetadata', pos); video.addEventListener('ratechange', pos); video.addEventListener('seeked', pos);
 }
 
@@ -3383,6 +3411,7 @@ function openPlayer(startAt) {
     msg(msgTxt === '点一下播放' ? msgTxt : '一直没加载出来…', true);
   }, 10000);
   skipInit();
+  subInit();
   syncMore();
   poke();
 }
@@ -3533,7 +3562,7 @@ async function openSrcSheet() {
 // 换到另一个源播放: 选集 / 线路跟着新片源走, 顶栏的「当前源」不动；进度接着看 (超过 5 秒才带)
 async function switchSrc(site, id) {
   togglePlist(false);
-  const ep = cur?.ep || 0, t = video.currentTime || 0;
+  const ep = cur?.ep || 0, t = curT(video) || 0;
   const tt = toast('正在切换到另一个源…', true);
   try {
     const d = await api('detail', { site, id });
@@ -3573,8 +3602,8 @@ function duckFlash(ms = 600) {
   flashT = setTimeout(() => { if (video._duck) video._unduck?.(); }, ms);
 }
 // rebuild: 播放中悄悄重建 (见 FRAG_CHANGED 里的说明): 不弹「加载中」、不盖封面, 倍速保留
-let lastLoad = null;
-function load(url, startAt, viaProxy, isLocal, rebuild = false, native = false) {
+let lastLoad = null, loadGen = 0;
+async function load(url, startAt, viaProxy, isLocal, rebuild = false, native = false) {
   lastLoad = { url, viaProxy, isLocal };
   const keepRate = rebuild ? video.playbackRate : 0;
   // 换源 / 换线路 / 重新加载: 先把旧解码器彻底断开并静音, 新画面接上的瞬间就不会有「电流声」; 有画面后恢复原来的静音状态
@@ -3585,19 +3614,31 @@ function load(url, startAt, viaProxy, isLocal, rebuild = false, native = false) 
   if (hls) { hls.destroy(); hls = null; }
   video.onerror = null; video.onloadedmetadata = null;
   video.removeAttribute('src'); video.load();
-  const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : url;
   // 本地媒体 originals (/media/f/…) play natively; /media/h/… is a growing HLS playlist, start at its beginning.
   const direct = /\.mp4(\?|$)/i.test(url) || url.startsWith('/media/f/');
+  const isHlsLocal = url.startsWith('/media/h/');
+  if (!rebuild) { msg('加载中…'); showCover(cur?.kind === 'vod' && cur.d?.adult ? cardPic(cur.d) : ''); }   // adult sources only
+  fixDuration(video, isHlsLocal ? url : '');
+  video._hlsOffset = 0;
+  const myGen = ++loadGen;
+  if (isHlsLocal) {
+    // 拖到还没转出来的地方 (或第一次打开就要从中间续播): 先问服务端「这个时间点要不要重开转码」, 等它就位,
+    // 再去拿 index.m3u8——两边 (这里的控制面请求和下面 hls.js 真正发的播放列表请求) 都带同一个 t, 所以后者只是确认, 不会再触发一次重开。
+    const r = await api('local/hlsat', { id: hlsIdOf(url), t: Math.round(startAt || 0) }, null).catch(e => ({ error: e.message || String(e) }));
+    if (myGen !== loadGen) return;   // 这次加载已经被后来的取代 (比如用户很快又点了别的)
+    if (r?.error) { msg('播放失败：' + r.error + '。换一集或换个源试试', true); return; }
+    video._hlsOffset = r?.offset || 0;
+  }
+  const localAt = Math.max(0, (startAt || 0) - video._hlsOffset);
+  const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : isHlsLocal ? url + '?t=' + Math.round(startAt || 0) : url;
   playingSrc = { src, hls: !direct };
   pvReset();
-  if (!rebuild) { msg('加载中…'); showCover(cur?.kind === 'vod' && cur.d?.adult ? cardPic(cur.d) : ''); }   // adult sources only
-  fixDuration(video, url.startsWith('/media/h/') ? url : '');
-  const seek = () => { if (startAt) video.currentTime = startAt; if (keepRate) video.playbackRate = keepRate; video.play().catch(() => msg('点一下播放')); };
+  const seek = () => { if (localAt) video.currentTime = localAt; if (keepRate) video.playbackRate = keepRate; video.play().catch(() => msg('点一下播放')); };
   const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集或换个源试试', true); };
   if (window.Hls && Hls.isSupported() && !direct && !native) {
     // 缓冲只留近处: 向前最多 30 秒 / 30MB, 向后只留 30 秒。码率高的源 (2~3Mbps) 如果让它一路缓冲下去, 几分钟后音频
     // SourceBuffer 先满, 浏览器被迫丢旧数据, 音频出现缺口, 之后就是一段「电流声」; 刷新后缓冲清空又正常。
-    hls = new Hls({ maxBufferLength: 120, maxMaxBufferLength: 240, maxBufferSize: 150 * 1000 * 1000, backBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 8, ...(url.startsWith('/media/h/') || rebuild ? { startPosition: startAt || 0 } : {}) });
+    hls = new Hls({ maxBufferLength: 120, maxMaxBufferLength: 240, maxBufferSize: 150 * 1000 * 1000, backBufferLength: 30, enableWorker: true, maxAudioFramesDrift: 8, ...(isHlsLocal || rebuild ? { startPosition: localAt } : {}) });
     hls.on(Hls.Events.MANIFEST_PARSED, seek);
     // 每跨一个断点静音挡一下, 蹦的一声就听不到了
     // 有的源每二十来秒一个断点 (#EXT-X-DISCONTINUITY), 浏览器里音频时间轴每跨一次就比画面多落后一点点 (实测约 0.15 秒 / 100 秒),
@@ -3688,16 +3729,16 @@ video.addEventListener('ended', () => {
   if (!cur || cur.kind === 'live') return;
   if (cur.kind === 'vod' && vdur(video) > PROG_MIN) prog.put(cur.d.site, cur.d.id, cur.ep, vdur(video), vdur(video));   // 放完了: 记成「看完」, 再点开这一集从头播
   const m = pmode()[0], last = cur.ep >= cur.eps.length - 1;
-  if (m === 'one') { video.currentTime = 0; video.play().catch(() => {}); return; }
+  if (m === 'one') { seekTo(video, 0).then(() => video.play().catch(() => {})); return; }
   if (cur.pl) { plStep(1); return; }                              // 合集顺序播放: 放完这一部接下一部 (顺序播放放完最后一部就停, 列表循环回到第一部)
   if (!last) return step(1);
-  if (m === 'loop') { if (cur.eps.length > 1) { cur.ep = 0; openPlayer(0); } else { video.currentTime = 0; video.play().catch(() => {}); } }
+  if (m === 'loop') { if (cur.eps.length > 1) { cur.ep = 0; openPlayer(0); } else { seekTo(video, 0).then(() => video.play().catch(() => {})); } }
 });
 let lastSave = 0;
 function saveWatch() {
   if (!cur || cur.kind !== 'vod' || !vdur(video) || video.readyState < 2) return;
   lastSave = Date.now();
-  const { d, line, ep, eps } = cur, t = video.currentTime, dur = vdur(video);
+  const { d, line, ep, eps } = cur, t = curT(video), dur = vdur(video);
   hist.put({ site: d.site, adult: d.adult ? 1 : 0, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
     line, ep, epName: eps[ep].name, t, dur });
   prog.put(d.site, d.id, ep, t, dur);
@@ -3787,6 +3828,103 @@ function skipFetch(A) {
     else if (r.status === 'pending' && ++A.tries < 40 && skipHT()) A.timer = setTimeout(() => skipFetch(A), 15000);
   }).catch(() => {});
 }
+// ---------- 字幕: 本地 (同目录同名文件) + 远程 (按源搜索), 选哪个记在 prog 里 (这一集自己的), 没单独选过跟全局偏好走 ----------
+const SUB_LANG_LABEL = { chs: '简体', sc: '简体', zh: '中文', zho: '中文', chi: '中文', cht: '繁体', tc: '繁体', en: '英文', eng: '英文', jp: '日文', jpn: '日文', ja: '日文', kr: '韩文', kor: '韩文', ko: '韩文' };
+const subLangLabel = l => SUB_LANG_LABEL[String(l || '').toLowerCase()] || (l || '');
+// 这一集在 prog 里的 key: 只有点播 (site/id/ep 都稳定) 才记; 本地下载列表 / 直播没有稳定 key, 字幕选择不单独记这一集, 只跟全局偏好走。
+function subKeyOf() { return cur && cur.kind === 'vod' ? { site: cur.d.site, id: cur.d.id, ep: cur.ep } : null; }
+// 这一集的地址是本地转码/原文件时, 取出文件 id (本地字幕要靠它去问同目录的字幕文件)。
+function subFileIdOf(url) { const m = /^\/media\/h\/([^/]+)\//.exec(url || '') || /^\/media\/f\/([^/.]+)\./.exec(url || ''); return m ? m[1] : ''; }
+let subState = null;
+function subTrackUrl(choice) {
+  if (!choice || !subState) return '';
+  if (choice.mode === 'local' && subState.fileId) return `/media/sub/${subState.fileId}?key=${encodeURIComponent(choice.key)}`;
+  if (choice.mode === 'remote') return '/api/subtitle/fetch?' + new URLSearchParams({ source: choice.source || '', url: choice.url || '', ext: choice.ext || 'srt', id: choice.id || '' });
+  return '';
+}
+// 真正把字幕挂到 <video> 上 (一个 <track data-sub>，没有就新建); persist=true 才写回 (本地字幕菜单点一下选 / 关才算「选过」，
+// 刚打开视频按规则套默认值不算，不然每次打开都把这一集焊死成当时的默认值，用户自己选的反而被盖掉)。
+function applySub(choice, persist = true) {
+  if (!subState) return;
+  subState.active = choice || null;
+  let tr = video.querySelector('track[data-sub]');
+  const url = subTrackUrl(choice);
+  if (!url) { tr?.remove(); }
+  else {
+    if (!tr) { tr = document.createElement('track'); tr.dataset.sub = '1'; tr.kind = 'subtitles'; video.appendChild(tr); }
+    tr.default = true;
+    if (!tr.src.endsWith(url)) tr.src = url;
+    const show = () => { if (tr.track) tr.track.mode = 'showing'; };
+    tr.onload = show; setTimeout(show, 0);
+  }
+  syncSubAct();
+  if (!persist) return;
+  subGlobalPref.set(choice ? { mode: choice.mode, lang: choice.lang || '' } : { mode: 'off' });
+  if (subState.key) prog.setSub(subState.key.site, subState.key.id, subState.key.ep, choice || { mode: 'off' }, vdur(video));
+}
+function syncSubAct() {
+  const b = document.querySelector('[data-act=sub]'); if (!b) return;
+  b.hidden = !subState || cur?.kind === 'live';
+  b.classList.toggle('on', !!subState?.active);
+}
+// 打开 / 换集时重新判一次字幕: 先看这一集自己是不是存过选择 (哪怕存的是「关」也认), 没存过才按全局偏好 (字幕类型/语言) 套到这一集的候选里。
+async function subInit() {
+  const e = cur?.eps?.[cur.ep];
+  if (!e || cur.kind === 'live') { subState = null; syncSubAct(); return; }
+  const mine = subState = { key: subKeyOf(), fileId: subFileIdOf(e.url), local: [], remote: [], active: null };
+  syncSubAct();
+  if (mine.fileId) {
+    try { const r = await api('local/subs', { id: mine.fileId }, null); if (subState === mine) mine.local = r?.subs || []; } catch {}
+  }
+  if (subState !== mine) return;
+  const saved = mine.key ? prog.getSub(mine.key.site, mine.key.id, mine.key.ep) : undefined;
+  let choice = null;
+  if (saved !== undefined && saved !== null) choice = saved.mode === 'off' ? null : saved;
+  else if (saved === undefined) {
+    const g = subGlobalPref.get();
+    if (g && g.mode === 'local') choice = mine.local.find(s => subLangLabel(s.lang) === subLangLabel(g.lang)) ? { mode: 'local', ...pickLocal(mine.local, g.lang) } : null;
+  }
+  applySub(choice, false);
+}
+function pickLocal(list, lang) { const hit = list.find(s => subLangLabel(s.lang) === subLangLabel(lang)) || list[0]; return hit ? { key: hit.key, lang: hit.lang } : {}; }
+const subUiOpen = () => { const b = $('.plist'); return !b.hidden && b.dataset.mode === 'sub'; };
+function drawSub() {
+  const box = $('.plist'), S = subState || { local: [], remote: [] };
+  box.dataset.mode = 'sub'; box.classList.remove('live', 'srcs', 'skipset'); box.classList.add('subset');
+  const items = [
+    { label: '关闭字幕', on: !S.active, apply: () => applySub(null) },
+    ...S.local.map(s => ({ label: (subLangLabel(s.lang) || s.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === s.key, apply: () => applySub({ mode: 'local', key: s.key, lang: s.lang }) })),
+    ...(S.remote || []).map(s => ({
+      label: `${s.name}${s.lang ? ' · ' + s.lang : ''} · ${s.source === 'xunlei' ? '迅雷' : s.source === 'assrt' ? '射手(伪)' : 'OpenSubtitles'}`,
+      on: S.active?.mode === 'remote' && S.active.url === s.url && S.active.id === s.id,
+      apply: () => applySub({ mode: 'remote', source: s.source, url: s.url || '', ext: s.ext || 'srt', id: s.id || '', lang: s.lang || '', name: s.name }),
+    })),
+  ];
+  box.innerHTML = `<div class="phead"><i class="grab"></i><b>字幕</b><span>本地同名字幕 / 在线搜索</span><button class="icon sm" data-pclose title="关闭">✕</button></div>
+    <div class="subsearch"><input type="search" placeholder="搜字幕：片名 / 番号…" value="${esc(S.q || '')}"><button data-subgo>搜索</button></div>
+    ${S.searching ? '<div class="substatus">搜索中…</div>' : S.searched && !(S.remote || []).length ? '<div class="substatus">没搜到，换个关键词试试</div>' : ''}
+    <div class="pitems">${items.map((it, i) => `<button data-i="${i}" class="${it.on ? 'on' : ''}" role="radio" aria-checked="${it.on}"><span class="sn"><b>${esc(it.label)}</b></span></button>`).join('')}</div>`;
+  $('[data-pclose]', box).onclick = () => togglePlist(false);
+  $$('.pitems button', box).forEach((b, i) => b.onclick = () => { items[i].apply(); drawSub(); });
+  const input = $('.subsearch input', box), go = $('[data-subgo]', box);
+  const runSearch = async () => {
+    const q = input.value.trim(); if (!q || !subState) return;
+    const mine = subState; mine.q = q; mine.searching = true; mine.searched = false; drawSub();
+    let results = [];
+    try { const r = await api('subtitle/search', { q }, null); results = r?.results || []; } catch {}
+    if (subState !== mine) return;
+    mine.remote = results; mine.searching = false; mine.searched = true;
+    drawSub(); $('.subsearch input', $('.plist'))?.focus();
+  };
+  go.onclick = runSearch;
+  input.onkeydown = e => { if (e.key === 'Enter') runSearch(); };
+}
+function openSubSheet() {
+  if (!subState) return;
+  if (subUiOpen()) return togglePlist(false);
+  drawSub(); togglePlist(true);
+}
+
 // 把声音指纹的结果 (片头 / 片尾) 和播放列表里认出的广告对起来:
 //  1. 指纹会把「每集都一样的广告」也当成片头 / 片尾 (实测: 开头 5 分钟里的广告被报成第二段片头): 和广告重叠一半以上的剔掉, 只当广告
 //  2. 片头最多留 2 段 (最长的), 片尾 1 段
@@ -3826,7 +3964,7 @@ function markAt(t, A = ask, v = video) {
 // 现在播到的位置落在要跳过的段里吗: 是就返回 { name, to } (每一段只跳一次, 跳完想回看不会再拦)。普通播放器和沉浸播放共用。
 function skipDue(A, v) {
   if (!A || A.dead || (!A.head.length && !A.tail.length && !A.mid.length) || v.seeking) return null;
-  const t = v.currentTime, d = vdur(v), M = marksOf(d, A);
+  const t = curT(v), d = vdur(v), M = marksOf(d, A);
   for (const [name, list] of [['片头', skipHT() ? M.head : []], ['广告', skipAd() ? M.ads : []], ['片尾', skipHT() ? M.tail : []]]) for (const r of list) {
     const id = name + r[0];
     if (A.done.has(id) || t < r[0] - 0.3 || t >= r[1] - 2) continue;
@@ -3839,7 +3977,7 @@ video.addEventListener('timeupdate', () => {
   if (scrubbing) return;
   const hit = skipDue(ask, video);
   if (!hit) return;
-  duckFlash(); video.currentTime = hit.to;   // 跳的瞬间先静音一小会儿, 不要「啪」一声
+  duckFlash(); seekTo(video, hit.to);   // 跳的瞬间先静音一小会儿, 不要「啪」一声
   toast('已跳过' + hit.name);
 });
 
@@ -3925,6 +4063,7 @@ function closePlayer() {
   Z.resetFor(video);
   saveWatch();
   skipStop(); ask = null;
+  subState = null; video.querySelector('track[data-sub]')?.remove();
   if (hls) { hls.destroy(); hls = null; }
   pvReset(); playingSrc = null;
   video.pause(); video.removeAttribute('src'); video.load();
@@ -3964,6 +4103,7 @@ player.addEventListener('click', e => {
   if (act === 'pmode') return cyclePmode();
   if (act === 'rate') return cycleRate();
   if (act === 'skipt') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSkipSheet(); }
+  if (act === 'sub') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSubSheet(); }
   if (act === 'fs') return toggleFs();
   if (act === 'cast') return sysToggle();
   if (act === 'lock') return setLock(true);
@@ -4022,11 +4162,30 @@ function duckOnSeek(v, wantMuted) {
   v.addEventListener('seeked', () => { clearTimeout(t); t = setTimeout(up, 220); });
   v._unduck = up;
 }
+// 本地转码 (/media/h/) 播放时, <video> 自己的 currentTime 只是「这次转码任务」的本地时间, 从 0 起; curT() 换算成文件里的真实
+// 位置 (加上 video._hlsOffset: 这次任务是从文件哪一秒开始转的)。其它来源 (mp4 直出 / 远程直连) 没有这层, offset 恒为 0。
+function hlsIdOf(url) { return (/^\/media\/h\/([^/]+)\//.exec(url || '') || [])[1] || ''; }
+function curT(v) { return (v.currentTime || 0) + (v._hlsOffset || 0); }
+// 当前这段转码任务已经转到文件里第几秒 (offset + 浏览器看到的这段 HLS 长度, 随 ffmpeg 往后写新分片一路变长)。
+function hlsCoveredAbs(v) { return (v._hlsOffset || 0) + (isFinite(v.duration) && v.duration > 0 ? v.duration : 0); }
+// 跳到文件里的绝对时间 t。常规来源直接设 currentTime；本地转码源跳到已经转出来的范围内也是直接设 (分片已经在磁盘上，
+// 不用等)，只有跳到还没转出来的地方才找服务端按需重开转码 (ffmpeg -ss 从 t 重新开始)，等它就位再整段重新加载。
+// v._hlsUrl / v._hlsReopen: 谁在播这个 <video> (普通播放器的 video / 沉浸模式每屏自己的 video) 负责在「本地转码中的列表」
+// 加载好的时候挂上这两样, seekTo 不用管是哪一个播放器, 只认这个 <video> 元素自己身上的状态。
+async function seekTo(v, t) {
+  const dur = vdur(v);
+  t = Math.max(0, dur > 0 && isFinite(dur) ? Math.min(dur, t) : t);
+  if (!v._hlsUrl) { v.currentTime = t; return; }
+  if (t >= (v._hlsOffset || 0) && t <= hlsCoveredAbs(v)) { v.currentTime = t - (v._hlsOffset || 0); return; }
+  if (!v._hlsReopen) return;
+  const hint = toast('转码中，正在跳到这里…', true);
+  try { await v._hlsReopen(t); } finally { hint.remove(); }
+}
 function seekBy(v, d, apply) {
   const dur = vdur(v), lim = dur > 0 && isFinite(dur) ? dur : Infinity;
-  v._st = Math.max(0, Math.min(lim, (v._st ?? v.currentTime) + d));
+  v._st = Math.max(0, Math.min(lim, (v._st ?? curT(v)) + d));
   clearTimeout(v._stT);
-  v._stT = setTimeout(() => { const x = v._st; v._st = undefined; v.currentTime = x; apply?.(x); }, 140);
+  v._stT = setTimeout(() => { const x = v._st; v._st = undefined; seekTo(v, x); apply?.(x); }, 140);
   return v._st;
 }
 // 视频长度: 本地媒体边转码边播 (HLS EVENT 列表), 浏览器报的长度会随转码进度一路变长。服务端用 ffmpeg 读出真实长度 (probe),
@@ -4040,7 +4199,7 @@ function fixDuration(v, url) {
 const fmtT = s => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = String(s % 60).padStart(2, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`; };
 const isVodTime = () => Number.isFinite(vdur(video)) && vdur(video) > 0;
 function paintCtrl() {
-  const d = vdur(video), t = video.currentTime;
+  const d = vdur(video), t = curT(video);
   player.classList.toggle('paused', video.paused);
   player.classList.toggle('muted', (video.muted && !video._duck) || video.volume === 0);
   $('.vol').value = video.muted && !video._duck ? 0 : video.volume;
@@ -4048,9 +4207,10 @@ function paintCtrl() {
   $('.rem').textContent = isVodTime() ? '-' + fmtT(d - t) : cur?.kind === 'live' ? '● 直播' : '';
   if (!isVodTime()) return;
   if (!scrubbing) tl.style.setProperty('--p', (t / d) * 100 + '%');
+  // video.buffered 是这段转码任务自己的本地时间轴, 算「已缓冲到哪」要按本地时间比, 换成绝对位置再去跟 d (绝对总长) 算百分比。
   let end = 0;
-  for (let i = 0; i < video.buffered.length; i++) if (video.buffered.start(i) <= t + 1) end = Math.max(end, video.buffered.end(i));
-  tl.style.setProperty('--b', (end / d) * 100 + '%');
+  for (let i = 0; i < video.buffered.length; i++) if (video.buffered.start(i) <= video.currentTime + 1) end = Math.max(end, video.buffered.end(i));
+  tl.style.setProperty('--b', ((end + (video._hlsOffset || 0)) / d) * 100 + '%');
   paintMarks(d);
 }
 for (const ev of ['timeupdate', 'durationchange', 'progress', 'play', 'pause', 'volumechange', 'loadedmetadata']) video.addEventListener(ev, paintCtrl);
@@ -4184,7 +4344,7 @@ async function doCast() {
   sys.castMsg = '';
   // AirPlay 只认系统原生播放：hls.js (MSE) 在播就先切成原生 HLS (同一次点击里)，再弹选择器
   if (canAirplay) {
-    if (hls && lastLoad && video.canPlayType('application/vnd.apple.mpegurl')) load(lastLoad.url, video.currentTime, lastLoad.viaProxy, lastLoad.isLocal, true, true);
+    if (hls && lastLoad && video.canPlayType('application/vnd.apple.mpegurl')) load(lastLoad.url, curT(video), lastLoad.viaProxy, lastLoad.isLocal, true, true);
     try { video.webkitShowPlaybackTargetPicker(); return; } catch {}
   }
   if (canRemote && !hls) {
@@ -4260,7 +4420,7 @@ tl.addEventListener('pointerdown', e => {
 tl.addEventListener('pointerup', e => {
   if (!scrubbing) return;
   scrubbing = false; tl.classList.remove('drag');
-  video.currentTime = tlFrac(e) * vdur(video);
+  seekTo(video, tlFrac(e) * vdur(video));
   if (!fineCursor || !tl.matches(':hover')) { tip.hidden = true; tl.style.setProperty('--h', '0%'); }
 });
 tl.addEventListener('pointercancel', () => { scrubbing = false; tl.classList.remove('drag'); tip.hidden = true; tl.style.setProperty('--h', '0%'); });
@@ -4298,7 +4458,7 @@ if (!fineCursor) {
     if (player.classList.contains('locked') || !$('.plist').hidden) return;
     const r = rotR(video), P = rotP(e);
     if (P.x - r.left < EDGE || r.right - P.x < EDGE || r.bottom - P.y < 80) return;
-    g = { id: e.pointerId, x: P.x, y: P.y, r, axis: '', left: P.x - r.left < r.width / 2, t0: video.currentTime, b0: bright, v0: video.volume, target: 0 };
+    g = { id: e.pointerId, x: P.x, y: P.y, r, axis: '', left: P.x - r.left < r.width / 2, t0: curT(video), b0: bright, v0: video.volume, target: 0 };
     video.setPointerCapture(e.pointerId);
   });
   video.addEventListener('pointermove', e => {
@@ -4322,7 +4482,7 @@ if (!fineCursor) {
     if (!g || e.pointerId !== g.id) return;
     const x = g; g = null;
     if (x.axis === 'x') {
-      if (ok) video.currentTime = x.target;
+      if (ok) seekTo(video, x.target);
       gesturing = false; tip.hidden = true; tl.style.setProperty('--h', '0%'); poke();
     }
   };
@@ -4430,8 +4590,8 @@ addEventListener('keydown', e => {
   if (e.key === 'Escape' && (playerOpen() || $('#modal'))) closeOverlay();
   if (!playerOpen()) return;
   if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
-  if (e.key === 'ArrowRight') video.currentTime += 10;
-  if (e.key === 'ArrowLeft') video.currentTime -= 10;
+  if (e.key === 'ArrowRight') seekBy(video, 10);
+  if (e.key === 'ArrowLeft') seekBy(video, -10);
   if (e.key === 'n' || e.key === 'PageDown') step(1);
   if (e.key === 'p' || e.key === 'PageUp') step(-1);
   if (e.key === 'f' && !hideFs()) toggleFs();
@@ -5207,6 +5367,7 @@ async function renderSettings() {
       ${fold('site', cfg.sites.length)}<div class="foldbox" data-fold="site" ${cfg.sites.length > FOLD_AT && !foldOpen.site ? 'hidden' : ''}>${bulk('site')}<div id="sites">${siteRowsHtml()}</div></div>
       <div class="actions"><button class="small" id="addSite">+ 添加点播源</button><button class="small" id="testAll">全部测速</button><button class="small" id="stopTest">停止测速</button></div></section>
     <section id="localSec"><h2>本地媒体 <span class="tagl">内置源</span></h2><p class="lan">加载中…</p></section>
+    <section id="subSec"><h2>字幕源</h2><p class="lan">加载中…</p></section>
     <section><h2>直播源</h2><p class="hint">支持 m3u / m3u8 频道列表、TVBox txt（<code>频道名,地址</code> + <code>分组,#genre#</code>），或者单条 .m3u8 播放地址。内置文件直接写文件名。「编辑文本」可以直接改频道列表。勾上「少儿 / 成人」标记整个直播源；没标记的也会按分组、频道名自动识别：标准模式隐藏成人分组，儿童模式只留少儿分组。</p>
       ${fold('live', cfg.lives.length)}<div class="foldbox" data-fold="live" ${cfg.lives.length > FOLD_AT && !foldOpen.live ? 'hidden' : ''}>${bulk('live')}<div id="lives">${rowsHtml(cfg.lives, 'live')}</div></div>
       <div class="actions"><button class="small" id="addLive">+ 添加直播源</button><button class="small" id="testLives">全部测速</button></div></section>
@@ -5811,6 +5972,29 @@ async function renderSettings() {
   ACCT.mountSettings($('#acctSec')).then(() => { if (settingsGoto === 'account') { settingsGoto = ''; $('#acctSec')?.scrollIntoView({ block: 'start' }); } });
   initAdmin();
   localSettings(localP).catch(err => { if (!isAbort(err) && $('#localSec')) $('#localSec').innerHTML = `<h2>本地媒体</h2><div class="err">${esc(err.message)}</div>`; });
+  subtitleSettings().catch(err => { if (!isAbort(err) && $('#subSec')) $('#subSec').innerHTML = `<h2>字幕源</h2><div class="err">${esc(err.message)}</div>`; });
+}
+
+// ---------- settings: 字幕源 (内置迅雷, 另加射手网(伪) / OpenSubtitles——配了 Token/Key 才启用) ----------
+async function subtitleSettings() {
+  const j = await req('GET', '/api/console/subtitle');
+  const box = $('#subSec'); if (!box) return;
+  const draw = () => {
+    box.innerHTML = `<h2>字幕源</h2><p class="hint">播放器字幕菜单里「搜索字幕」用到的远程源。迅雷是免注册的字幕匹配接口，不是官方公开文档化的 API，随时可能被调整/下线；射手网(伪) 和 OpenSubtitles 要去对应网站免费注册拿 Token / Api-Key 才能用，填了并打开开关才生效。也可以不填这里，改用环境变量 <code>ASSRT_TOKEN</code> / <code>OPENSUBTITLES_API_KEY</code>（这里留空时退回环境变量）。</p>
+      <div class="field"><label class="lan"><input type="checkbox" id="subXunlei" ${j.xunlei ? 'checked' : ''}> 迅雷（免注册）</label></div>
+      <div class="field"><label class="lan"><input type="checkbox" id="subAssrtOn" ${j.assrt.enabled ? 'checked' : ''}> 射手网(伪) assrt.net</label>
+        <input id="subAssrtTok" value="${esc(j.assrt.token)}" placeholder="Token（去 assrt.net 注册后在用户面板里看）" style="flex:1;min-width:200px"></div>
+      <div class="field"><label class="lan"><input type="checkbox" id="subOsOn" ${j.opensubtitles.enabled ? 'checked' : ''}> OpenSubtitles</label>
+        <input id="subOsKey" value="${esc(j.opensubtitles.apiKey)}" placeholder="Api-Key（去 opensubtitles.com 注册 consumer 后拿到）" style="flex:1;min-width:200px"></div>
+      <div class="actions"><button class="btn red" id="subSave">保存</button></div>`;
+    $('#subSave', box).onclick = async () => {
+      const body = { xunlei: $('#subXunlei', box).checked,
+        assrt: { enabled: $('#subAssrtOn', box).checked, token: $('#subAssrtTok', box).value.trim() },
+        opensubtitles: { enabled: $('#subOsOn', box).checked, apiKey: $('#subOsKey', box).value.trim() } };
+      try { Object.assign(j, await req('PUT', '/api/console/subtitle', body)); draw(); toast('已保存'); } catch (err) { toast(err.message); }
+    };
+  };
+  draw();
 }
 
 // ---------- settings: 本地媒体 (built-in sources from local folders) ----------

@@ -2294,6 +2294,232 @@ const MEDIA_EXT = new Set(['mp4', 'm4v', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'f4v
   'mpg', 'mpeg', 'vob', '3gp', 'ogv', 'divx', 'asf', 'mp3', 'flac', 'm4a', 'aac', 'wav', 'ogg', 'opus', 'ape', 'wma']);
 // What a browser <video> plays as is; the rest is remuxed (or transcoded) to HLS by ffmpeg on demand.
 const BROWSER_EXT = new Set(['mp4', 'm4v', 'webm', 'mov', 'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus']);
+
+// ---- 本地字幕: 视频旁边同名 (或「同名.语言」) 的 .srt / .ass / .ssa / .vtt 文件, 转成浏览器 <track> 认的 WebVTT ----
+const SUB_EXT = new Set(['srt', 'vtt', 'ass', 'ssa']);
+// 猜编码: 常见的 BOM (UTF-16 LE/BE, UTF-8) 先认; 没有就按 UTF-8 严格解, 不是有效 UTF-8 (国内老字幕很多是 GBK) 就退到 GBK。
+function readTextSmart(buf) {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf.subarray(2));
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder('utf-16be').decode(buf.subarray(2));
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return new TextDecoder('utf-8').decode(buf.subarray(3));
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { try { return new TextDecoder('gbk').decode(buf); } catch { return buf.toString('utf8'); } }
+}
+// 同目录下跟视频同名 (movie.srt) 或同名加语言 (movie.chs.srt / movie.en.ass) 的字幕文件。
+function localSubs(filePath) {
+  const dir = path.dirname(filePath), base = path.basename(filePath, path.extname(filePath));
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    const ext = path.extname(n).slice(1).toLowerCase();
+    if (!SUB_EXT.has(ext)) continue;
+    const stem = n.slice(0, n.length - ext.length - 1);
+    if (stem === base) out.push({ file: n, ext, lang: '' });
+    else if (stem.startsWith(base + '.') && stem.length > base.length + 1) out.push({ file: n, ext, lang: stem.slice(base.length + 1) });
+  }
+  return out;
+}
+// SubRip (.srt) → WebVTT: 时间轴的逗号换成点, 序号行留着当 cue id (WebVTT 允许, 浏览器会忽略)。
+function srtToVtt(text) {
+  const body = text.replace(/\r\n?/g, '\n').replace(/(\d{1,2}:\d{2}:\d{2}),(\d{1,3})/g, (_, a, b) => a + '.' + b.padEnd(3, '0')).trim();
+  return 'WEBVTT\n\n' + body + '\n';
+}
+// ASS/SSA → WebVTT: 只取 [Events] 里的 Dialogue 行, 按 Format: 声明的列顺序找 Start/End/Text, 样式覆盖标签 {...} 直接去掉,
+// \\N / \\n 换行保留, 其余排版 (位置、颜色、特效) 都丢——只求字幕文字和时间轴对, 不是完整还原 ASS 渲染。
+function assToVtt(text) {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  let inEvents = false, fmt = [];
+  const cues = [];
+  const ts = s => {
+    const m = /^(\d+):(\d{2}):(\d{2})[.,](\d{1,3})$/.exec(String(s).trim());
+    if (!m) return null;
+    return `${String(+m[1]).padStart(2, '0')}:${m[2]}:${m[3]}.${m[4].padEnd(3, '0').slice(0, 3)}`;
+  };
+  for (const raw of lines) {
+    const l = raw.trim();
+    if (/^\[Events\]/i.test(l)) { inEvents = true; continue; }
+    if (/^\[/.test(l)) { inEvents = false; continue; }
+    if (!inEvents) continue;
+    if (/^Format:/i.test(l)) { fmt = l.slice(l.indexOf(':') + 1).split(',').map(s => s.trim().toLowerCase()); continue; }
+    if (!/^Dialogue:/i.test(l)) continue;
+    const startI = fmt.indexOf('start'), endI = fmt.indexOf('end'), textI = fmt.indexOf('text');
+    if (startI < 0 || endI < 0 || textI < 0) continue;
+    const parts = l.slice(l.indexOf(':') + 1).split(',');
+    if (parts.length <= textI) continue;
+    const start = ts(parts[startI]), end = ts(parts[endI]);
+    if (!start || !end) continue;
+    const clean = parts.slice(textI).join(',').replace(/\{[^}]*\}/g, '').replace(/\\N/gi, '\n').replace(/\\n/gi, '\n').replace(/\\h/g, ' ').trim();
+    if (clean) cues.push({ start, end, text: clean });
+  }
+  return 'WEBVTT\n\n' + cues.map((c, i) => `${i + 1}\n${c.start} --> ${c.end}\n${c.text}\n`).join('\n');
+}
+function subToVtt(ext, buf) {
+  const text = readTextSmart(buf);
+  if (ext === 'srt') return srtToVtt(text);
+  if (ext === 'ass' || ext === 'ssa') return assToVtt(text);
+  return /^WEBVTT/.test(text.trim()) ? text : 'WEBVTT\n\n' + text;
+}
+// ---- 远程字幕: 按名字/番号搜索, 选中后下载转 WebVTT 并缓存到磁盘 ----
+// 内置源:
+//  · 迅雷 (api-shoulei-ssl.xunlei.com): 迅雷影音「智能字幕匹配」用的接口, 不需要注册/Key, 社区已公开使用多年 (PotPlayer 插件、开源脚本都在用),
+//    但不是迅雷官方公开文档化的 API, 随时可能被调整/下线——默认开, 管理员可以关掉。字幕库是网友上传的, 番号 (如 IPX-343) 也能搜到。
+//  · 射手网(伪) assrt.net 官方 API: 需要在 assrt.net 免费注册拿 Token, 填了才会启用。
+//  · OpenSubtitles 官方 REST API: 需要在 opensubtitles.com 免费注册拿 Api-Key, 填了才会启用。
+const SUBCFG_FILE = path.join(DATA, 'subtitle.json');
+const SUB_CACHE_DIR = path.join(DATA, 'sub-cache');
+fs.mkdirSync(SUB_CACHE_DIR, { recursive: true });
+// Token / Api-Key 没在 data/subtitle.json 里配过时, 退回环境变量 (ASSRT_TOKEN / OPENSUBTITLES_API_KEY) 当默认值——
+// 和 GITHUB_TOKEN 等其它外部服务凭证一个路数, 填了环境变量就默认开。管理后台里改过一次之后, 文件里存的值优先。
+function readSubCfg() {
+  const c = readJson(SUBCFG_FILE, null) || {};
+  const assrtEnv = str(process.env.ASSRT_TOKEN).trim(), osEnv = str(process.env.OPENSUBTITLES_API_KEY).trim();
+  return {
+    xunlei: c.xunlei !== false,
+    assrt: { enabled: c.assrt ? !!c.assrt.enabled : !!assrtEnv, token: str(c.assrt && c.assrt.token).trim() || assrtEnv },
+    opensubtitles: { enabled: c.opensubtitles ? !!c.opensubtitles.enabled : !!osEnv, apiKey: str(c.opensubtitles && c.opensubtitles.apiKey).trim() || osEnv },
+  };
+}
+let subCfg = readSubCfg();
+const saveSubCfg = () => writeJson(SUBCFG_FILE, subCfg);
+const subCacheFile = url => path.join(SUB_CACHE_DIR, crypto.createHash('sha1').update(url).digest('hex') + '.vtt');
+const XUNLEI_SUB_HOST = /(^|\.)geilijiasu\.com$/i;   // 只认迅雷字幕 CDN 自己的域名, 避免这个「下载并转码」接口被当成任意地址的代理
+async function searchXunlei(q) {
+  const r = await fetch('https://api-shoulei-ssl.xunlei.com/oracle/subtitle?name=' + encodeURIComponent(q), { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(6000) });
+  if (!r.ok) return [];
+  const j = await r.json().catch(() => null);
+  if (!j || j.code !== 0 || !Array.isArray(j.data)) return [];
+  const seen = new Set();
+  return j.data.filter(d => {
+    if (!d.url || !d.ext || !XUNLEI_SUB_HOST.test(new URL(d.url).hostname)) return false;
+    if (seen.has(d.url)) return false; seen.add(d.url); return true;
+  }).slice(0, 20).map(d => ({ source: 'xunlei', name: str(d.simple_name || d.name).slice(0, 80), lang: (d.languages || [])[0] || '', ext: str(d.ext).toLowerCase(), url: d.url }));
+}
+// assrt(射手网(伪)) 搜索结果的字段实测很不稳定: 按片名查和按具体文件名查返回的字段名、字幕格式字段的写法都不一样——
+// 字幕 id 有的叫 fileid 有的叫 id; 格式有的在 subtype 写成人能读的 "Subrip(srt)", 有的 subtype 是裸数字代码、可读的那份在 m_subtype;
+// lang 有的是 {desc:"..."}, 有的直接是带 &nbsp; 的字符串。都试一遍, 不要假设哪个字段一定在。
+function assrtExtHint(s) {
+  const m = /\b(srt|ass|ssa|vtt|sup|idx)\b/i.exec(str(s.m_subtype || s.subtype || ''));
+  return m ? m[1].toLowerCase() : '';
+}
+async function searchAssrt(q, token) {
+  if (!token) return [];
+  const r = await fetch('https://api.assrt.net/v1/sub/search?' + new URLSearchParams({ token, q }), { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(6000) });
+  if (!r.ok) return [];
+  const j = await r.json().catch(() => null);
+  const subs = j && j.sub && Array.isArray(j.sub.subs) ? j.sub.subs : [];
+  return subs.slice(0, 20).map(s => ({
+    source: 'assrt', id: str(s.fileid ?? s.id),
+    name: str(s.sub_name || s.m_video_chinese_name || s.m_title || s.native_name || s.videoname || s.fileid || s.id).slice(0, 80),
+    lang: str((s.lang && s.lang.desc) || s.m_lang || '').replace(/&nbsp;/g, ' '),
+    ext: assrtExtHint(s),
+  })).filter(s => s.id);
+}
+// ZIP (只处理不压缩 / deflate 两种存储方式, 没有加密): assrt 的多文件包基本都有 filelist 的单文件直链可以绕开这一步,
+// 只有极少数老字幕只给一个整体 zip 下载链接时才用得上。手写而不是等 Node 内置 zip 支持: 这个项目零 npm 依赖。
+function unzipFirstSub(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0 && i > buf.length - 22 - 65557; i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) return null;
+  const cdOffset = buf.readUInt32LE(eocd + 16), numEntries = buf.readUInt16LE(eocd + 10);
+  let p = cdOffset;
+  for (let i = 0; i < numEntries && p + 46 <= buf.length; i++) {
+    if (buf.readUInt32LE(p) !== 0x02014b50) break;
+    const flag = buf.readUInt16LE(p + 8), method = buf.readUInt16LE(p + 10), compSize = buf.readUInt32LE(p + 20);
+    const nameLen = buf.readUInt16LE(p + 28), extraLen = buf.readUInt16LE(p + 30), commentLen = buf.readUInt16LE(p + 32);
+    const localOffset = buf.readUInt32LE(p + 42);
+    const nameBuf = buf.slice(p + 46, p + 46 + nameLen);
+    const name = (flag & 0x800) ? nameBuf.toString('utf8') : readTextSmart(nameBuf);   // 没打 UTF-8 标记的大多是 GBK 文件名
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    if (SUB_EXT.has(ext) && (method === 0 || method === 8) && p + 46 + nameLen + extraLen + commentLen <= buf.length) {
+      const lNameLen = buf.readUInt16LE(localOffset + 26), lExtraLen = buf.readUInt16LE(localOffset + 28);
+      const dataStart = localOffset + 30 + lNameLen + lExtraLen;
+      const raw = buf.slice(dataStart, dataStart + compSize);
+      try { return { ext, data: method === 0 ? raw : zlib.inflateRawSync(raw) }; } catch { return null; }
+    }
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return null;
+}
+// 这个 id 真正能下到「字幕文本」的地址: 多文件包优先用 filelist 里的单文件直链 (不用再处理 zip); 只有一个文件时看它的扩展名
+// 本来是不是文本字幕; 是 zip 才在这一步下载下来解一次; 解不出文本字幕 (rar / 整包都是图形字幕 sup、idx) 就放弃。
+async function assrtResolve(id, token) {
+  const r = await fetch('https://api.assrt.net/v1/sub/detail?' + new URLSearchParams({ token, id }), { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(6000) });
+  const j = await r.json().catch(() => null);
+  const f = j && j.sub && Array.isArray(j.sub.subs) ? j.sub.subs[0] : null;
+  if (!f) return { error: '没找到这个字幕' };
+  const files = Array.isArray(f.filelist) ? f.filelist : [];
+  const hit = files.find(x => SUB_EXT.has((str(x.f).split('.').pop() || '').toLowerCase()));
+  if (hit) return { url: hit.url, ext: str(hit.f).split('.').pop().toLowerCase() };
+  const topExt = (str(f.filename).split('.').pop() || '').toLowerCase();
+  if (SUB_EXT.has(topExt)) return { url: f.url, ext: topExt };
+  if (topExt === 'zip' && f.url) {
+    const zr = await fetch(f.url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000) }).catch(() => null);
+    if (zr && zr.ok) {
+      const buf = Buffer.from(await zr.arrayBuffer());
+      const got = buf.length < 5e6 ? unzipFirstSub(buf) : null;
+      if (got) return { data: got.data, ext: got.ext };
+    }
+  }
+  return { error: '这个字幕是图形字幕，或压缩包里没找到文本字幕，放不了' };
+}
+async function searchOpensubtitles(q, apiKey) {
+  if (!apiKey) return [];
+  const r = await fetch('https://api.opensubtitles.com/api/v1/subtitles?' + new URLSearchParams({ query: q, languages: 'zh-cn,zh-tw,en' }),
+    { headers: { 'Api-Key': apiKey, 'User-Agent': 'tvbox-setup-web/1.0', Accept: 'application/json' }, signal: AbortSignal.timeout(6000) });
+  if (!r.ok) return [];
+  const j = await r.json().catch(() => null);
+  if (!j || !Array.isArray(j.data)) return [];
+  return j.data.slice(0, 20).flatMap(d => (d.attributes && d.attributes.files || []).slice(0, 1).map(f => ({
+    source: 'opensubtitles', id: str(f.file_id), name: str((d.attributes && (d.attributes.release || (d.attributes.feature_details && d.attributes.feature_details.title))) || f.file_id).slice(0, 80),
+    lang: str(d.attributes && d.attributes.language), ext: 'srt' })));
+}
+async function opensubtitlesDownloadUrl(fileId, apiKey) {
+  const r = await fetch('https://api.opensubtitles.com/api/v1/download', { method: 'POST',
+    headers: { 'Api-Key': apiKey, 'User-Agent': 'tvbox-setup-web/1.0', 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ file_id: Number(fileId) }), signal: AbortSignal.timeout(6000) });
+  const j = await r.json().catch(() => null);
+  return (j && j.link) || '';
+}
+async function subtitleSearch(q) {
+  q = str(q).trim().slice(0, 100);
+  if (!q) return [];
+  const jobs = [];
+  if (subCfg.xunlei) jobs.push(searchXunlei(q).catch(() => []));
+  if (subCfg.assrt.enabled && subCfg.assrt.token) jobs.push(searchAssrt(q, subCfg.assrt.token).catch(() => []));
+  if (subCfg.opensubtitles.enabled && subCfg.opensubtitles.apiKey) jobs.push(searchOpensubtitles(q, subCfg.opensubtitles.apiKey).catch(() => []));
+  return (await Promise.all(jobs)).flat();
+}
+// source + (url+ext 直给, 比如迅雷) 或 id (还要再查一次详情才有下载地址, 比如 assrt / opensubtitles)。下载好转成 vtt 缓存到磁盘 (按下载地址算, 同一个字幕不会重复转)。
+async function subtitleFetch({ source, url, ext, id }) {
+  ext = str(ext || 'srt').toLowerCase();
+  let buf;   // 有些来源 (比如 assrt 的 zip 包) 在「找地址」这一步就已经顺手把内容解出来了, 不用再走一次下载
+  if (source === 'xunlei') { if (!url || !XUNLEI_SUB_HOST.test(new URL(url).hostname)) return { error: '地址不对' }; }
+  else if (source === 'assrt') {
+    if (!subCfg.assrt.enabled || !subCfg.assrt.token) return { error: '没配置射手网(伪) Token' };
+    const r = await assrtResolve(id, subCfg.assrt.token);
+    if (r.error) return r;
+    ext = r.ext; if (r.data) buf = r.data; else url = r.url;
+  } else if (source === 'opensubtitles') { if (!subCfg.opensubtitles.enabled || !subCfg.opensubtitles.apiKey) return { error: '没配置 OpenSubtitles Api-Key' }; url = await opensubtitlesDownloadUrl(id, subCfg.opensubtitles.apiKey); }
+  else return { error: '不认识的字幕源' };
+  let cache = '';
+  if (!buf) {
+    if (!/^https?:\/\//.test(url || '')) return { error: '没找到下载地址' };
+    cache = subCacheFile(url);
+    const hit = await fsp.readFile(cache, 'utf8').catch(() => null);
+    if (hit != null) return { vtt: hit };
+    try {
+      const r = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000) });
+      if (!r.ok) return { error: '下载失败 (' + r.status + ')' };
+      buf = Buffer.from(await r.arrayBuffer());
+    } catch (e) { return { error: '下载失败：' + (e.message || e) }; }
+  }
+  if (buf.length > 2e6) return { error: '字幕文件太大' };
+  const vtt = subToVtt(ext, buf);
+  if (cache) fsp.writeFile(cache, vtt).catch(() => {});
+  return { vtt };
+}
+
+
 const LOCAL_DEFAULT = { enabled: true, name: '本地媒体', exts: ['mp4', 'mkv', 'avi', 'mov', 'm4v', 'webm', 'flv', 'wmv', 'rmvb', 'ts', 'm2ts', 'mts'], rescan: 60, dirs: [] };
 // .ts / .mts 同时是 TypeScript 的后缀：扫描时按文件内容判断 (见 isMpegTs)，真的是 MPEG-TS 视频才收，所以这几个后缀始终开着，不会把代码当视频。
 const SNIFFED_EXT = ['ts', 'm2ts', 'mts'];
@@ -3104,16 +3330,20 @@ function probeVideo(file) {
     });
   });
 }
-function startHls(f) {
+// offset > 0: 从文件这个时间点开始转 (-ss 在 -i 前, 走关键帧快速跳转), 给「拖到还没转出来的地方」用——旧任务先停,
+// 新任务从目标时间重开, index.m3u8 仍然是从 0 起 (ffmpeg 默认行为), 真实的文件内时间 = 这段时间轴 + offset, 客户端自己记。
+function startHls(f, offset = 0) {
   const dir = path.join(TRANS, f.id);
   if (hlsJobs.size >= HLS_MAX) [...hlsJobs.values()].sort((a, b) => a.last - b.last)[0].stop();
   fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   fs.mkdirSync(dir, { recursive: true });
-  const j = { last: Date.now(), proc: null, stopped: false, exited: false, error: '' };
+  const j = { last: Date.now(), proc: null, stopped: false, exited: false, error: '', offset };
   j.stop = () => {
     j.stopped = true; j.proc?.kill('SIGKILL');
     if (hlsJobs.get(f.id) === j) hlsJobs.delete(f.id);
-    fsp.rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    // 同步删: 调用方 (比如按需重开转码) 常常紧接着就要在同一个目录重新建任务, 用异步 fsp.rm 会跟新任务自己的 rmSync/mkdirSync 赛跑,
+    // 可能把刚起好的新任务目录删掉 (ffmpeg 报「打不开文件」)。这里的目录通常不大, 同步删的阻塞可以接受。
+    try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch {}
   };
   hlsJobs.set(f.id, j);
   j.ready = (async () => {
@@ -3121,7 +3351,8 @@ function startHls(f) {
     if (j.stopped) return;
     const vargs = v.copy ? ['-c:v', 'copy'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p', '-force_key_frames', 'expr:gte(t,n_forced*6)'];
     // Audio: resampled onto one continuous 48 kHz timeline (aresample async) so segment joins don't click / crackle.
-    const p = j.proc = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-fflags', '+genpts', '-i', f.path,
+    const p = j.proc = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+      ...(offset > 0 ? ['-ss', String(offset)] : []), '-fflags', '+genpts', '-i', f.path,
       '-map', '0:V:0?', '-map', '0:a:0?', ...vargs, '-c:a', 'aac', '-ac', '2', '-ar', '48000', '-b:a', '192k', '-af', 'aresample=async=1000:first_pts=0',
       '-max_muxing_queue_size', '1024', '-f', 'hls', '-hls_time', '6', '-hls_list_size', '0', '-hls_playlist_type', 'event', '-hls_flags', 'independent_segments',
       '-hls_segment_filename', path.join(dir, '%05d.ts'), path.join(dir, 'index.m3u8')], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
@@ -3132,16 +3363,24 @@ function startHls(f) {
       j.exited = true;
       if (hlsJobs.get(f.id) === j) hlsJobs.delete(f.id);
       if (j.stopped) return;
-      if (code === 0) fs.writeFileSync(path.join(dir, '.done'), HLS_VER);
-      else hlsFail.set(f.id, { at: Date.now(), error: j.error.trim() || 'exit ' + code });
+      // offset>0 转出来的只是从那个点开始的一段, 不是完整文件: 不当「.done」长期缓存 (下次重新来, 已经够少见了)
+      if (code === 0 && !j.offset) fs.writeFileSync(path.join(dir, '.done'), HLS_VER);
+      else if (code !== 0) hlsFail.set(f.id, { at: Date.now(), error: j.error.trim() || 'exit ' + code });
     });
     // Ready once the first segment is listed (or ffmpeg gave up).
     for (let i = 0; i < 200 && !j.exited && !j.stopped; i++) {
-      if (/\.ts\s*$/m.test(await fsp.readFile(path.join(dir, 'index.m3u8'), 'utf8').catch(() => ''))) return;
+      if (/\\.ts\\s*$/m.test(await fsp.readFile(path.join(dir, 'index.m3u8'), 'utf8').catch(() => ''))) return;
       await new Promise(ok => setTimeout(ok, 300));
     }
   })();
   return j;
+}
+// 当前任务 (从 j.offset 开始) 已经转出来到文件内第几秒: 累加 m3u8 里列出的 #EXTINF 时长, 留一个分片的余量 (最后一段可能还在写)。
+async function hlsCoveredEnd(dir, offset) {
+  const text = await fsp.readFile(path.join(dir, 'index.m3u8'), 'utf8').catch(() => '');
+  let sum = 0;
+  for (const m of text.matchAll(/#EXTINF:([\\d.]+)/g)) sum += parseFloat(m[1]) || 0;
+  return offset + Math.max(0, sum - 6);
 }
 // Duration + resolution of a local file: one `ffmpeg -i` (header only), remembered (LRU, 3000 files).
 const infoCache = new Map();
@@ -3174,17 +3413,22 @@ rpcHandlers.localProbe = async ({ id }) => {
   const { width, height, duration } = await mediaInfo(f.path);
   return width || duration ? { ...(width ? { width, height } : {}), ...(duration > 0 ? { duration } : {}) } : {};
 };
-rpcHandlers.hlsOpen = async ({ id }) => {
+rpcHandlers.hlsOpen = async ({ id, t }) => {
   const f = localIndex().byFile.get(id);
   if (!f || !FFMPEG) return { error: '找不到文件' };
+  const target = Math.max(0, Number(t) || 0);
   const dir = path.join(TRANS, id), done = path.join(dir, '.done');
-  if (fs.existsSync(done) && fs.readFileSync(done, 'utf8') === HLS_VER) { const now = new Date(); fsp.utimes(done, now, now).catch(() => {}); return { ok: true }; }
+  // 整个文件已经转完并缓存: 任何位置都能跳, offset 恒为 0。
+  if (fs.existsSync(done) && fs.readFileSync(done, 'utf8') === HLS_VER) { const now = new Date(); fsp.utimes(done, now, now).catch(() => {}); return { ok: true, offset: 0 }; }
   const fail = hlsFail.get(id);
   if (!hlsJobs.has(id) && fail && Date.now() - fail.at < 10 * 60e3) return { error: 'ffmpeg 转换失败：' + fail.error };
-  const j = hlsJobs.get(id) || startHls(f);
+  let j = hlsJobs.get(id);
+  // 目标时间不在当前任务已经转出来的范围内 (包括往前跳到比 j.offset 还早的位置): 停掉重开, 从目标时间点转。
+  if (j) { const end = await hlsCoveredEnd(dir, j.offset); if (target < j.offset || target > end) { j.stop(); j = null; } }
+  if (!j) j = startHls(f, target);
   j.last = Date.now();
   await j.ready;
-  if (fs.existsSync(path.join(dir, 'index.m3u8'))) return { ok: true };
+  if (fs.existsSync(path.join(dir, 'index.m3u8'))) return { ok: true, offset: j.offset };
   return { error: 'ffmpeg 转换失败：' + (j.error.trim() || '没有输出') };
 };
 if (IS_MEDIA) {
@@ -3200,7 +3444,7 @@ if (IS_MEDIA) {
 }
 
 // /media/p/<item>  poster · /media/f/<file>.<ext>  original file · /media/h/<file>/index.m3u8  HLS for browsers
-async function serveMedia(rest, req, res) {
+async function serveMedia(rest, req, res, q) {
   const [kind, raw = '', file = ''] = rest.split('/');
   const snap = localIndex();
   const visible = it => it && localCfg.enabled && localCatOk(snap.catById.get(it.cat));
@@ -3226,13 +3470,22 @@ async function serveMedia(rest, req, res) {
   if (!f || !visible(f.item)) return send(res, 404, 'not found', 'text/plain');
   if (kind === 'f') return sendFile(req, res, f.path, MIME['.' + f.ext] || 'application/octet-stream');
   if (kind === 'h' && file === 'index.m3u8') {
-    const r = await rpc('hlsOpen', { id: f.id }, 90000);
+    const r = await rpc('hlsOpen', { id: f.id, t: q?.get('t') }, 90000);
     if (r.error) return send(res, 500, r.error, 'text/plain; charset=utf-8');
     const text = await fsp.readFile(path.join(TRANS, f.id, 'index.m3u8'), 'utf8');
     res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' });
     return res.end(text);
   }
   if (kind === 'h' && /^\d{5}\.ts$/.test(file)) return sendFile(req, res, path.join(TRANS, f.id, file), 'video/mp2t');
+  if (kind === 'sub') {
+    const key = q?.get('key') || '';
+    const hit = localSubs(f.path).find(s => s.file === key);
+    if (!hit) return send(res, 404, 'not found', 'text/plain');
+    let buf;
+    try { buf = await fsp.readFile(path.join(path.dirname(f.path), hit.file)); } catch { return send(res, 404, 'not found', 'text/plain'); }
+    res.writeHead(200, { 'Content-Type': 'text/vtt; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
+    return res.end(subToVtt(hit.ext, buf));
+  }
   send(res, 404, 'not found', 'text/plain');
 }
 
@@ -3490,6 +3743,16 @@ async function api(route, q, res, req) {
     }
     if (sub === 'local' && !write) return send(res, 200, { cfg: localView(localCfg), status: await rpc('localStatus'), exts: [...MEDIA_EXT], ffmpeg: !!FFMPEG, urls: lanIps().map(ip => `http://${ip}:${PORT}/api/local/vod`) });
     if (sub === 'local' && req.method === 'PUT') return send(res, 200, await rpc('localSave', await readBody(req)));
+    // 字幕源: 内置迅雷 (不用配), 射手网(伪) / OpenSubtitles 填了 Token/Key 才启用
+    if (sub === 'subtitle' && !write) return send(res, 200, subCfg);
+    if (sub === 'subtitle' && req.method === 'PUT') {
+      const b = await readBody(req);
+      subCfg = { xunlei: b.xunlei !== false,
+        assrt: { enabled: !!(b.assrt && b.assrt.enabled), token: str(b.assrt && b.assrt.token).trim().slice(0, 100) },
+        opensubtitles: { enabled: !!(b.opensubtitles && b.opensubtitles.enabled), apiKey: str(b.opensubtitles && b.opensubtitles.apiKey).trim().slice(0, 100) } };
+      saveSubCfg();
+      return send(res, 200, subCfg);
+    }
     if (sub === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
     if (sub === 'config' && !write) return send(res, 200, config);   // 完整配置 (含成人源)
     if (sub === 'config' && req.method === 'PUT') return leader('config', { op: 'put', body: await readBody(req) });
@@ -3646,6 +3909,23 @@ async function api(route, q, res, req) {
     if (!r.done.length && !r.noBin.length) return send(res, 500, { error: (b.permanent === true ? '删除失败' : '移到回收站失败') + (r.error ? '：' + r.error : '（文件可能正被别的程序占用，或没有权限）') });
     // noBinIds: 回收站放不下的那些 —— 页面再向管理员确认一次, 同意了才带 permanent:true 回来永久删除
     return send(res, 200, { ok: true, trashed: r.done.length, failed: r.failed.length, noBinIds: r.noBin, ...(r.error && !r.done.length ? { error: r.error } : {}) });
+  }
+  // 播放器拖进度条到还没转出来的地方: 先问一句「转到这儿要不要重开」, 等转好 (或确认已经覆盖) 再让 <video> 去取 index.m3u8，
+  // 避免两边各自判断导致重复重开。拿到的 offset 是这段 HLS 时间轴 0 点对应文件里的第几秒。
+  if (route === 'local/hlsat') return send(res, 200, await rpc('hlsOpen', { id: q.get('id') || '', t: q.get('t') }, 90000));
+  // 本地字幕: 视频旁边同名的 .srt/.ass/.ssa/.vtt——只列出来 (真的要内容再读, 这里不碰磁盘以外的大文件)
+  if (route === 'local/subs') {
+    const f = localIndex().byFile.get(q.get('id') || '');
+    if (!f || !localCfg.enabled || !localCatOk(localIndex().catById.get(f.item.cat))) return send(res, 404, { error: '找不到文件' });
+    return send(res, 200, { subs: localSubs(f.path).map(s => ({ key: s.file, ext: s.ext, lang: s.lang })) });
+  }
+  // 远程字幕: 按名字/番号搜索 (内置迅雷, 另加射手网(伪)/OpenSubtitles——配了 Token/Key 才启用)
+  if (route === 'subtitle/search') return send(res, 200, { results: await subtitleSearch(q.get('q') || '') });
+  if (route === 'subtitle/fetch') {
+    // <track src> 直接拿这个当 .vtt 用, 所以成功时给纯文本, 不包一层 JSON
+    const r = await subtitleFetch({ source: q.get('source') || '', url: q.get('url') || '', ext: q.get('ext') || '', id: q.get('id') || '' });
+    if (r.error) return send(res, 404, r.error, 'text/plain; charset=utf-8');
+    return send(res, 200, r.vtt, 'text/vtt; charset=utf-8');
   }
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
   if (route === 'speed') return send(res, 200, await speedOf(q.get('u') || '', q.get('fresh') === '1'));
@@ -4302,7 +4582,7 @@ const handle = async (req, res) => {
       if (u.pathname === '/hls') return await relay(u.searchParams.get('u') || '', res, req);
       if (u.pathname === '/img') return await imageProxy(u.searchParams.get('u') || '', res);
       if (u.pathname.startsWith('/dl/')) return await serveDownload(u.pathname.slice(4), req, res);
-      if (u.pathname.startsWith('/media/')) return await serveMedia(u.pathname.slice(7), req, res);
+      if (u.pathname.startsWith('/media/')) return await serveMedia(u.pathname.slice(7), req, res, u.searchParams);
       return await serveStatic(decodeURIComponent(u.pathname), req, res);
     });
   } catch (e) {

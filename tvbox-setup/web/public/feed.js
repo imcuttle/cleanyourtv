@@ -154,7 +154,7 @@ function mkSlide() {
     <div class="fd-info"><h2></h2><div class="m"></div><p></p></div><div class="fd-msg"></div>`;
   slidesBox.append(el);
   const s = { el, video: el.querySelector('video'), bg: el.querySelector('.fd-bg'), cover: el.querySelector('.fd-cover'), h2: el.querySelector('h2'), meta: el.querySelector('.m'), blurb: el.querySelector('p'), msg: el.querySelector('.fd-msg'),
-    i: -1, it: null, d: null, line: 0, ep: 0, eps: [], startAt: 0, hls: null, via: false, loading: false, pre: false, err: false, watched: 0, lastT: 0, judged: true, lastSave: 0 };
+    i: -1, it: null, d: null, line: 0, ep: 0, eps: [], startAt: 0, hls: null, via: false, loading: false, pre: false, err: false, watched: 0, lastT: 0, judged: true, lastSave: 0, loadGen: 0 };
   const v = s.video;
   { const vol = parseFloat(localStorage.playerVolume); if (Number.isFinite(vol)) v.volume = Math.min(1, Math.max(0, vol)); }   // same level as the main player
   for (const ev of ['durationchange', 'loadedmetadata']) v.addEventListener(ev, () => { if (s === cur()) feedMarks(); });
@@ -176,7 +176,7 @@ function mkSlide() {
     if (Date.now() - s.lastSave > 4000 && vdur(v)) saveHist(s);
     if (s.sk && !scrub && !ks && !(g && g.axis === 'x')) {                 // 自动跳过片头 / 片尾 / 广告 (开关在普通播放器的「自动跳过」里, 沉浸里不放入口)
       const hit = skipDue(s.sk, v);
-      if (hit) { v.currentTime = hit.to; noteSkip('已跳过' + hit.name); }
+      if (hit) { seekTo(v, hit.to); noteSkip('已跳过' + hit.name); }
     }
   });
   return s;
@@ -201,8 +201,8 @@ function saveHist(s) {
   s.lastSave = Date.now();
   const d = s.d;
   hist.put({ site: d.site, adult: d.adult ? 1 : 0, siteName: d.siteName, id: d.id, name: d.name, pic: d.pic, remarks: d.remarks, year: d.year,
-    line: s.line, ep: s.ep, epName: s.eps[s.ep]?.name || '', t: s.video.currentTime, dur: vdur(s.video) });
-  epProg.put(d.site, d.id, s.ep, s.video.currentTime, vdur(s.video));
+    line: s.line, ep: s.ep, epName: s.eps[s.ep]?.name || '', t: curT(s.video), dur: vdur(s.video) });
+  epProg.put(d.site, d.id, s.ep, curT(s.video), vdur(s.video));
 }
 
 function teardown(s) {
@@ -267,23 +267,34 @@ const bufCfg = role => role === 0 ? { maxBufferLength: 90, maxMaxBufferLength: 1
 function release(s) {
   clearTimeout(s.dog);
   if (s.released) return;
-  s.released = true; s.resumeAt = s.video.currentTime || s.startAt || 0;
+  s.released = true; s.resumeAt = curT(s.video) || s.startAt || 0;
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = s.video;
   v.onerror = null; v.onloadedmetadata = null; v.pause(); v.removeAttribute('src'); v.load();
   s.loading = false; s.pre = false; s.lastT = 0;
   s.el.classList.remove('wait', 'framed');                 // 封面 / 海报露出来; 横屏的上提 (land) 保留, 划回来位置不变
 }
-function attach(s, viaProxy = false) {
+async function attach(s, viaProxy = false) {
   const url = s.eps[s.ep].url, role = ring.indexOf(s) - 1, v = s.video;
   if (role < 0) { s.released = true; s.resumeAt = s.startAt || 0; return; }     // 上一部: 详情晚到也不去加载
   const direct = /\.mp4(\?|$)/i.test(url) || url.startsWith('/media/f/');
-  const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : url;
+  const growing = url.startsWith('/media/h/');   // 边转码边播的列表: <video> 自己的 currentTime 只是这段转码任务的本地时间, 靠 v._hlsOffset 换成文件里的真实位置
   s.via = viaProxy; s.err = false; s.msg.textContent = '';
   clearTimeout(s.dog);
   if (s.hls) { s.hls.destroy(); s.hls = null; }
-  fixDuration(v, url.startsWith('/media/h/') ? url : '');       // 本地转码中的长度: 用真实长度, 不跟着转码进度变长
-  const startAt = s.startAt, growing = url.startsWith('/media/h/');   // 边转码边播的列表: 必须从头 (0) 起播, -1 会跳到当前已有部分的末尾
+  fixDuration(v, growing ? url : '');       // 本地转码中的长度: 用真实长度, 不跟着转码进度变长
+  v._hlsOffset = 0; v._hlsUrl = growing ? url : ''; v._hlsReopen = null;
+  const myGen = ++s.loadGen;
+  if (growing) {
+    // 拖到还没转出来的地方 / 从中间续播: 先问服务端这个时间点要不要重开转码, 等它就位——跟普通播放器的 load() 是同一套机制。
+    const r = await api('local/hlsat', { id: hlsIdOf(url), t: Math.round(s.startAt || 0) }, null).catch(e => ({ error: e.message || String(e) }));
+    if (s.loadGen !== myGen) return;   // 这次加载已经被取代 (比如很快又划走 / 点了重试)
+    if (r?.error) { fail(s, r.error); return; }
+    v._hlsOffset = r?.offset || 0;
+    v._hlsReopen = t => { s.startAt = t; return attach(s, viaProxy); };
+  }
+  const src = viaProxy ? '/hls?u=' + encodeURIComponent(url) : growing ? url + '?t=' + Math.round(s.startAt || 0) : url;
+  const startAt = Math.max(0, (s.startAt || 0) - v._hlsOffset);   // 这段转码任务 (或原文件) 自己的本地起播点
   let seeked = false;
   const onMeta = () => {
     if ((!s.hls || s.compat) && startAt && !seeked) { seeked = true; v.currentTime = startAt; }
@@ -410,7 +421,7 @@ function togglePause() {
 function onEnded(s) {
   if (s.ep < s.eps.length - 1) { toast(`下一集：${s.eps[s.ep + 1].name}`); return switchEp(s, s.line, s.ep + 1); }
   if (F.idx < F.items.length - 1) return go(1);
-  s.video.currentTime = 0; tryPlay(s);                 // last title of a finished list: loop it
+  seekTo(s.video, 0).then(() => tryPlay(s));                 // last title of a finished list: loop it
 }
 function switchEp(s, line, ep, startAt) {
   saveHist(s);
@@ -831,7 +842,7 @@ function act(a) {
   if (!s?.it) return;
   if (a === 'full') {   // 「全屏观看」: 接着当前进度切到普通 (非沉浸) 播放器
     if (!s.d || !s.eps.length) return;
-    const t = s.video.currentTime || 0, land = s.video.videoWidth > s.video.videoHeight;
+    const t = curT(s.video) || 0, land = s.video.videoWidth > s.video.videoHeight;
     s.video.pause(); saveHist(s);
     playAt(s.d, s.line, s.ep, t);
     // 手机上的横屏视频：就在这次点击里进全屏并转成横屏（浏览器只在用户手势里放行全屏 / 方向锁定）
@@ -879,7 +890,7 @@ root.addEventListener('pointerdown', e => {
   if (!menuEl.hidden || !sheetEl.hidden) { closeOverlays(); return; }
   if (g) return;
   const s = cur();
-  g = { low: e.pointerType === 'touch' && e.clientY > root.getBoundingClientRect().bottom - 120, id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), axis: '', dx: 0, dy: 0, long: false, t0: s.video.currentTime || 0, target: 0,
+  g = { low: e.pointerType === 'touch' && e.clientY > root.getBoundingClientRect().bottom - 120, id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), axis: '', dx: 0, dy: 0, long: false, t0: curT(s.video) || 0, target: 0,
     lp: setTimeout(() => { if (g && !g.axis && s.d) { g.long = true; setRate(2); window.haptic?.(); } }, 450) };
   root.setPointerCapture(e.pointerId);
 });
@@ -920,7 +931,7 @@ function endGesture(e, cancelled) {
   if (x.axis === 'x') {
     root.classList.remove('scrubbing'); tipEl.hidden = true;
     seekCancel();
-    if (x.target) cur().video.currentTime = cancelled ? x.t0 : x.target;
+    if (x.target) seekTo(cur().video, cancelled ? x.t0 : x.target);
     return;
   }
   if (cancelled) return;
@@ -947,13 +958,13 @@ let scrub = null;
 //   · 上一次 seek 没完成 (seeked 没来) 不发下一个, 完成后再取最新的目标 (seeked 超时 1500ms 兜底)。
 // 手指抬起 / 松开按键时再精确落到最终位置 (seekCancel 掐掉还没发出的)。
 let seekBusy = false, seekWant = null, seekAt = 0, seekTimer = 0;
-const inBuf = (v, t) => { for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= t && t <= v.buffered.end(i) - .3) return true; return false; };
+const inBuf = (v, t) => { t -= v._hlsOffset || 0; for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= t && t <= v.buffered.end(i) - .3) return true; return false; };
 const seekCancel = () => { clearTimeout(seekTimer); seekTimer = 0; seekWant = null; };
 function seekPump(v) {
   seekTimer = 0;
   if (seekWant == null || v !== cur()?.video) return;
   const x = seekWant; seekWant = null; seekBusy = true; seekAt = performance.now();
-  v.currentTime = x;
+  v.currentTime = Math.max(0, x - (v._hlsOffset || 0));   // 拖动中的实时预览: 不重开转码, 只在已经转出来的本地范围里直接跳 (浏览器自己会夹在边界内)
   const done = () => { v.removeEventListener('seeked', done); clearTimeout(tm); seekBusy = false; if (seekWant != null) liveSeek(seekWant); };
   const tm = setTimeout(done, 1500);                         // seeked 一直不来 (源卡住): 别让后面的全被堵死
   v.addEventListener('seeked', done);
@@ -974,13 +985,13 @@ function scrubTo(e) {
 }
 prog.addEventListener('pointerdown', e => {
   const v = cur()?.video; if (!v || !vdur(v) || !isFinite(vdur(v))) return;
-  scrub = { id: e.pointerId, frac: 0, t0: v.currentTime };
+  scrub = { id: e.pointerId, frac: 0, t0: curT(v) };
   prog.setPointerCapture(e.pointerId); root.classList.add('scrubbing'); scrubTo(e); e.stopPropagation();
 });
 prog.addEventListener('pointermove', e => { if (scrub && e.pointerId === scrub.id) scrubTo(e); });
 const scrubEnd = (e, ok) => {
   if (!scrub || e.pointerId !== scrub.id) return;
-  const v = cur().video; seekCancel(); v.currentTime = ok ? scrub.frac * vdur(v) : scrub.t0;
+  const v = cur().video; seekCancel(); seekTo(v, ok ? scrub.frac * vdur(v) : scrub.t0);
   scrub = null; root.classList.remove('scrubbing'); tipEl.hidden = true;
 };
 prog.addEventListener('pointerup', e => { armGuard(); scrubEnd(e, true); });
@@ -1016,7 +1027,7 @@ addEventListener('resize', () => Z.refit());
 let ks = null;
 function keySeek(v, d) {
   const dur = vdur(v); if (!dur || !isFinite(dur)) return;
-  if (!ks || ks.v !== v) ks = { v, t: v.currentTime || 0 };
+  if (!ks || ks.v !== v) ks = { v, t: curT(v) || 0 };
   ks.t = Math.max(0, Math.min(dur - .5, ks.t + d));
   root.classList.add('scrubbing');
   root.style.setProperty('--p', ks.t / dur);
@@ -1026,7 +1037,7 @@ function keySeek(v, d) {
 function keySeekEnd() {
   if (!ks) return;
   const { v, t } = ks; ks = null; seekCancel();
-  v.currentTime = t;
+  seekTo(v, t);
   root.classList.remove('scrubbing'); tipEl.hidden = true;
 }
 addEventListener('keyup', e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') keySeekEnd(); }, true);
@@ -1058,13 +1069,13 @@ function tick() {
   const vod = !!v && vdur(v) > 0 && isFinite(vdur(v));
   root.classList.toggle('live', !vod);
   if (!vod) return;
-  const t = v.currentTime, d = vdur(v);
+  const t = curT(v), d = vdur(v);
   if (!scrub && !ks && !(g && g.axis === 'x')) {
     const p = t / d; if (Math.abs(p - lastP) > 1e-4) { lastP = p; root.style.setProperty('--p', p); }
   }
   let end = 0;
-  for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= t + 1) end = Math.max(end, v.buffered.end(i));
-  const b = end / d; if (Math.abs(b - lastB) > 1e-3) { lastB = b; root.style.setProperty('--b', b); }
+  for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= v.currentTime + 1) end = Math.max(end, v.buffered.end(i));
+  const b = (end + (v._hlsOffset || 0)) / d; if (Math.abs(b - lastB) > 1e-3) { lastB = b; root.style.setProperty('--b', b); }
 }
 
 // ---------- open / close ----------

@@ -1136,6 +1136,14 @@ html.touchui .pfind { height: 40px; font-size: 16px; margin-top: 10px; }
 .plist.srcs .pitems button:hover { background: #ffffff14; }
 .plist.srcs .pitems button.on { background: var(--red); }
 .plist.srcs .pitems button.on small { color: #fffc; }
+.plist.subset .pitems { grid-template-columns: 1fr; gap: 2px; }
+.plist.subset .pitems button { justify-content: flex-start; background: none; min-height: 42px; padding: 0 10px; }
+.plist.subset .pitems button:hover { background: #ffffff14; }
+.plist.subset .pitems button.on { background: var(--red); }
+.subsearch { display: flex; gap: 8px; padding: 0 12px 10px; flex: none; }
+.subsearch input { flex: 1; min-width: 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 6px; padding: 0 10px; height: 34px; font-size: 14px; }
+.subsearch button { background: var(--red); color: #fff; border: 0; border-radius: 6px; padding: 0 14px; height: 34px; font-size: 13px; flex: none; }
+.substatus { padding: 0 12px 10px; color: var(--muted); font-size: 13px; flex: none; }
 html.touchui .plist.live .pitems button { min-height: 46px; font-size: 15px; }
 html.touchui .pitems { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 
