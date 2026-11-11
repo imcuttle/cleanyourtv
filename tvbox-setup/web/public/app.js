@@ -492,6 +492,13 @@ const subGlobalPref = {
   get() { return UD.json('subGlobal', null); },
   set(sub) { UD.set('subGlobal', JSON.stringify(sub)); },
 };
+// 上一次看片时字幕最后是开着还是关着 (跨会话)。subGlobalPref 只有「手动选字幕」才写,
+// 但字幕常常是自动套上的 (上一次开着 → 这次也开), 这种「其实开着」的状态以前只存在内存里,
+// 刷新 / 重开页面就丢了, 于是下一部片又被当成「没设置过」按关处理 —— 现在落一份在本机。
+const subLastSeen = {
+  get() { const o = UD.json('subLast', null); return o && typeof o.on === 'boolean' ? o.on : null; },
+  set(on) { UD.set('subLast', JSON.stringify({ on: !!on, at: Date.now() })); },
+};
 
 // 成人 entries (history / favorites): a title is 成人 when it was saved with the flag, its source is a 成人 source, or it is
 // a local title that is not explicitly flagged clean (legacy entries). They appear nowhere in 儿童 / 标准 mode, and in
@@ -3866,7 +3873,11 @@ function applySub(choice, persist = true) {
   if (!url) SUB.unmount(video);
   // 字幕盖在画面上, 不压播放器底部那条控制条 (控制条一出来字幕自动往上让一点, 收起再回来)
   else SUB.mount(video, { url, reserve: r => (player.classList.contains('idle') ? 0 : ctrlReserve(r)) });
-  subLastOn = !!choice;   // 这一部片字幕是开是关, 下一部片按它决定要不要默认开
+  // 这一部片字幕是开是关, 下一部片按它决定要不要默认开。
+  // 自动判定「这一部没找到候选」不代表用户不想看字幕 (那是搜索没结果 / 该源失败),
+  // 所以只在真的挂上了、或者用户主动切到「关闭字幕」时才改这个开关 —— 一次搜不到不该让后面全关着。
+  if (choice) { subLastOn = true; subLastSeen.set(true); }
+  else if (persist) { subLastOn = false; subLastSeen.set(false); }
   syncSubAct();
   if (!persist) return;
   subGlobalPref.set(choice ? { mode: choice.mode, lang: choice.lang || '' } : { mode: 'off' });
@@ -3974,7 +3985,10 @@ function subSearchWarm(name) { const st = navigator.onLine === false ? null : su
 // 定默认字幕: 第一批有用结果就返回, 不等所有源。
 // 但「优先迅雷」: 如果首批来自次选源 (assrt / opensubtitles 还要再解析一次下载地址, 失败率更高)、而迅雷还没回话,
 // 就给它一个很短的宽限期 (SUB_PICK_GRACE) —— 迅雷通常几十毫秒就到, 等得起; 过了这段就用手上最好的, 不再等。
-const SUB_PICK_GRACE = 600;
+// 候选能不能直接拿来用: 有下载直链就行; OpenSubtitles 可以用 id 让服务端再换一次下载地址;
+// assrt 没有地址时服务端不做二次解析 (会返回 404「下载失败」) —— 这种挑上去等于没开字幕, 定默认时先跳过。
+const subUsable = x => !!x && (!!x.url || (x.source === 'opensubtitles' && !!x.id));
+const SUB_PICK_GRACE = 900;
 function subSearchFirst(name) {
   return new Promise(ok => {
     let fired = false, off = null, timer = 0, last = [];
@@ -3982,10 +3996,13 @@ function subSearchFirst(name) {
     const take = (list, done, st) => {
       if (fired) return;
       last = list;
+      // 这批里没有能直接用的 (比如 assrt 只给了 id、没有下载地址, 服务端解析会 404): 再等等下一批
+      if (!(list || []).some(subUsable)) { if (done) finish(list); return; }
       if (done) return finish(list);
-      if (!list.length) return;                                     // 还没有结果, 继续等
-      if (!st || !st.expect.has('xunlei') || st.got.has('xunlei') || list.some(x => x.source === 'xunlei')) return finish(list);
-      if (!timer) timer = setTimeout(() => finish(last), SUB_PICK_GRACE);
+      if (list.some(x => x.source === 'xunlei' && subUsable(x))) return finish(list);   // 有迅雷的直接用 (首选源)
+      if (st && st.got.has('xunlei')) return finish(list);                              // 迅雷已经回过了 (可能是空)
+      if (st && st.expect.size && !st.expect.has('xunlei')) return finish(list);        // 这次根本没问迅雷
+      if (!timer) timer = setTimeout(() => finish(last), SUB_PICK_GRACE);               // 迅雷还没回话: 短等一下
     };
     off = subSearchLive(name, take);
     if (fired) off();   // 离线 / 空词: 同步就回了个空
@@ -4008,6 +4025,7 @@ const subLangScore = (l, want) => want ? (subSameLang(l, want) ? 0 : 1) : (subZh
 function subPickBest(list, g) {
   let best = null, br = 9, bl = 1;
   for (const x of list || []) {
+    if (!subUsable(x)) continue;
     const r = subSrcRank(x.source), l = subLangScore(x.lang, g && g.lang);
     if (!best || r < br || (r === br && l < bl)) { best = x; br = r; bl = l; }
   }
@@ -4019,6 +4037,8 @@ function subPickBest(list, g) {
 let subLastOn = null;
 function subWantOn() {
   if (subLastOn !== null) return subLastOn;
+  const seen = subLastSeen.get();                 // 上次看片时是开着的: 刷新 / 重开页面之后也接着开
+  if (seen !== null) return seen;
   const g = subGlobalPref.get();
   return !!g && !!g.mode && g.mode !== 'off';
 }
@@ -4031,7 +4051,7 @@ async function subPickFor(mine, saved, name, opts = {}) {
   const local = mine.local || [];
   const hit = local.find(x => subSameLang(x.lang, g.lang)) || local[0];
   if (hit) return { mode: 'local', key: hit.key, lang: hit.lang };
-  const used = (mine.used || []).find(x => x && x.url);
+  const used = (mine.used || []).find(x => subUsable(x));
   if (used) return subChoiceOf(used);
   if (opts.noRemote) return null;
   const list = (mine.remote && mine.remote.length) ? mine.remote : await subSearchFirst(name);
@@ -4124,7 +4144,7 @@ function subItems(S) {
   const used = (S.useK ? subUsedFor(S.useK) : (S.used || [])).filter(u => u && u.url);
   const usedSig = new Set(used.map(subDupKey));
   // 按源排一下 (迅雷在前): 边搜边出时新一批只是往后接, 不会把已经看到的条目搅乱
-  const remotes = subUniq(S.remote || []).filter(r => !usedSig.has(subDupKey(r))).sort((a, b) => subSrcRank(a.source) - subSrcRank(b.source));
+  const remotes = subUniq(S.remote || []).filter(r => !usedSig.has(subDupKey(r)) && subUsable(r)).sort((a, b) => subSrcRank(a.source) - subSrcRank(b.source));
   return [
     { label: '关闭字幕', on: !S.active, choice: null },
     ...(S.local || []).map(s => ({ label: (subLangLabel(s.lang) || s.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === s.key, choice: { mode: 'local', key: s.key, lang: s.lang } })),

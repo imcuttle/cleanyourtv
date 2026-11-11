@@ -493,7 +493,12 @@ function subApply(s, choice, persist = true) {
   if (!url) SUB.unmount(v);
   // anchor: 放进 .fd-shade 后面, 不然底部那层压暗的渐变会把字幕一起压暗
   else SUB.mount(v, { url, anchor: s.el.querySelector('.fd-shade'), reserve: r => feedReserve(s, r) });
-  if (s === cur()) { subLastOn = !!choice; syncSubAct(s); }   // 邻居屏的预载不算「上一个看过的片」
+  if (s === cur()) {
+    // 挂上了就是「开着」; 自动判定没找到候选不算用户关字幕 (一次搜索失败不该让后面全关着), 只有手动关才记关
+    if (choice) { subLastOn = true; subLastSeen.set(true); }
+    else if (persist) { subLastOn = false; subLastSeen.set(false); }
+    syncSubAct(s);
+  }
   if (!persist) return;
   subGlobalPref.set(choice ? { mode: choice.mode, lang: choice.lang || '' } : { mode: 'off' });
   subUsedAdd(s.sub.useK, choice);
@@ -537,7 +542,8 @@ function syncSubAct(s) {
 async function subEnsure(s) {
   const e = s.eps[s.ep];
   if (!e) { s.sub = null; SUB.unmount(s.video); if (s === cur()) syncSubAct(s); return; }
-  const mine = s.sub = { key: subKeyOf(s), useK: subUseKeyOf(s.d?.name || e.name), fileId: subFileIdOf(e.url), local: [], remote: [], used: [], active: null, q: '', searching: false, searched: false };
+  const prev = s.sub;
+  const mine = s.sub = { key: subKeyOf(s), useK: subUseKeyOf(s.d?.name || e.name), fileId: subFileIdOf(e.url), local: [], remote: [], used: [], active: null, q: '', searching: false, searched: false, retry1: !!prev?.retry1 };
   mine.used = subUsedFor(mine.useK);
   if (s === cur()) syncSubAct(s);
   const name = s.d?.name || e.name;
@@ -589,7 +595,14 @@ function subKick(s) {
 function activate() {
   ring.forEach((s, r) => { setRole(s, r - 1); if (r !== 1) s.video.pause(); });
   const s = cur();
-  if (s.sub && s.sub.settled) subLastOn = !!s.sub.active;   // 这一屏的字幕已经定过了 (多半是预载时就定的), 当作「上一个看过的片」
+  // 这一屏的字幕已经定过 (多半是预载时就定的): 开着就把「上一个看过的片开着」记下来。
+  // 没有字幕不改这个开关 —— 预载时它可能还是「上一屏」没准备候选 / 那次搜索失败, 那不代表用户关了字幕。
+  if (s.sub && s.sub.settled && s.sub.active) { subLastOn = true; subLastSeen.set(true); }
+  // 该开却没挂上 (预载时判成「上一屏不用准备」, 或者搜索失败): 轮到它时补一次, 别让用户划到这儿对着没字幕的画面
+  if (s.sub && s.sub.settled && !s.sub.active && !s.sub.retry1 && s.it) {
+    const saved = subSavedFor(s.sub.key);
+    if (subWantOn() && saved === undefined) { s.sub.retry1 = true; subEnsure(s); }
+  }
   skEnsure(s); feedMarks();
   F.userPaused = false;
   if (!s.it) return;
