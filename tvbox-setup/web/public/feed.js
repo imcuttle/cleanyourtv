@@ -493,11 +493,40 @@ function subApply(s, choice, persist = true) {
   if (!url) SUB.unmount(v);
   // anchor: 放进 .fd-shade 后面, 不然底部那层压暗的渐变会把字幕一起压暗
   else SUB.mount(v, { url, anchor: s.el.querySelector('.fd-shade'), reserve: r => feedReserve(s, r) });
-  if (s === cur()) syncSubAct(s);
+  if (s === cur()) { subLastOn = !!choice; syncSubAct(s); }   // 邻居屏的预载不算「上一个看过的片」
   if (!persist) return;
   subGlobalPref.set(choice ? { mode: choice.mode, lang: choice.lang || '' } : { mode: 'off' });
   subUsedAdd(s.sub.useK, choice);
+  // 「这一屏动过字幕」两份都写 (see app.js subChoiceSet): 主动关掉尤其别丢, 下次打开就按它来, 不再套默认
+  subChoiceSet(s.sub.key, choice || { mode: 'off' });
   if (s.sub.key) epProg.setSub(s.sub.key.site, s.sub.key.id, s.sub.key.ep, choice || { mode: 'off' }, vdur(v));
+  subSyncNext();   // 这一屏刚定下的字幕状态 (开 / 关) 就是下一屏的默认: 开着就补预载, 关掉就把预载的撤掉
+}
+// 手动改了这一屏的字幕之后, 让「下一屏」跟上: 它自己动过字幕 (选过 / 主动关掉) 就不插手, 以它自己的为准;
+// 没动过的, 跟着这一屏——开着就补搜 + 预载, 关掉就把已经预载上的撤掉 (免得「我已经关了字幕, 划下去还是跳出来」)。
+function subSyncNext() {
+  const nx = ring[2];
+  if (!nx || nx === cur() || !nx.it || !nx.sub) return;
+  if (subSavedFor(nx.sub.key) !== undefined) return;
+  if (!subWantOn()) {
+    if (nx.sub.active) { subApply(nx, null, false); nx.sub.settled = true; }
+    return;
+  }
+  if (!nx.sub.active) subWarmNext();
+}
+// 这一屏刚开字幕时, 下一屏的候选当时可能按「关着」跳过了 (没搜远端)。这里补一遍, 不等用户划过去现搜。
+// 下一屏自己动过字幕 (选过某条, 或者主动关掉) 就不插手 —— 以它之前的设置为止。
+async function subWarmNext() {
+  const nx = ring[2];
+  if (!nx || nx === cur() || !nx.it) return;
+  const mine = nx.sub, e = nx.eps?.[nx.ep];
+  if (!mine || !e || mine.active) return;
+  const saved = subSavedFor(mine.key);
+  if (saved !== undefined) return;
+  const choice = await subPickFor(mine, undefined, nx.d?.name || e.name);
+  if (nx.sub !== mine || mine.active) return;
+  subApply(nx, choice, false);
+  mine.settled = true;
 }
 function syncSubAct(s) {
   const b = q('[data-a=sub]'); if (!b) return;
@@ -511,26 +540,30 @@ async function subEnsure(s) {
   const mine = s.sub = { key: subKeyOf(s), useK: subUseKeyOf(s.d?.name || e.name), fileId: subFileIdOf(e.url), local: [], remote: [], used: [], active: null, q: '', searching: false, searched: false };
   mine.used = subUsedFor(mine.useK);
   if (s === cur()) syncSubAct(s);
+  const name = s.d?.name || e.name;
+  const saved = subSavedFor(mine.key);   // undefined = 这一屏从没动过字幕 (动过: 选过的用选过的, 主动关掉的一直关着)
+  // 上一屏 / 下一屏: 只有当前这屏开着字幕 (或上一个片开着) 才替它把远端候选也搜出来 —
+  // 滑过去的时候字幕就已经在了, 关着的时候不去打接口。「上一屏」不提前准备 (回头看不急)。
+  // 允许打远端的场合: 当前这屏, 或者「下一屏」(提前预载); 上一屏不准备 (回头看不急)
+  const ahead = s.i === F.idx + 1;
+  const wantRemote = subWantOn() && (s === cur() || ahead);
+  // 搜索和「列本机字幕」并行开跑 (本地同名字幕照样优先, 只是省掉串着等的那一个来回)
+  if (wantRemote && saved === undefined) subSearchWarm(name);
   if (mine.fileId) {
     try { const r = await api('local/subs', { id: mine.fileId }, null); if (s.sub === mine) mine.local = r?.subs || []; } catch {}
   }
   if (s.sub !== mine) return;
-  const saved = mine.key ? epProg.getSub(mine.key.site, mine.key.id, mine.key.ep) : undefined;
-  let choice = null;
-  if (saved !== undefined && saved !== null) choice = saved.mode === 'off' ? null : saved;
-  else if (saved === undefined) {
-    const g = subGlobalPref.get();
-    if (g && g.mode === 'local') { const hit = mine.local.find(x => subLangLabel(x.lang) === subLangLabel(g.lang)) || mine.local[0]; if (hit) choice = { mode: 'local', key: hit.key, lang: hit.lang }; }
-  }
+  const choice = await subPickFor(mine, saved, name, { noRemote: !wantRemote });
+  if (s.sub !== mine) return;
   subApply(s, choice, false);
+  mine.settled = true;
   if (s === cur() && !sheetEl.hidden && sheetEl.dataset.mode === 'sub') renderSubSheet();
 }
 function renderSubSheet() {
   const s = cur(), S = s.sub || { local: [], remote: [] };
   sheetEl.dataset.mode = 'sub';
-  sheetEl.innerHTML = '<div class="sh-head"><i class="grab"></i><b>字幕</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">' + I.close + '</button></div>'
-    + subListHtml(S);
-  subWireList(sheetEl, S, choice => subApply(s, choice), renderSubSheet, () => s.sub === S);
+  subPaint(sheetEl, '<div class="sh-head"><i class="grab"></i><b>字幕</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">' + I.close + '</button></div>'
+    + subListHtml(S), () => subWireList(sheetEl, S, choice => subApply(s, choice), renderSubSheet, () => s.sub === S));
 }
 // 打开面板第一次 (这一集还没搜过): 用片名/番号自动搜一次, 省得用户自己敲字才能看到候选。
 function subKick(s) {
@@ -538,19 +571,25 @@ function subKick(s) {
   if (!mine || mine.searched || mine.searching) return;
   const name = s.d?.name || s.eps?.[s.ep]?.name || '';
   if (!name) return;
-  if (navigator.onLine === false) { mine.offline = true; mine.searched = true; if (s === cur() && sheetEl.dataset.mode === 'sub') renderSubSheet(); return; }   // 离线: 不搜, 只列本机 + 用过
+  const repaint = () => { if (s === cur() && !sheetEl.hidden && sheetEl.dataset.mode === 'sub') renderSubSheet(); };
+  if (navigator.onLine === false) { mine.offline = true; mine.searched = true; repaint(); return; }   // 离线: 不搜, 只列本机 + 用过
   mine.searching = true; mine.offline = false; mine.q = javCode(name) || name;
-  if (s === cur() && !sheetEl.hidden && sheetEl.dataset.mode === 'sub') renderSubSheet();
-  subAutoSearch(name).then(results => {
-    if (s.sub !== mine) return;
-    mine.remote = subUniq(results); mine.searching = false; mine.searched = true; mine.offline = navigator.onLine === false;
-    if (s === cur() && !sheetEl.hidden && sheetEl.dataset.mode === 'sub') renderSubSheet();
+  repaint();
+  // 边搜边出: 第一批回来就先摆上, 其它源继续补
+  mine.subOff?.();
+  mine.subOff = subSearchLive(name, (list, done) => {
+    if (s.sub !== mine) { mine.subOff?.(); return; }
+    mine.remote = list; mine.searching = !done; mine.searched = done || !!list.length;
+    mine.offline = navigator.onLine === false;
+    if (done) mine.subOff = null;
+    repaint();
   });
 }
 
 function activate() {
   ring.forEach((s, r) => { setRole(s, r - 1); if (r !== 1) s.video.pause(); });
   const s = cur();
+  if (s.sub && s.sub.settled) subLastOn = !!s.sub.active;   // 这一屏的字幕已经定过了 (多半是预载时就定的), 当作「上一个看过的片」
   skEnsure(s); feedMarks();
   F.userPaused = false;
   if (!s.it) return;

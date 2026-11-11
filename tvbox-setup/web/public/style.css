@@ -424,6 +424,9 @@ a.ch { color: inherit; }
 .cbar svg { width: 26px; height: 26px; fill: currentColor; }
 .cbar svg text { font-size: 7px; font-weight: 800; text-anchor: middle; fill: currentColor; }
 .cbar button.txt { width: auto; padding: 0 12px; border-radius: 20px; font-size: 14px; font-weight: 700; }
+/* 大屏控制条里的字幕按钮 (从「更多」浮窗挪过来的): 图标跟旁边几个一样大, 开着时是红的 (见 .pill[data-act=sub].on) */
+.cbar .pill { border-radius: 50%; }
+.cbar .pill svg { width: 26px; height: 26px; }
 #player .i-pause, #player.paused .i-play { display: inline; } #player .i-play, #player.paused .i-pause { display: none; }
 #player .i-x, #player.muted .i-wave { display: none; } #player.muted .i-x { display: inline; }
 .vol { width: 0; opacity: 0; transition: width .2s, opacity .2s; accent-color: #fff; }

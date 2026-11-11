@@ -3866,10 +3866,13 @@ function applySub(choice, persist = true) {
   if (!url) SUB.unmount(video);
   // 字幕盖在画面上, 不压播放器底部那条控制条 (控制条一出来字幕自动往上让一点, 收起再回来)
   else SUB.mount(video, { url, reserve: r => (player.classList.contains('idle') ? 0 : ctrlReserve(r)) });
+  subLastOn = !!choice;   // 这一部片字幕是开是关, 下一部片按它决定要不要默认开
   syncSubAct();
   if (!persist) return;
   subGlobalPref.set(choice ? { mode: choice.mode, lang: choice.lang || '' } : { mode: 'off' });
   subUsedAdd(subState.useK, choice);
+  // 「这一集动过字幕」两份都写: 进度里那份给续播用, 独立那份保证短视频 / metadata 没到也记得住 (主动关掉尤其别丢)
+  subChoiceSet(subState.key, choice || { mode: 'off' });
   if (subState.key) prog.setSub(subState.key.site, subState.key.id, subState.key.ep, choice || { mode: 'off' }, vdur(video));
 }
 function syncSubAct() {
@@ -3884,27 +3887,159 @@ async function subInit() {
   const mine = subState = { key: subKeyOf(), useK: subUseKey(), fileId: subFileIdOf(e.url), local: [], remote: [], used: [], active: null };
   mine.used = subUsedFor(mine.useK);
   syncSubAct();
+  const name = cur?.d?.name || e.name;
+  const saved = subSavedFor(mine.key);   // undefined = 这一集从没动过字幕 (动过的话选了哪条 / 主动关掉都以那次为准)
+  // 没动过 + 要开字幕: 搜索和「列本机字幕」并行开跑, 不串着等 (本地有同名字幕时它照样优先, 只是省掉一个来回)
+  if (saved === undefined && subWantOn()) subSearchWarm(name);
   if (mine.fileId) {
     try { const r = await api('local/subs', { id: mine.fileId }, null); if (subState === mine) mine.local = r?.subs || []; } catch {}
   }
   if (subState !== mine) return;
-  const saved = mine.key ? prog.getSub(mine.key.site, mine.key.id, mine.key.ep) : undefined;
-  let choice = null;
-  if (saved !== undefined && saved !== null) choice = saved.mode === 'off' ? null : saved;
-  else if (saved === undefined) {
-    const g = subGlobalPref.get();
-    if (g && g.mode === 'local') choice = mine.local.find(s => subLangLabel(s.lang) === subLangLabel(g.lang)) ? { mode: 'local', ...pickLocal(mine.local, g.lang) } : null;
-  }
+  const choice = await subPickFor(mine, saved, name);
+  if (subState !== mine) return;
   applySub(choice, false);
 }
-function pickLocal(list, lang) { const hit = list.find(s => subLangLabel(s.lang) === subLangLabel(lang)) || list[0]; return hit ? { key: hit.key, lang: hit.lang } : {}; }
-// 自动按「番号 (成人资源的话) + 片名」各搜一次再合并去重: 打开字幕面板不用手动敲字就能看到候选，想换词再自己输入重搜。
-async function subAutoSearch(name) {
-  const code = javCode(name);
-  const queries = code && code !== String(name || '').trim().toUpperCase() ? [code, name] : [name];
-  const lists = await Promise.all(queries.map(q => q ? api('subtitle/search', { q }, null).then(r => r?.results || []).catch(() => []) : []));
-  return subUniq(lists.flat());
+// ---------- 字幕搜索: 边搜边出, 不等所有源 ----------
+// 服务端 /api/subtitle/search?stream=1 每个源一好就推一行 NDJSON ({ source, results })。
+// 这里按关键词汇总成一份「到目前为止的结果」, 谁订阅都先立刻拿到现状, 之后每来一批再补一次 ——
+// 所以面板是渐进铺开的, 定默认字幕只要第一批就能挑一条挂上去: 用户先看到字幕, 列表再慢慢长全。
+// 自动搜索的词: 番号 (成人资源的话) + 片名各搜一次再合并去重, 打开面板不用敲字就能看到候选。
+function subQueries(name) {
+  const nm = String(name || '').trim();
+  const code = javCode(nm);
+  return code && code !== nm.toUpperCase() ? [code, nm] : [nm];
 }
+const SUB_QTTL = 10 * 60e3;
+const subQC = new Map();   // 关键词 -> { at, list, done, subs, started, queries, expect, got } (10 分钟内复用同一份, 沉浸页预载过就直接秒出)
+function subQState(name) {
+  const k = String(name || '').trim().toLowerCase();
+  if (!k) return null;
+  let st = subQC.get(k);
+  if (st && Date.now() - st.at > SUB_QTTL) { subQC.delete(k); st = null; }
+  if (!st) { st = { at: Date.now(), list: [], done: false, subs: new Set(), started: false, queries: null, expect: new Set(), got: new Set() }; subQC.set(k, st); }
+  return st;
+}
+const subQNotify = st => { st.at = Date.now(); for (const f of [...st.subs]) { try { f(st.list, st.done, st); } catch {} } };
+// 一个关键词的流: 每解析出一行就交给 cb; 服务端不支持流 (老版本) 就退回一次性 JSON, 失败就算了 —— 不影响本机 / 用过的那几条。
+async function subFetchStream(q, cb) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 15000);   // 兜底, 服务端每个源自己 6s 超时
+  try {
+    const r = await fetch('/api/subtitle/search?' + new URLSearchParams({ q, stream: '1' }), { signal: ctl.signal, headers: { Accept: 'application/x-ndjson' } });
+    if (!r.ok) return;
+    if (!r.body || !r.body.getReader) { const j = await r.json().catch(() => null); if (j && j.results && j.results.length) cb({ results: j.results }); return; }
+    const rd = r.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await rd.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (!line) continue;
+        let o; try { o = JSON.parse(line); } catch { continue; }
+        if (o && !o.ping) cb(o);
+      }
+    }
+  } catch {} finally { clearTimeout(timer); try { ctl.abort(); } catch {} }
+}
+function subQStart(st, name) {
+  if (st.started) return;
+  st.started = true;
+  st.queries = (st.queries || subQueries(name || '')).filter(Boolean);
+  if (!st.queries.length || navigator.onLine === false) { st.queries = []; st.done = true; return; }
+  let left = st.queries.length;
+  for (const q of st.queries) subFetchStream(q, o => {
+    if (o.sources) for (const s of o.sources) st.expect.add(s);                       // 这次问了哪些源
+    else if (o.source) {
+      st.got.add(o.source);                                                          // 这个源已经有结论了 (可能是空)
+      if (o.results && o.results.length) st.list = subUniq(st.list.concat(o.results));
+    } else return;                                                                   // done / error / 其它
+    subQNotify(st);
+  }).then(() => { if (--left <= 0) { st.done = true; subQNotify(st); } });
+}
+// 订阅: onBatch(list, done, st) 先马上回调一次现状 (已有结果 / 已搜完就是秒出), 之后每来一批再回调。
+// queries 只在第一次为该关键词搜索时生效 (手动输的词就只搜那一个)。返回取消订阅的函数。
+function subSearchLive(name, onBatch, queries) {
+  const st = navigator.onLine === false ? null : subQState(name);
+  if (!st) { onBatch([], true, null); return () => {}; }
+  if (queries && queries.length) st.queries = queries;
+  st.subs.add(onBatch);
+  if (st.list.length || st.done) queueMicrotask(() => { if (st.subs.has(onBatch)) onBatch(st.list, st.done, st); });
+  subQStart(st, name);
+  return () => st.subs.delete(onBatch);
+}
+// 提前把搜索跑起来 (和「列本机字幕」这种请求并行, 不用串着等)。
+function subSearchWarm(name) { const st = navigator.onLine === false ? null : subQState(name); if (st) subQStart(st, name); }
+// 定默认字幕: 第一批有用结果就返回, 不等所有源。
+// 但「优先迅雷」: 如果首批来自次选源 (assrt / opensubtitles 还要再解析一次下载地址, 失败率更高)、而迅雷还没回话,
+// 就给它一个很短的宽限期 (SUB_PICK_GRACE) —— 迅雷通常几十毫秒就到, 等得起; 过了这段就用手上最好的, 不再等。
+const SUB_PICK_GRACE = 600;
+function subSearchFirst(name) {
+  return new Promise(ok => {
+    let fired = false, off = null, timer = 0, last = [];
+    const finish = list => { if (fired) return; fired = true; clearTimeout(timer); if (off) off(); ok(list.slice()); };
+    const take = (list, done, st) => {
+      if (fired) return;
+      last = list;
+      if (done) return finish(list);
+      if (!list.length) return;                                     // 还没有结果, 继续等
+      if (!st || !st.expect.has('xunlei') || st.got.has('xunlei') || list.some(x => x.source === 'xunlei')) return finish(list);
+      if (!timer) timer = setTimeout(() => finish(last), SUB_PICK_GRACE);
+    };
+    off = subSearchLive(name, take);
+    if (fired) off();   // 离线 / 空词: 同步就回了个空
+  });
+}
+// ---------- 默认选哪条字幕: 只在「这一集从没动过字幕」时才自作主张 ----------
+// 规则 (普通播放器和沉浸播放共用同一套):
+//   0. 这一集之前做过字幕操作 (手动选了一条 / 主动切到「关闭字幕」都算, 见 subSavedFor) → 一律以那次为准:
+//      选了哪条就用哪条, 主动关掉就一直关着 —— 不再套后面任何默认规则, 也不去搜远端;
+//   1. 真没动过 → 看上一个看过的那部片字幕是开是关 (subLastOn / subGlobalPref, 手动选择才写): 关着就继续关;
+//   2. 上一个开着 → 这一集也开, 依次找: 同语言的本地同名文件 → 这部片之前用过的那条远端 → 远端搜索 (优先迅雷)。
+// 所以连着看同一部剧的下一集、或者在沉浸页一直往下划, 上一次开着的话这一次自动接上, 不用每集手动开。
+const subSameLang = (a, b) => !!subLangLabel(a) && subLangLabel(a) === subLangLabel(b);
+const subChoiceOf = x => ({ mode: 'remote', source: x.source || '', url: x.url || '', ext: x.ext || 'srt', id: x.id || '', lang: x.lang || '', name: x.name || '' });
+// 同一批候选里挑哪条: 先看源 (迅雷是直链、不用再解析下载地址, 最稳也最快 —— 默认优先迅雷), 同源再按语言, 最后按到达顺序。
+// 语言: 设了偏好就按偏好; 没设就优先中文 (简/繁/双语) —— 否则迅雷第一条可能给个日文/英文字幕, 等于没开。
+const subSrcRank = x => x === 'xunlei' ? 0 : x === 'assrt' ? 1 : x === 'opensubtitles' ? 2 : 3;
+const subZhLike = l => /简|繁|中|双语/.test(subLangLabel(l) || '');
+const subLangScore = (l, want) => want ? (subSameLang(l, want) ? 0 : 1) : (subZhLike(l) ? 0 : 1);
+function subPickBest(list, g) {
+  let best = null, br = 9, bl = 1;
+  for (const x of list || []) {
+    const r = subSrcRank(x.source), l = subLangScore(x.lang, g && g.lang);
+    if (!best || r < br || (r === br && l < bl)) { best = x; br = r; bl = l; }
+  }
+  return best;
+}
+// 上一个看过的那部片, 字幕最后是开着还是关着 (不管是因为自己存过、还是跟着上一次自动接上的)。
+// 每次给「当前这屏 / 当前这部片」定下字幕状态就记一次 (邻居屏的预载不算); null = 还没播过, 用最近一次手动设置兜底。
+// 用它决定: 下一部片要不要默认开字幕 / 邻居屏要不要提前把候选 (含远端搜索) 准备好。
+let subLastOn = null;
+function subWantOn() {
+  if (subLastOn !== null) return subLastOn;
+  const g = subGlobalPref.get();
+  return !!g && !!g.mode && g.mode !== 'off';
+}
+// saved: 这一集自己存过的选择 (undefined = 从没选过 / 没记录)
+// opts.noRemote: 不许打远端 (离线, 或者这是「上一屏」这种不需要提前准备的邻居)
+async function subPickFor(mine, saved, name, opts = {}) {
+  if (saved !== undefined) return saved === null || saved.mode === 'off' ? null : saved;
+  if (!subWantOn()) return null;
+  const g = subGlobalPref.get() || {};
+  const local = mine.local || [];
+  const hit = local.find(x => subSameLang(x.lang, g.lang)) || local[0];
+  if (hit) return { mode: 'local', key: hit.key, lang: hit.lang };
+  const used = (mine.used || []).find(x => x && x.url);
+  if (used) return subChoiceOf(used);
+  if (opts.noRemote) return null;
+  const list = (mine.remote && mine.remote.length) ? mine.remote : await subSearchFirst(name);
+  if (mine.remote && !mine.remote.length && list.length) mine.remote = subUniq(list);   // 搜到的顺手填进面板, 打开就是现成的
+  const pick = subPickBest(list, g);
+  return pick ? subChoiceOf(pick) : null;
+}
+
 // ---------- 用过的字幕: 记在本机, 下次打开同一部片先列出来 (不用等搜索, 也不用在一堆结果里翻) ----------
 // 按「番号 / 片名」分组, 和自动搜索用的是同一套关键词: 同一部片的不同集共用这一份「用过」。
 const SUBUSE_KEY = 'subUsed';
@@ -3945,6 +4080,32 @@ function subUniq(list) {
   for (const x of list || []) { const k = subDupKey(x); if (seen.has(k)) continue; seen.add(k); out.push(x); }
   return out;
 }
+
+// ---------- 「这一集动过字幕」单独记一份 ----------
+// 只挂在播放进度上不够: prog.setSub 要求视频够长 (dur > PROG_MIN) 才记得住, 打开就关字幕 / 短视频 / metadata 还没到
+// 的时候那次操作会被吞掉, 下次又自作主张开起来。所以再存一份小的 KV (本机):
+// 手动选了哪条、主动切到「关闭字幕」都记下来 ({mode:'off'}), 下次打开以它为准 ——
+// 只有「从没动过字幕」的这一集, 才走「跟着上一个看过的片」那套默认规则。
+const SUBCH_KEY = 'subChoice';
+const subChId = k => k ? `${k.site}|${k.id}|${k.ep}` : '';
+function subChAll() { try { const a = JSON.parse(UD.get(SUBCH_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } }
+function subChoiceGet(key) {
+  const id = subChId(key); if (!id) return undefined;
+  const hit = subChAll().find(x => x && x.k === id);
+  return hit ? hit.sub : undefined;
+}
+function subChoiceSet(key, sub) {
+  const id = subChId(key); if (!id) return;
+  const arr = subChAll().filter(x => x && x.k !== id);
+  arr.unshift({ k: id, sub: sub || { mode: 'off' }, at: Date.now() });
+  try { UD.set(SUBCH_KEY, JSON.stringify(arr.slice(0, 300))); } catch {}
+}
+// 这一集之前动过字幕没有: 动过就返回那次的选择 (可能是 {mode:'off'}), 从没动过才是 undefined。
+function subSavedFor(key) {
+  if (!key) return undefined;
+  const p = prog.getSub(key.site, key.id, key.ep);
+  return p !== undefined ? p : subChoiceGet(key);
+}
 const subUiOpen = () => { const b = $('.plist'); return !b.hidden && b.dataset.mode === 'sub'; };
 // 字幕候选项 (关闭 / 本地 / 远程搜索结果) 的列表 + 是否选中: 普通播放器和沉浸播放共用这一份, 不要各自维护一份 map
 // 逻辑——两边字段长得一样, 分开维护很容易一边改了另一边忘了改 (之前几轮 bug 都栽在这上面)。
@@ -3962,7 +4123,8 @@ function subItems(S) {
   // 用过的直接从本机读, 每次重画都是最新的 (刚选完一条, 面板再打开就在最上面)
   const used = (S.useK ? subUsedFor(S.useK) : (S.used || [])).filter(u => u && u.url);
   const usedSig = new Set(used.map(subDupKey));
-  const remotes = subUniq(S.remote || []).filter(r => !usedSig.has(subDupKey(r)));
+  // 按源排一下 (迅雷在前): 边搜边出时新一批只是往后接, 不会把已经看到的条目搅乱
+  const remotes = subUniq(S.remote || []).filter(r => !usedSig.has(subDupKey(r))).sort((a, b) => subSrcRank(a.source) - subSrcRank(b.source));
   return [
     { label: '关闭字幕', on: !S.active, choice: null },
     ...(S.local || []).map(s => ({ label: (subLangLabel(s.lang) || s.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === s.key, choice: { mode: 'local', key: s.key, lang: s.lang } })),
@@ -3974,12 +4136,21 @@ function subItems(S) {
 function subListHtml(S) {
   const items = subItems(S);
   const nRemote = (S.remote || []).length;
-  const stat = S.searching ? '<div class="substatus">搜索中…</div>'
-    : S.offline && !nRemote ? '<div class="substatus">当前离线：先选本机或「最近用过」的字幕</div>'
-    : S.searched && !nRemote ? '<div class="substatus">没搜到，换个关键词试试</div>' : '';
+  // 边搜边出: 有结果就先摆出来, 还在等其它源时只给一句轻提示, 不压着列表
+  const stat = S.offline && !nRemote ? '<div class="substatus">当前离线：先选本机或「最近用过」的字幕</div>'
+    : !nRemote && S.searching ? '<div class="substatus">搜索中…</div>'
+    : S.searched && !nRemote ? '<div class="substatus">没搜到，换个关键词试试</div>'
+    : nRemote && S.searching ? '<div class="substatus">还在搜其他字幕源…</div>' : '';
   return `<div class="subsearch"><input type="search" placeholder="搜字幕：片名 / 番号…" value="${esc(S.q || '')}"><button data-subgo>搜索</button></div>
     ${stat}
     <div class="pitems">${items.map((it, i) => `${it.sep ? `<div class="subsep">${esc(it.sep)}</div>` : ''}<button data-i="${i}" class="${it.on ? 'on' : ''}"><span class="sn"><b>${esc(it.label)}</b></span></button>`).join('')}</div>`;
+}
+// 重画面板内容: 边搜边出会一批一批重画, 这里把搜索框里正在敲的字和焦点保住, 不然每来一批结果光标就跳走了。
+function subPaint(box, html, wire) {
+  const i = $('.subsearch input', box), keep = i && document.activeElement === i ? { v: i.value, at: i.selectionStart } : null;
+  box.innerHTML = html;
+  if (keep) { const n = $('.subsearch input', box); if (n) { n.value = keep.v; n.focus(); try { n.setSelectionRange(keep.at, keep.at); } catch {} } }
+  wire();
 }
 // 接上面这段 HTML 的交互: 点候选项 / 搜索框 + 回车 + 搜索按钮。box 是装了这段 HTML 的容器 (重画只替换它的 innerHTML,
 // box 本身不变); apply(choice) 真正让一个选择生效; rerender() 选完/搜索状态变化都要重画一次; isLive() 搜索结果回来时
@@ -3989,25 +4160,30 @@ function subWireList(box, S, apply, rerender, isLive) {
   const items = subItems(S);
   $$('.pitems button', box).forEach((b, i) => b.onclick = () => { apply(items[i].choice); rerender(); });
   const input = $('.subsearch input', box), go = $('[data-subgo]', box);
-  const runSearch = async () => {
+  // 手动换词重搜: 也是边搜边出 (先清空, 第一批回来就摆上, 其它源继续补)
+  const runSearch = () => {
     const q = input.value.trim(); if (!q) return;
-    S.q = q; S.searching = true; S.searched = false; rerender();
-    let results = [];
-    try { const r = await api('subtitle/search', { q }, null); results = r?.results || []; } catch (e) { S.failed = true; }
-    if (!isLive()) return;
-    S.remote = subUniq(results); S.searching = false; S.searched = true; S.offline = navigator.onLine === false;
-    rerender(); $('.subsearch input', box)?.focus();
+    S.q = q; S.searching = true; S.searched = false; S.remote = []; rerender();
+    S.subOff?.();   // 换词了, 上一次的流先断掉, 别把旧词的结果补进来
+    S.subOff = subSearchLive(q, (list, done) => {
+      if (!isLive()) { S.subOff?.(); return; }
+      S.remote = list; S.searching = !done; S.searched = done || !!list.length;
+      S.offline = navigator.onLine === false;
+      if (done) S.subOff = null;
+      rerender();
+    }, [q]);
   };
   go.onclick = runSearch;
-  input.onkeydown = e => { if (e.key === 'Enter') runSearch(); };
+  input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); runSearch(); } };
 }
 function drawSub() {
   const box = $('.plist'), S = subState || { local: [], remote: [] };
   box.dataset.mode = 'sub'; box.classList.remove('live', 'srcs', 'skipset'); box.classList.add('subset');
-  box.innerHTML = `<div class="phead"><i class="grab"></i><b>字幕</b><span>本地同名字幕 / 在线搜索</span><button class="icon sm" data-pclose title="关闭">✕</button></div>
-    ${subListHtml(S)}`;
-  $('[data-pclose]', box).onclick = () => togglePlist(false);
-  subWireList(box, S, applySub, drawSub, () => subState === S);
+  subPaint(box, `<div class="phead"><i class="grab"></i><b>字幕</b><span>本地同名字幕 / 在线搜索</span><button class="icon sm" data-pclose title="关闭">✕</button></div>
+    ${subListHtml(S)}`, () => {
+    $('[data-pclose]', box).onclick = () => togglePlist(false);
+    subWireList(box, S, applySub, drawSub, () => subState === S);
+  });
 }
 function openSubSheet() {
   if (!subState) return;
@@ -4024,9 +4200,12 @@ function subAutoKick() {
   // 离线: 不发请求 (只会等到超时), 面板里直接给本机 + 用过的那几条
   if (navigator.onLine === false) { mine.offline = true; mine.searched = true; drawSub(); return; }
   mine.searching = true; mine.offline = false; mine.q = javCode(name) || name; drawSub();
-  subAutoSearch(name).then(results => {
-    if (subState !== mine) return;
-    mine.remote = results; mine.searching = false; mine.searched = true;
+  // 边搜边出: 第一批回来就先摆上候选项, 后面的源继续往列表里补, 不用等最慢的那个
+  mine.subOff?.();
+  mine.subOff = subSearchLive(name, (list, done) => {
+    if (subState !== mine) { mine.subOff?.(); return; }
+    mine.remote = list; mine.searching = !done; mine.searched = done || !!list.length;
+    if (done) mine.subOff = null;
     if (subUiOpen()) drawSub();
   });
 }
@@ -4252,6 +4431,7 @@ if (!fineCursor) {
 }
 else {
   $('[data-c=rate]').before($('[data-act=next]'), $('[data-act=list]'));   // 大屏: 选集在播放器下面, 倍速左边
+  $('[data-c=rate]').before($('[data-act=sub]'));   // 大屏: 字幕在右下角控制条里, 倍速左边 (触屏留在「更多」浮窗)
   // 下载 / 分享 / 自动跳过 不管窗口多宽都收进「更多」，顶栏只留 收藏 和 更多
   setTimeout(() => { const more = $('.pmore'); for (const x of ['dl', 'share', 'skipt']) more.insertBefore($(`[data-act=${x}]`), $('[data-act=rate]', more)); syncMore?.(); });   // syncMore 在下面才定义，等本段跑完再排
 }   // 右上角「更多」里放 下载 / 分享 / 自动跳过 / 切换源

@@ -2481,14 +2481,36 @@ async function opensubtitlesDownloadUrl(fileId, apiKey) {
   const j = await r.json().catch(() => null);
   return (j && j.link) || '';
 }
-async function subtitleSearch(q) {
+// 每个源各一个 job, 带上源名 —— 流式接口要靠它标记「这一批是哪个源给的」。
+function subtitleJobs(q) {
   q = str(q).trim().slice(0, 100);
-  if (!q) return [];
   const jobs = [];
-  if (subCfg.xunlei) jobs.push(searchXunlei(q).catch(() => []));
-  if (subCfg.assrt.enabled && subCfg.assrt.token) jobs.push(searchAssrt(q, subCfg.assrt.token).catch(() => []));
-  if (subCfg.opensubtitles.enabled && subCfg.opensubtitles.apiKey) jobs.push(searchOpensubtitles(q, subCfg.opensubtitles.apiKey).catch(() => []));
-  return (await Promise.all(jobs)).flat();
+  if (!q) return { q, jobs };
+  if (subCfg.xunlei) jobs.push({ source: 'xunlei', p: searchXunlei(q).catch(() => []) });
+  if (subCfg.assrt.enabled && subCfg.assrt.token) jobs.push({ source: 'assrt', p: searchAssrt(q, subCfg.assrt.token).catch(() => []) });
+  if (subCfg.opensubtitles.enabled && subCfg.opensubtitles.apiKey) jobs.push({ source: 'opensubtitles', p: searchOpensubtitles(q, subCfg.opensubtitles.apiKey).catch(() => []) });
+  return { q, jobs };
+}
+async function subtitleSearch(q) {
+  const { jobs } = subtitleJobs(q);
+  return (await Promise.all(jobs.map(j => j.p))).flat();
+}
+// 流式版: NDJSON, 哪个源先回来就先写一行 { source, results }, 收尾 { done: true }。
+// 前端拿到第一行就能把字幕挂上去, 不用等最慢的那个源 (没填 token 的源本来就不在列表里, 默认只有迅雷, 一个来回)。
+// 开头先报一次 { sources: [...] } (这次都问了哪些源), 每个源不管有没有结果都回一行 —— 前端靠这个知道
+// 「首选源已经搜过、只是没结果」, 不用空等。
+async function subtitleSearchStream(res, q) {
+  const { jobs } = subtitleJobs(q);
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+  const emit = o => { if (!res.destroyed && !res.writableEnded) res.write(JSON.stringify(o) + '\n'); };
+  const beat = setInterval(() => emit({ ping: 1 }), 8000);
+  emit({ q, sources: jobs.map(j => j.source) });
+  try {
+    await Promise.all(jobs.map(async j => { let results = []; try { results = await j.p; } catch {} emit({ source: j.source, results: results || [] }); }));
+  } catch (e) { emit({ error: e.message || String(e) }); }
+  clearInterval(beat);
+  emit({ done: true });
+  res.end();
 }
 // source + (url+ext 直给, 比如迅雷) 或 id (还要再查一次详情才有下载地址, 比如 assrt / opensubtitles)。下载好转成 vtt 缓存到磁盘 (按下载地址算, 同一个字幕不会重复转)。
 async function subtitleFetch({ source, url, ext, id }) {
@@ -3962,7 +3984,11 @@ async function api(route, q, res, req) {
     return send(res, 200, { subs: localSubs(f.path).map(s => ({ key: s.file, ext: s.ext, lang: s.lang })) });
   }
   // 远程字幕: 按名字/番号搜索 (内置迅雷, 另加射手网(伪)/OpenSubtitles——配了 Token/Key 才启用)
-  if (route === 'subtitle/search') return send(res, 200, { results: await subtitleSearch(q.get('q') || '') });
+  // stream=1: 边搜边推 (NDJSON), 前端不用等所有源都回来
+  if (route === 'subtitle/search') {
+    if (q.get('stream') === '1') return subtitleSearchStream(res, q.get('q') || '');
+    return send(res, 200, { results: await subtitleSearch(q.get('q') || '') });
+  }
   if (route === 'subtitle/fetch') {
     // <track src> 直接拿这个当 .vtt 用, 所以成功时给纯文本, 不包一层 JSON
     const r = await subtitleFetch({ source: q.get('source') || '', url: q.get('url') || '', ext: q.get('ext') || '', id: q.get('id') || '' });
