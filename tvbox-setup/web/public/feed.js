@@ -534,7 +534,7 @@ function renderSubSheet() {
       apply: () => subApply(s, { mode: 'remote', source: x.source, url: x.url || '', ext: x.ext || 'srt', id: x.id || '', lang: x.lang || '', name: x.name }),
     })),
   ];
-  sheetEl.innerHTML = '<div class="sh-head"><b>字幕</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">' + I.close + '</button></div>'
+  sheetEl.innerHTML = '<div class="sh-head"><i class="grab"></i><b>字幕</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">' + I.close + '</button></div>'
     + '<div class="subsearch"><input type="search" placeholder="搜字幕：片名 / 番号…" value="' + esc(S.q || '') + '"><button data-subgo>搜索</button></div>'
     + (S.searching ? '<div class="substatus">搜索中…</div>' : S.searched && !(S.remote || []).length ? '<div class="substatus">没搜到，换个关键词试试</div>' : '')
     + '<div class="sh-subs">' + items.map((it, i) => '<button data-su="' + i + '" class="' + (it.on ? 'on' : '') + '">' + esc(it.label) + '</button>').join('') + '</div>';
@@ -870,7 +870,7 @@ function renderSheet() {
   const s = cur(); if (!s.d) return;
   sheetEl.dataset.mode = 'eps';
   const d = s.d;
-  sheetEl.innerHTML = `<div class="sh-head"><b>${esc(d.name)}</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">${I.close}</button></div>
+  sheetEl.innerHTML = `<div class="sh-head"><i class="grab"></i><b>${esc(d.name)}</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">${I.close}</button></div>
     ${d.lines.length > 1 ? `<div class="sh-lines">${d.lines.map((l, i) => `<button data-sl="${i}" class="${i === s.line ? 'on' : ''}">${esc(l.name)}</button>`).join('')}</div>` : ''}
     <div class="sh-eps">${s.eps.map((e, i) => `<button data-se="${i}" class="${i === s.ep ? 'on' : ''}">${esc(e.name)}</button>`).join('')}</div>`;
   // 不用 scrollIntoView: 它会把整个 #feed 容器也一起滚动, 界面整体上移错位。只滚动选集列表自己。

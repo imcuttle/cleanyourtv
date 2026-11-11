@@ -665,7 +665,7 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 .fd-menu hr { border: 0; border-top: 1px solid #ffffff1f; margin: 4px 6px; }
 .fd-sheet { position: absolute; z-index: 5; right: 0; top: 0; bottom: 0; width: min(380px, 100%); background: #181818f5; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); padding: calc(14px + env(safe-area-inset-top)) 14px calc(14px + var(--sb)); display: flex; flex-direction: column; gap: 12px; animation: fdIn .25s cubic-bezier(.32,.72,0,1); }
 @keyframes fdIn { from { transform: translateX(30px); opacity: 0; } }
-.sh-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; } .sh-head b { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-head { position: relative; display: flex; justify-content: space-between; align-items: center; gap: 10px; } .sh-head b { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sh-lines { display: flex; gap: 6px; flex-wrap: wrap; } .sh-lines button { padding: 6px 12px; border-radius: 16px; border: 1px solid #ffffff33; background: none; font-size: 13px; } .sh-lines .on { background: #fff; color: #000; }
 .sh-eps { min-height: 0; grid-auto-rows: 44px; display: grid; grid-template-columns: repeat(auto-fill, minmax(66px, 1fr)); gap: 8px; overflow-y: auto; overscroll-behavior: contain; align-content: start; flex: 1; }
 .sh-eps button { padding: 11px 4px; border-radius: 6px; border: 0; background: #2c2c2c; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .sh-eps .on { background: var(--red); font-weight: 800; }
@@ -674,9 +674,15 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 .fd-heart { position: absolute; z-index: 6; width: 96px; height: 96px; margin: -48px 0 0 -48px; pointer-events: none; animation: fdHeart .85s ease-out forwards; }
 .fd-heart svg { width: 100%; height: 100%; fill: #ff2c55; filter: drop-shadow(0 4px 14px #0008); }
 @keyframes fdHeart { 0% { transform: scale(.3) rotate(var(--r)); opacity: 0; } 20% { transform: scale(1.15) rotate(var(--r)); opacity: 1; } 40% { transform: scale(1) rotate(var(--r)); } 100% { transform: translateY(-70px) scale(1.2) rotate(var(--r)); opacity: 0; } }
+/* 字幕 / 选集面板变成从底部上拉: 跟 .plist 对齐, 两个触发条件都要有 (触屏设备不管多宽 / 窄屏不管是不是触屏), 跟 .plist 的两处规则一一对应 */
+html.touchui .fd-sheet { top: auto; width: auto; left: 0; max-height: 62vh; border-radius: 16px 16px 0 0; animation-name: fdUp; }
+html.touchui .sh-head { padding-top: 18px; }
+html.touchui .sh-head .grab { position: absolute; left: 50%; top: 7px; width: 38px; height: 4px; margin-left: -19px; border-radius: 2px; background: #ffffff40; }
+@keyframes fdUp { from { transform: translateY(40px); opacity: 0; } }
 @media (max-width: 760px) {
   .fd-sheet { top: auto; width: auto; left: 0; max-height: 62vh; border-radius: 16px 16px 0 0; animation-name: fdUp; }
-  @keyframes fdUp { from { transform: translateY(40px); opacity: 0; } }
+  .fd-sheet .sh-head { padding-top: 18px; }
+  .fd-sheet .sh-head .grab { position: absolute; left: 50%; top: 7px; width: 38px; height: 4px; margin-left: -19px; border-radius: 2px; background: #ffffff40; }
   .fd-info h2 { font-size: 15px; }
 }
 @media (prefers-reduced-motion: reduce) { .fd-slide { transition-duration: .01s; } }
@@ -1030,6 +1036,7 @@ html { touch-action: pan-x pan-y; }
 .pill.on:hover { background: #ffffff26; }   /* 开着的按钮 (收藏 / 自动跳过) 悬停也要有底色, 不然被上一条的 background:none 盖掉 */
 .pill.on svg { fill: currentColor; }
 .pill[data-act=vfav].on svg { fill: var(--red); stroke: var(--red); }   /* 已收藏: 爱心还在, 只是红色实心 */
+.pill[data-act=sub].on svg { fill: none; stroke: var(--red); }   /* 字幕图标是个方框 (外框线条), 不能像心形那样填实——填实就变成一个大色块了 */
 .pill .l { display: none; }
 .tlrow { display: flex; align-items: center; gap: 14px; }
 .tlrow .tl { flex: 1; min-width: 0; }
