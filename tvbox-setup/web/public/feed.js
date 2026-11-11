@@ -21,6 +21,7 @@ const I = {
   up: ic('<path d="M5 15l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'),
   down: ic('<path d="M5 9l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'),
   caret: ic('<path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'),
+  sub: ic('<path fill-rule="evenodd" d="M3 5h18v13H3V5zm2 2v9h14V7H5z"/><path d="M7 15h5v2H7zM13 15h4v2h-4z"/>'),
 };
 const touchUi = matchMedia('(hover: none), (pointer: coarse)').matches;
 
@@ -39,6 +40,7 @@ root.innerHTML = `
     <button data-a="like" title="喜欢 (l)" aria-label="喜欢">${I.heart}</button>
     <button data-a="fav" title="收藏 (s)" aria-label="收藏">${I.star}</button>
     <button data-a="eps" title="选集 (e)" aria-label="选集">${I.list}</button>
+    <button data-a="sub" hidden title="字幕 (c)" aria-label="字幕">${I.sub}</button>
     <button data-a="share" title="分享" aria-label="分享">${I.share}</button>
     <button data-a="detail" title="详情 (i)" aria-label="详情">${I.info}</button>
     <button data-a="dislike" title="不感兴趣 (d)" aria-label="不感兴趣">${I.ban}</button>
@@ -206,7 +208,7 @@ function saveHist(s) {
 }
 
 function teardown(s) {
-  clearTimeout(s.dog); s.tried = null; skStop(s);
+  clearTimeout(s.dog); s.tried = null; skStop(s); subStop(s);
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = s.video;
   v.onerror = null; v.onloadedmetadata = null;
@@ -257,7 +259,7 @@ function ready(s, d) {
   s.d = d; pickStart(s); paintInfo(s);
   const pic = cardPic(s.it);
   if (pic) s.video.poster = img(dbSize(pic, 'm') || pic);
-  attach(s);
+  attach(s); subEnsure(s);
   if (s === cur()) syncRail(); else if (cur()?.d && aheadOf(cur().video) >= 6) startPre(s);
 }
 
@@ -344,7 +346,7 @@ function fail(s, why) {
       if (s.tried.has(i) || !eps?.length) continue;
       const ep = Math.min(s.ep, eps.length - 1);
       s.tried.add(i); s.line = i; s.eps = eps; s.ep = ep; s.startAt = 0; s.stage = 0; s.compat = false;
-      paintInfo(s); attach(s);
+      paintInfo(s); attach(s); subEnsure(s);
       return;
     }
   }
@@ -357,7 +359,7 @@ const canAutoSkip = s => F.dir < 0 && !F.visited.has(s.i);
 function retry(s) {
   if (!s.d) { bind(s, s.i); return; }
   s.tried = null; s.via = false; s.startAt = 0; s.stage = 0; s.compat = false;
-  pickStart(s); paintInfo(s); attach(s);
+  pickStart(s); paintInfo(s); attach(s); subEnsure(s);
 }
 // Only the current title loads at full speed. The neighbours stay idle until the current one has ~6 s buffered (kick), so
 // they never fight it for bandwidth; after that they pre-buffer a few seconds each so a swipe lands on a ready picture.
@@ -428,8 +430,8 @@ function switchEp(s, line, ep, startAt) {
   s.line = line; s.eps = s.d.lines[line].episodes; s.ep = Math.max(0, Math.min(ep, s.eps.length - 1));
   s.startAt = startAt ?? epProg.resume(s.d, line, s.ep);   // 没指定就接着这一集上次看到的地方
   s.watched = 0; s.judged = false; s.stage = 0; s.compat = false; s.tried = null;
-  paintInfo(s); attach(s);
-  if (!sheetEl.hidden) renderSheet();
+  paintInfo(s); attach(s); subEnsure(s);
+  if (!sheetEl.hidden && sheetEl.dataset.mode === 'eps') renderSheet();
 }
 
 // ---------- 自动跳过: 进度条上的标记 + 播到那一段时跳过 ----------
@@ -464,6 +466,92 @@ function noteSkip(text) {
   clearTimeout(noteT); noteT = setTimeout(() => { skipNote.hidden = true; }, 1800);
 }
 const tipSub = (s, t, d) => `/ ${fmtT(d)}${s?.sk && markAt(t, s.sk, s.video) ? ' · ' + markAt(t, s.sk, s.video) : ''}`;   // 拖到会被跳过的段里: 时间后面带上类型
+
+// ---------- 字幕: 每屏 (slide) 自己的 <video> 自己的 state, 跟普通播放器共用规则 (app.js 的 subFileIdOf/subLangLabel/subGlobalPref/epProg.getSub/setSub,
+// 服务端 /media/sub/<id> 和 /api/subtitle/search|fetch) ----------
+function subStop(s) { s.sub = null; s.video.querySelector('track[data-sub]')?.remove(); }
+function subKeyOf(s) { return s.d && s.it ? { site: s.d.site, id: s.d.id, ep: s.ep } : null; }
+function subTrackUrl(sub, choice) {
+  if (!choice || !sub) return '';
+  if (choice.mode === 'local' && sub.fileId) return '/media/sub/' + sub.fileId + '?key=' + encodeURIComponent(choice.key);
+  if (choice.mode === 'remote') return '/api/subtitle/fetch?' + new URLSearchParams({ source: choice.source || '', url: choice.url || '', ext: choice.ext || 'srt', id: choice.id || '' });
+  return '';
+}
+// persist=true 才写回 (手动选 / 关才算「选过」, 刚打开按规则套默认值不算, 不然每次打开都把这一集焊死成当时的默认值)
+function subApply(s, choice, persist = true) {
+  if (!s.sub) return;
+  s.sub.active = choice || null;
+  const v = s.video;
+  let tr = v.querySelector('track[data-sub]');
+  const url = subTrackUrl(s.sub, choice);
+  if (!url) tr?.remove();
+  else {
+    if (!tr) { tr = document.createElement('track'); tr.dataset.sub = '1'; tr.kind = 'subtitles'; v.appendChild(tr); }
+    tr.default = true;
+    if (!tr.src.endsWith(url)) tr.src = url;
+    const show = () => { if (tr.track) tr.track.mode = 'showing'; };
+    tr.onload = show; setTimeout(show, 0);
+  }
+  if (s === cur()) syncSubAct(s);
+  if (!persist) return;
+  subGlobalPref.set(choice ? { mode: choice.mode, lang: choice.lang || '' } : { mode: 'off' });
+  if (s.sub.key) epProg.setSub(s.sub.key.site, s.sub.key.id, s.sub.key.ep, choice || { mode: 'off' }, vdur(v));
+}
+function syncSubAct(s) {
+  const b = q('[data-a=sub]'); if (!b) return;
+  b.hidden = !s.sub;
+  b.classList.toggle('on', !!s.sub?.active);
+}
+// 新绑定 / 换集重判一次: 这一集自己是不是存过选择 (哪怕存的是「关」也认), 没存过才按全局偏好匹配语言套到这一集的候选里。
+async function subEnsure(s) {
+  const e = s.eps[s.ep];
+  if (!e) { s.sub = null; if (s === cur()) syncSubAct(s); return; }
+  const mine = s.sub = { key: subKeyOf(s), fileId: subFileIdOf(e.url), local: [], remote: [], active: null, q: '', searching: false, searched: false };
+  if (s === cur()) syncSubAct(s);
+  if (mine.fileId) {
+    try { const r = await api('local/subs', { id: mine.fileId }, null); if (s.sub === mine) mine.local = r?.subs || []; } catch {}
+  }
+  if (s.sub !== mine) return;
+  const saved = mine.key ? epProg.getSub(mine.key.site, mine.key.id, mine.key.ep) : undefined;
+  let choice = null;
+  if (saved !== undefined && saved !== null) choice = saved.mode === 'off' ? null : saved;
+  else if (saved === undefined) {
+    const g = subGlobalPref.get();
+    if (g && g.mode === 'local') { const hit = mine.local.find(x => subLangLabel(x.lang) === subLangLabel(g.lang)) || mine.local[0]; if (hit) choice = { mode: 'local', key: hit.key, lang: hit.lang }; }
+  }
+  subApply(s, choice, false);
+  if (s === cur() && !sheetEl.hidden && sheetEl.dataset.mode === 'sub') renderSubSheet();
+}
+function renderSubSheet() {
+  const s = cur(), S = s.sub || { local: [], remote: [] };
+  sheetEl.dataset.mode = 'sub';
+  const items = [
+    { label: '关闭字幕', on: !S.active, apply: () => subApply(s, null) },
+    ...S.local.map(x => ({ label: (subLangLabel(x.lang) || x.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === x.key, apply: () => subApply(s, { mode: 'local', key: x.key, lang: x.lang }) })),
+    ...(S.remote || []).map(x => ({
+      label: x.name + (x.lang ? ' · ' + x.lang : '') + ' · ' + (x.source === 'xunlei' ? '迅雷' : x.source === 'assrt' ? '射手(伪)' : 'OpenSubtitles'),
+      on: S.active?.mode === 'remote' && S.active.url === x.url && S.active.id === x.id,
+      apply: () => subApply(s, { mode: 'remote', source: x.source, url: x.url || '', ext: x.ext || 'srt', id: x.id || '', lang: x.lang || '', name: x.name }),
+    })),
+  ];
+  sheetEl.innerHTML = '<div class="sh-head"><b>字幕</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">' + I.close + '</button></div>'
+    + '<div class="subsearch"><input type="search" placeholder="搜字幕：片名 / 番号…" value="' + esc(S.q || '') + '"><button data-subgo>搜索</button></div>'
+    + (S.searching ? '<div class="substatus">搜索中…</div>' : S.searched && !(S.remote || []).length ? '<div class="substatus">没搜到，换个关键词试试</div>' : '')
+    + '<div class="sh-subs">' + items.map((it, i) => '<button data-su="' + i + '" class="' + (it.on ? 'on' : '') + '">' + esc(it.label) + '</button>').join('') + '</div>';
+  sheetEl.querySelectorAll('[data-su]').forEach((b, i) => b.onclick = () => { items[i].apply(); renderSubSheet(); });
+  const input = sheetEl.querySelector('.subsearch input'), go = sheetEl.querySelector('[data-subgo]');
+  const runSearch = async () => {
+    const qv = input.value.trim(); if (!qv || !s.sub) return;
+    const mine = s.sub; mine.q = qv; mine.searching = true; mine.searched = false; renderSubSheet();
+    let results = [];
+    try { const r = await api('subtitle/search', { q: qv }, null); results = r?.results || []; } catch {}
+    if (s.sub !== mine) return;
+    mine.remote = results; mine.searching = false; mine.searched = true;
+    renderSubSheet(); sheetEl.querySelector('.subsearch input')?.focus();
+  };
+  go.onclick = runSearch;
+  input.onkeydown = e => { if (e.key === 'Enter') runSearch(); };
+}
 
 function activate() {
   ring.forEach((s, r) => { setRole(s, r - 1); if (r !== 1) s.video.pause(); });
@@ -766,6 +854,7 @@ menuEl.addEventListener('click', e => {
 // ---------- episodes sheet ----------
 function renderSheet() {
   const s = cur(); if (!s.d) return;
+  sheetEl.dataset.mode = 'eps';
   const d = s.d;
   sheetEl.innerHTML = `<div class="sh-head"><b>${esc(d.name)}</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">${I.close}</button></div>
     ${d.lines.length > 1 ? `<div class="sh-lines">${d.lines.map((l, i) => `<button data-sl="${i}" class="${i === s.line ? 'on' : ''}">${esc(l.name)}</button>`).join('')}</div>` : ''}
@@ -795,7 +884,7 @@ async function feedTrash(s) {
   closeOverlays();
   if (s.eps.length) {
     Object.assign(s, { ep: Math.min(idx, s.eps.length - 1), startAt: 0, watched: 0, judged: false, stage: 0, compat: false, tried: null });
-    paintInfo(s); attach(s); syncRail(); return;
+    paintInfo(s); attach(s); subEnsure(s); syncRail(); return;
   }
   localGone(d);
   F.items.splice(F.idx, 1);
@@ -816,6 +905,7 @@ function syncRail() {
   // 删除: 管理员 + 本地资源 (管理员身份异步问服务端, 问到了再补一次)
   q('[data-a=del]').hidden = !(d?.local && ADMIN.on);
   if (d?.local && !ADMIN.on) adminCheck().then(on => { if (on && cur() === s) syncRail(); });
+  if (s) syncSubAct(s);
   q('.fd-mode span').textContent = modeLabel();
   paintMute();
 }
@@ -851,7 +941,8 @@ function act(a) {
   }
   if (a === 'like') return doLike(!likes.has(keyOf(s.it)));
   if (a === 'fav') { if (!s.d || kidsMode()) return; return favAction(s.d, syncRail, () => bump(s.it, s.d, 2)); }
-  if (a === 'eps') { if (!s.d) return; if (sheetEl.hidden) { renderSheet(); sheetEl.hidden = false; menuEl.hidden = true; } else sheetEl.hidden = true; return; }
+  if (a === 'eps') { if (!s.d) return; if (!sheetEl.hidden && sheetEl.dataset.mode === 'eps') { sheetEl.hidden = true; return; } renderSheet(); sheetEl.hidden = false; menuEl.hidden = true; return; }
+  if (a === 'sub') { if (!s.sub) return; if (!sheetEl.hidden && sheetEl.dataset.mode === 'sub') { sheetEl.hidden = true; return; } renderSubSheet(); sheetEl.hidden = false; menuEl.hidden = true; return; }
   if (a === 'share') { if (isLocalKey(s.it.site)) return; return shareNow(vodHref(s.it.site, s.it.id), s.it.name || s.d?.name || ''); }
   if (a === 'detail') { s.video.pause(); return openDetail(s.it.site, s.it.id); }
   if (a === 'del') return feedTrash(s);
@@ -1055,7 +1146,7 @@ addEventListener('keydown', e => {
   if (k === 'ArrowUp' || k === 'k' || k === 'PageUp') { used(); return go(-1); }
   if ((k === 'ArrowRight' || k === 'ArrowLeft') && vdur(v)) { used(); keySeek(v, k === 'ArrowRight' ? 10 : -10); return; }
   if (k === ' ') { used(); return togglePause(); }
-  const map = { l: 'like', s: 'fav', e: 'eps', i: 'detail', d: 'dislike', m: 'mute', f: 'fs' };
+  const map = { l: 'like', s: 'fav', e: 'eps', i: 'detail', d: 'dislike', m: 'mute', f: 'fs', c: 'sub' };
   if (map[k]) { used(); return act(map[k]); }
   if ((k === ']' || k === '[') && s?.eps.length > 1) { used(); switchEp(s, s.line, s.ep + (k === ']' ? 1 : -1)); }
 }, true);
