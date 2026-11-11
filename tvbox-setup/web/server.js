@@ -247,6 +247,7 @@ function reloadState() {
   const c = readJson(STORE, null);
   if (c) config = normalize(c);
   localCfg = readLocalCfg();
+  subCfg = readSubCfg();   // 字幕源配置: 跟 localCfg 一样多进程 (cluster) 共享, 哪个进程改了都要广播, 不然其它进程还在用旧的 token 直到重启
   cache.clear();
   sessCache.clear();
 }
@@ -3751,6 +3752,7 @@ async function api(route, q, res, req) {
         assrt: { enabled: !!(b.assrt && b.assrt.enabled), token: str(b.assrt && b.assrt.token).trim().slice(0, 100) },
         opensubtitles: { enabled: !!(b.opensubtitles && b.opensubtitles.enabled), apiKey: str(b.opensubtitles && b.opensubtitles.apiKey).trim().slice(0, 100) } };
       saveSubCfg();
+      broadcastReload();   // 多进程 (cluster): 写盘只在接到这个请求的那个进程里发生, 其它进程 (处理 /api/subtitle/search 的那些) 靠这一步跟着重新读盘
       return send(res, 200, subCfg);
     }
     if (sub === 'local/scan' && write) return send(res, 200, await rpc('localScan'));
