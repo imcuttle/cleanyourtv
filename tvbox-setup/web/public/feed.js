@@ -552,6 +552,20 @@ function renderSubSheet() {
   go.onclick = runSearch;
   input.onkeydown = e => { if (e.key === 'Enter') runSearch(); };
 }
+// 打开面板第一次 (这一集还没搜过): 用片名/番号自动搜一次, 省得用户自己敲字才能看到候选。
+function subKick(s) {
+  const mine = s.sub;
+  if (!mine || mine.searched || mine.searching) return;
+  const name = s.d?.name || s.eps?.[s.ep]?.name || '';
+  if (!name) return;
+  mine.searching = true; mine.q = javCode(name) || name;
+  if (s === cur() && !sheetEl.hidden && sheetEl.dataset.mode === 'sub') renderSubSheet();
+  subAutoSearch(name).then(results => {
+    if (s.sub !== mine) return;
+    mine.remote = results; mine.searching = false; mine.searched = true;
+    if (s === cur() && !sheetEl.hidden && sheetEl.dataset.mode === 'sub') renderSubSheet();
+  });
+}
 
 function activate() {
   ring.forEach((s, r) => { setRole(s, r - 1); if (r !== 1) s.video.pause(); });
@@ -942,7 +956,7 @@ function act(a) {
   if (a === 'like') return doLike(!likes.has(keyOf(s.it)));
   if (a === 'fav') { if (!s.d || kidsMode()) return; return favAction(s.d, syncRail, () => bump(s.it, s.d, 2)); }
   if (a === 'eps') { if (!s.d) return; if (!sheetEl.hidden && sheetEl.dataset.mode === 'eps') { sheetEl.hidden = true; return; } renderSheet(); sheetEl.hidden = false; menuEl.hidden = true; return; }
-  if (a === 'sub') { if (!s.sub) return; if (!sheetEl.hidden && sheetEl.dataset.mode === 'sub') { sheetEl.hidden = true; return; } renderSubSheet(); sheetEl.hidden = false; menuEl.hidden = true; return; }
+  if (a === 'sub') { if (!s.sub) return; if (!sheetEl.hidden && sheetEl.dataset.mode === 'sub') { sheetEl.hidden = true; return; } renderSubSheet(); sheetEl.hidden = false; menuEl.hidden = true; subKick(s); return; }
   if (a === 'share') { if (isLocalKey(s.it.site)) return; return shareNow(vodHref(s.it.site, s.it.id), s.it.name || s.d?.name || ''); }
   if (a === 'detail') { s.video.pause(); return openDetail(s.it.site, s.it.id); }
   if (a === 'del') return feedTrash(s);

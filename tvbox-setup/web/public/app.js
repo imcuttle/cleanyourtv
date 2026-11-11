@@ -3887,6 +3887,19 @@ async function subInit() {
   applySub(choice, false);
 }
 function pickLocal(list, lang) { const hit = list.find(s => subLangLabel(s.lang) === subLangLabel(lang)) || list[0]; return hit ? { key: hit.key, lang: hit.lang } : {}; }
+// 自动按「番号 (成人资源的话) + 片名」各搜一次再合并去重: 打开字幕面板不用手动敲字就能看到候选，想换词再自己输入重搜。
+async function subAutoSearch(name) {
+  const code = javCode(name);
+  const queries = code && code !== String(name || '').trim().toUpperCase() ? [code, name] : [name];
+  const seen = new Set(), all = [];
+  const lists = await Promise.all(queries.map(q => q ? api('subtitle/search', { q }, null).then(r => r?.results || []).catch(() => []) : []));
+  for (const list of lists) for (const x of list) {
+    const key = x.source + '|' + (x.id || x.url || '');
+    if (seen.has(key)) continue;
+    seen.add(key); all.push(x);
+  }
+  return all;
+}
 const subUiOpen = () => { const b = $('.plist'); return !b.hidden && b.dataset.mode === 'sub'; };
 function drawSub() {
   const box = $('.plist'), S = subState || { local: [], remote: [] };
@@ -3923,6 +3936,20 @@ function openSubSheet() {
   if (!subState) return;
   if (subUiOpen()) return togglePlist(false);
   drawSub(); togglePlist(true);
+  subAutoKick();
+}
+// 打开面板第一次 (这一集还没搜过): 用片名/番号自动搜一次, 省得用户自己敲字才能看到候选。
+function subAutoKick() {
+  const mine = subState;
+  if (!mine || mine.searched || mine.searching) return;
+  const name = cur?.d?.name || cur?.eps?.[cur.ep]?.name || '';
+  if (!name) return;
+  mine.searching = true; mine.q = javCode(name) || name; drawSub();
+  subAutoSearch(name).then(results => {
+    if (subState !== mine) return;
+    mine.remote = results; mine.searching = false; mine.searched = true;
+    if (subUiOpen()) drawSub();
+  });
 }
 
 // 把声音指纹的结果 (片头 / 片尾) 和播放列表里认出的广告对起来:
