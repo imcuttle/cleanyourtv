@@ -4509,6 +4509,9 @@ function vdur(v) {
   return off > 0 ? (d ? off + d : NaN) : d;
 }
 function fixDuration(v, url) {
+  // 同一个文件重新加载 (拖进度条重开转码): 已知的总长留着 —— 否则这几秒里 vdur() 只剩「这段任务的长度」,
+  // 进度条会突然缩到 0, 这时候点一下会按很小的总长算出错误的时间。
+  if (url && v._fixUrl === url && v._fixDur > 0) return;
   v._fixDur = 0; v._fixUrl = url;
   if (!url || !url.startsWith('/media/h/')) return;
   api('probe', { u: url }, null).then(r => { if (r && r.duration > 0 && v._fixUrl === url) { v._fixDur = r.duration; v.dispatchEvent(new Event('durationchange')); } }).catch(() => {});

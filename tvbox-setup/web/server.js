@@ -3473,13 +3473,25 @@ rpcHandlers.localProbe = async ({ id }) => {
   const { width, height, duration } = await mediaInfo(f.path);
   return width || duration ? { ...(width ? { width, height } : {}), ...(duration > 0 ? { duration } : {}) } : {};
 };
-rpcHandlers.hlsOpen = async ({ id, t }) => {
-  const f = localIndex().byFile.get(id);
-  if (!f || !FFMPEG) return { error: '找不到文件' };
-  const target = Math.max(0, Number(t) || 0);
-  const dir = path.join(TRANS, id), done = path.join(dir, '.done');
-  // 整个文件已经转完并缓存: 任何位置都能跳, offset 恒为 0。
-  if (fs.existsSync(done) && fs.readFileSync(done, 'utf8') === HLS_VER) { const now = new Date(); fsp.utimes(done, now, now).catch(() => {}); return { ok: true, offset: 0 }; }
+// 同一个文件的开关决定必须串起来做。两个请求同时进来 (控制面的 hlsat + 播放器自己发的 index.m3u8),
+// 各自算一遍「要不要从目标时间重开」, 后到的那个会把前一个刚起好的任务删掉重来 —— 谁也别想拿到 m3u8。
+const hlsLocks = new Map();
+function hlsSerial(id, fn) {
+  const prev = hlsLocks.get(id) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.then(() => {}, () => {});
+  hlsLocks.set(id, tail);
+  tail.then(() => { if (hlsLocks.get(id) === tail) hlsLocks.delete(id); });
+  return run;
+}
+// passive: 这是播放器来拿播放列表本身 (不是「请服务端跳到 t」), 允许等, 不许重开转码。
+// 播放器的旧实例在拖动瞬间常常还有一个带旧 t 的请求在路上, 它要是也能重开, 就会把新任务杀掉 (黑屏 + ffmpeg 转换失败)。
+async function hlsOpenAt(f, target, passive, depth = 0) {
+  const id = f.id, dir = path.join(TRANS, id), done = path.join(dir, '.done');
+  // 整个文件已经转完并缓存: 任何位置都能跳, offset 恒为 0。(并发重开时 .done 可能刚好被删, 读失败就当没有)
+  let doneVer = '';
+  try { if (fs.existsSync(done)) doneVer = fs.readFileSync(done, 'utf8'); } catch {}
+  if (doneVer === HLS_VER) { const now = new Date(); fsp.utimes(done, now, now).catch(() => {}); return { ok: true, offset: 0 }; }
   const fail = hlsFail.get(id);
   // 失败后短暂退避: 磁盘抖动 / 上一次目录刚好被删掉都可能让 ffmpeg 报一次错, 别让这一集 10 分钟都打不开
   if (!hlsJobs.has(id) && fail && Date.now() - fail.at < 90e3) return { error: 'ffmpeg 转换失败：' + fail.error };
@@ -3487,12 +3499,26 @@ rpcHandlers.hlsOpen = async ({ id, t }) => {
   // 目标时间不在当前任务已经转出来的范围内 (包括往前跳到比 j.offset 还早的位置): 停掉重开, 从目标时间点转。
   // 只超前一点点 (退出时的位置刚好落在转码前沿之后 / 续播点比转码进度稍微靠前) 不算: 任务还在往后转, 等一两秒新分片就出来了,
   // 重开反而要把已经转好的分片全删掉、重新起 ffmpeg、再等第一个分片。
-  if (j) { const end = await hlsCoveredEnd(dir, j.offset); if (target < j.offset || target > end + (j.exited ? 0 : 15)) { j.stop(); j = null; } }
+  if (j) {
+    const end = await hlsCoveredEnd(dir, j.offset);
+    if (!passive && (target < j.offset || target > end + (j.exited ? 0 : 15))) { j.stop(); j = null; }
+  }
   if (!j) j = startHls(f, target);
   j.last = Date.now();
   await j.ready;
-  if (fs.existsSync(path.join(dir, 'index.m3u8'))) return { ok: true, offset: j.offset };
+  if (fs.existsSync(path.join(dir, 'index.m3u8'))) {
+    // 等的这段时间里这个任务可能已经被换成别的了 (目录里的 offset 也就变了): 按新任务再来一次, 别报错也别把旧 offset 交给客户端
+    const now = hlsJobs.get(id);
+    if (now && now !== j && now.offset !== j.offset && depth < 2) return hlsOpenAt(f, target, passive, depth + 1);
+    return { ok: true, offset: j.offset };
+  }
   return { error: 'ffmpeg 转换失败：' + (j.error.trim() || '没有输出') };
+}
+rpcHandlers.hlsOpen = async ({ id, t, passive }) => {
+  const f = localIndex().byFile.get(id);
+  if (!f || !FFMPEG) return { error: '找不到文件' };
+  const target = Math.max(0, Number(t) || 0), ps = !!passive;
+  return hlsSerial(id, () => hlsOpenAt(f, target, ps));
 };
 if (IS_MEDIA) {
   // Unfinished output from an earlier run can't be resumed.
@@ -3533,13 +3559,25 @@ async function serveMedia(rest, req, res, q) {
   if (!f || !visible(f.item)) return send(res, 404, 'not found', 'text/plain');
   if (kind === 'f') return sendFile(req, res, f.path, MIME['.' + f.ext] || 'application/octet-stream');
   if (kind === 'h' && file === 'index.m3u8') {
-    const r = await rpc('hlsOpen', { id: f.id, t: q?.get('t') }, 90000);
+    // passive: 拿播放列表本身不重开转码 (重开只由 /api/local/hlsat 这个控制面请求决定), 没有任务时才按 t 起一个
+    const r = await rpc('hlsOpen', { id: f.id, t: q?.get('t'), passive: 1 }, 90000);
     if (r.error) return send(res, 500, r.error, 'text/plain; charset=utf-8');
-    const text = await fsp.readFile(path.join(TRANS, f.id, 'index.m3u8'), 'utf8');
+    // 刚返回就可能被另一个请求换成新任务 (目录被删了重建): 读不到就再问一次, 别把这个当成播放失败
+    let text = '';
+    for (let i = 0; i < 3 && !text; i++) {
+      text = await fsp.readFile(path.join(TRANS, f.id, 'index.m3u8'), 'utf8').catch(() => '');
+      if (!text) { await rpc('hlsOpen', { id: f.id, t: q?.get('t'), passive: 1 }, 90000).catch(() => {}); }
+    }
+    if (!text) return send(res, 404, 'not ready', 'text/plain');
     res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' });
     return res.end(text);
   }
-  if (kind === 'h' && /^\d{5}\.ts$/.test(file)) return sendFile(req, res, path.join(TRANS, f.id, file), 'video/mp2t');
+  if (kind === 'h' && /^\d{5}\.ts$/.test(file)) {
+    // 分片可能在「拖进度重开转码」的瞬间被删掉: 给个 404 让它按新列表重来, 而不是 502
+    const p = path.join(TRANS, f.id, file);
+    if (!fs.existsSync(p)) return send(res, 404, 'gone', 'text/plain');
+    return sendFile(req, res, p, 'video/mp2t');
+  }
   if (kind === 'sub') {
     const key = q?.get('key') || '';
     const hit = localSubs(f.path).find(s => s.file === key);
