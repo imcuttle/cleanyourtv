@@ -669,8 +669,7 @@ html.pv-live nav a:not([data-nav=live]), html.pv-live .search, html.pv-live .lpi
 .sh-lines { display: flex; gap: 6px; flex-wrap: wrap; } .sh-lines button { padding: 6px 12px; border-radius: 16px; border: 1px solid #ffffff33; background: none; font-size: 13px; } .sh-lines .on { background: #fff; color: #000; }
 .sh-eps { min-height: 0; grid-auto-rows: 44px; display: grid; grid-template-columns: repeat(auto-fill, minmax(66px, 1fr)); gap: 8px; overflow-y: auto; overscroll-behavior: contain; align-content: start; flex: 1; }
 .sh-eps button { padding: 11px 4px; border-radius: 6px; border: 0; background: #2c2c2c; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .sh-eps .on { background: var(--red); font-weight: 800; }
-.sh-subs { min-height: 0; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; overscroll-behavior: contain; flex: 1; }
-.sh-subs button { text-align: left; padding: 11px 10px; border-radius: 6px; border: 0; background: #2c2c2c; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .sh-subs .on { background: var(--red); font-weight: 800; }
+/* 字幕候选列表 (.pitems) 直接复用普通播放器的样式 (见下面 .plist.subset .pitems 那组合并规则), 不在这里单独定义一份。 */
 .fd-heart { position: absolute; z-index: 6; width: 96px; height: 96px; margin: -48px 0 0 -48px; pointer-events: none; animation: fdHeart .85s ease-out forwards; }
 .fd-heart svg { width: 100%; height: 100%; fill: #ff2c55; filter: drop-shadow(0 4px 14px #0008); }
 @keyframes fdHeart { 0% { transform: scale(.3) rotate(var(--r)); opacity: 0; } 20% { transform: scale(1.15) rotate(var(--r)); opacity: 1; } 40% { transform: scale(1) rotate(var(--r)); } 100% { transform: translateY(-70px) scale(1.2) rotate(var(--r)); opacity: 0; } }
@@ -1145,10 +1144,12 @@ html.touchui .pfind { height: 40px; font-size: 16px; margin-top: 10px; }
 .plist.srcs .pitems button:hover { background: #ffffff14; }
 .plist.srcs .pitems button.on { background: var(--red); }
 .plist.srcs .pitems button.on small { color: #fffc; }
-.plist.subset .pitems { grid-template-columns: 1fr; gap: 2px; }
-.plist.subset .pitems button { justify-content: flex-start; background: none; min-height: 42px; padding: 0 10px; }
-.plist.subset .pitems button:hover { background: #ffffff14; }
-.plist.subset .pitems button.on { background: var(--red); }
+/* 字幕候选列表: 普通播放器 (.plist.subset) 和沉浸播放 (.fd-sheet, 字幕模式下才会出现 .pitems) 共用同一组规则——
+   JS 那边 (app.js 的 subListHtml/subItems) 本来就是同一份代码生成的 HTML, 这里也不分别写一份。 */
+.plist.subset .pitems, .fd-sheet .pitems { grid-template-columns: 1fr; gap: 2px; }
+.plist.subset .pitems button, .fd-sheet .pitems button { justify-content: flex-start; background: none; min-height: 42px; padding: 0 10px; }
+.plist.subset .pitems button:hover, .fd-sheet .pitems button:hover { background: #ffffff14; }
+.plist.subset .pitems button.on, .fd-sheet .pitems button.on { background: var(--red); }
 .subsearch { display: flex; gap: 8px; padding: 0 12px 10px; flex: none; }
 .subsearch input { flex: 1; min-width: 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 6px; padding: 0 10px; height: 34px; font-size: 14px; }
 .subsearch button { background: var(--red); color: #fff; border: 0; border-radius: 6px; padding: 0 14px; height: 34px; font-size: 13px; flex: none; }

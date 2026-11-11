@@ -525,32 +525,9 @@ async function subEnsure(s) {
 function renderSubSheet() {
   const s = cur(), S = s.sub || { local: [], remote: [] };
   sheetEl.dataset.mode = 'sub';
-  const items = [
-    { label: '关闭字幕', on: !S.active, apply: () => subApply(s, null) },
-    ...S.local.map(x => ({ label: (subLangLabel(x.lang) || x.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === x.key, apply: () => subApply(s, { mode: 'local', key: x.key, lang: x.lang }) })),
-    ...(S.remote || []).map(x => ({
-      label: x.name + (x.lang ? ' · ' + x.lang : '') + ' · ' + (x.source === 'xunlei' ? '迅雷' : x.source === 'assrt' ? '射手(伪)' : 'OpenSubtitles'),
-      on: S.active?.mode === 'remote' && S.active.url === x.url && (S.active.id || '') === (x.id || ''),   // xunlei 结果没有 id 字段 (undefined), 选中后存的 choice.id 却被 || '' 兜底成空字符串, 两边不归一化对不上
-      apply: () => subApply(s, { mode: 'remote', source: x.source, url: x.url || '', ext: x.ext || 'srt', id: x.id || '', lang: x.lang || '', name: x.name }),
-    })),
-  ];
   sheetEl.innerHTML = '<div class="sh-head"><i class="grab"></i><b>字幕</b><button class="fd-ic sm" data-sh="x" aria-label="关闭">' + I.close + '</button></div>'
-    + '<div class="subsearch"><input type="search" placeholder="搜字幕：片名 / 番号…" value="' + esc(S.q || '') + '"><button data-subgo>搜索</button></div>'
-    + (S.searching ? '<div class="substatus">搜索中…</div>' : S.searched && !(S.remote || []).length ? '<div class="substatus">没搜到，换个关键词试试</div>' : '')
-    + '<div class="sh-subs">' + items.map((it, i) => '<button data-su="' + i + '" class="' + (it.on ? 'on' : '') + '">' + esc(it.label) + '</button>').join('') + '</div>';
-  sheetEl.querySelectorAll('[data-su]').forEach((b, i) => b.onclick = () => { items[i].apply(); renderSubSheet(); });
-  const input = sheetEl.querySelector('.subsearch input'), go = sheetEl.querySelector('[data-subgo]');
-  const runSearch = async () => {
-    const qv = input.value.trim(); if (!qv || !s.sub) return;
-    const mine = s.sub; mine.q = qv; mine.searching = true; mine.searched = false; renderSubSheet();
-    let results = [];
-    try { const r = await api('subtitle/search', { q: qv }, null); results = r?.results || []; } catch {}
-    if (s.sub !== mine) return;
-    mine.remote = results; mine.searching = false; mine.searched = true;
-    renderSubSheet(); sheetEl.querySelector('.subsearch input')?.focus();
-  };
-  go.onclick = runSearch;
-  input.onkeydown = e => { if (e.key === 'Enter') runSearch(); };
+    + subListHtml(S);
+  subWireList(sheetEl, S, choice => subApply(s, choice), renderSubSheet, () => s.sub === S);
 }
 // 打开面板第一次 (这一集还没搜过): 用片名/番号自动搜一次, 省得用户自己敲字才能看到候选。
 function subKick(s) {

@@ -3904,36 +3904,54 @@ async function subAutoSearch(name) {
   return all;
 }
 const subUiOpen = () => { const b = $('.plist'); return !b.hidden && b.dataset.mode === 'sub'; };
-function drawSub() {
-  const box = $('.plist'), S = subState || { local: [], remote: [] };
-  box.dataset.mode = 'sub'; box.classList.remove('live', 'srcs', 'skipset'); box.classList.add('subset');
-  const items = [
-    { label: '关闭字幕', on: !S.active, apply: () => applySub(null) },
-    ...S.local.map(s => ({ label: (subLangLabel(s.lang) || s.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === s.key, apply: () => applySub({ mode: 'local', key: s.key, lang: s.lang }) })),
+// 字幕候选项 (关闭 / 本地 / 远程搜索结果) 的列表 + 是否选中: 普通播放器和沉浸播放共用这一份, 不要各自维护一份 map
+// 逻辑——两边字段长得一样, 分开维护很容易一边改了另一边忘了改 (之前几轮 bug 都栽在这上面)。
+function subItems(S) {
+  return [
+    { label: '关闭字幕', on: !S.active, choice: null },
+    ...S.local.map(s => ({ label: (subLangLabel(s.lang) || s.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === s.key, choice: { mode: 'local', key: s.key, lang: s.lang } })),
     ...(S.remote || []).map(s => ({
       label: `${s.name}${s.lang ? ' · ' + s.lang : ''} · ${s.source === 'xunlei' ? '迅雷' : s.source === 'assrt' ? '射手(伪)' : 'OpenSubtitles'}`,
-      on: S.active?.mode === 'remote' && S.active.url === s.url && (S.active.id || '') === (s.id || ''),   // xunlei 结果没有 id 字段 (undefined), 选中后存的 choice.id 却被 || '' 兜底成空字符串, 两边不归一化对不上
-      apply: () => applySub({ mode: 'remote', source: s.source, url: s.url || '', ext: s.ext || 'srt', id: s.id || '', lang: s.lang || '', name: s.name }),
+      // xunlei 结果没有 id 字段 (undefined), 选中后存的 choice.id 却被 || '' 兜底成空字符串, 两边要统一归一化才能对上
+      on: S.active?.mode === 'remote' && S.active.url === s.url && (S.active.id || '') === (s.id || ''),
+      choice: { mode: 'remote', source: s.source, url: s.url || '', ext: s.ext || 'srt', id: s.id || '', lang: s.lang || '', name: s.name },
     })),
   ];
-  box.innerHTML = `<div class="phead"><i class="grab"></i><b>字幕</b><span>本地同名字幕 / 在线搜索</span><button class="icon sm" data-pclose title="关闭">✕</button></div>
-    <div class="subsearch"><input type="search" placeholder="搜字幕：片名 / 番号…" value="${esc(S.q || '')}"><button data-subgo>搜索</button></div>
+}
+// 字幕面板里「搜索框 + 状态提示 + 候选列表」这部分 (不含外层 phead/关闭按钮——那部分两边壳子不一样, 各自拼)。
+function subListHtml(S) {
+  const items = subItems(S);
+  return `<div class="subsearch"><input type="search" placeholder="搜字幕：片名 / 番号…" value="${esc(S.q || '')}"><button data-subgo>搜索</button></div>
     ${S.searching ? '<div class="substatus">搜索中…</div>' : S.searched && !(S.remote || []).length ? '<div class="substatus">没搜到，换个关键词试试</div>' : ''}
-    <div class="pitems">${items.map((it, i) => `<button data-i="${i}" class="${it.on ? 'on' : ''}" role="radio" aria-checked="${it.on}"><span class="sn"><b>${esc(it.label)}</b></span></button>`).join('')}</div>`;
-  $('[data-pclose]', box).onclick = () => togglePlist(false);
-  $$('.pitems button', box).forEach((b, i) => b.onclick = () => { items[i].apply(); drawSub(); });
+    <div class="pitems">${items.map((it, i) => `<button data-i="${i}" class="${it.on ? 'on' : ''}"><span class="sn"><b>${esc(it.label)}</b></span></button>`).join('')}</div>`;
+}
+// 接上面这段 HTML 的交互: 点候选项 / 搜索框 + 回车 + 搜索按钮。box 是装了这段 HTML 的容器 (重画只替换它的 innerHTML,
+// box 本身不变); apply(choice) 真正让一个选择生效; rerender() 选完/搜索状态变化都要重画一次; isLive() 搜索结果回来时
+// 确认这个 S 还是「当前」的 (没有被换集/换视频顶掉), 不是就丢掉这次结果——避免搜索还没回来时已经换了视频, 迟到的结果
+// 却套到了新视频头上。
+function subWireList(box, S, apply, rerender, isLive) {
+  const items = subItems(S);
+  $$('.pitems button', box).forEach((b, i) => b.onclick = () => { apply(items[i].choice); rerender(); });
   const input = $('.subsearch input', box), go = $('[data-subgo]', box);
   const runSearch = async () => {
-    const q = input.value.trim(); if (!q || !subState) return;
-    const mine = subState; mine.q = q; mine.searching = true; mine.searched = false; drawSub();
+    const q = input.value.trim(); if (!q) return;
+    S.q = q; S.searching = true; S.searched = false; rerender();
     let results = [];
     try { const r = await api('subtitle/search', { q }, null); results = r?.results || []; } catch {}
-    if (subState !== mine) return;
-    mine.remote = results; mine.searching = false; mine.searched = true;
-    drawSub(); $('.subsearch input', $('.plist'))?.focus();
+    if (!isLive()) return;
+    S.remote = results; S.searching = false; S.searched = true;
+    rerender(); $('.subsearch input', box)?.focus();
   };
   go.onclick = runSearch;
   input.onkeydown = e => { if (e.key === 'Enter') runSearch(); };
+}
+function drawSub() {
+  const box = $('.plist'), S = subState || { local: [], remote: [] };
+  box.dataset.mode = 'sub'; box.classList.remove('live', 'srcs', 'skipset'); box.classList.add('subset');
+  box.innerHTML = `<div class="phead"><i class="grab"></i><b>字幕</b><span>本地同名字幕 / 在线搜索</span><button class="icon sm" data-pclose title="关闭">✕</button></div>
+    ${subListHtml(S)}`;
+  $('[data-pclose]', box).onclick = () => togglePlist(false);
+  subWireList(box, S, applySub, drawSub, () => subState === S);
 }
 function openSubSheet() {
   if (!subState) return;
