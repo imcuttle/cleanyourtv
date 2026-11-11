@@ -3623,6 +3623,10 @@ async function load(url, startAt, viaProxy, isLocal, rebuild = false, native = f
   if (!rebuild) { msg('加载中…'); showCover(cur?.kind === 'vod' && cur.d?.adult ? cardPic(cur.d) : ''); }   // adult sources only
   fixDuration(video, isHlsLocal ? url : '');
   video._hlsOffset = 0;
+  // 交给 seekTo: 这段转码列表的时间轴是从 0 起的 (真实位置 = currentTime + offset), 跳到 offset 之前 / 已转出来之后
+  // 都得让服务端按目标时间重开一次转码, 不能直接改 currentTime (那样会被浏览器夹在列表末尾, 进度就对不上了)。
+  video._hlsUrl = isHlsLocal ? url : '';
+  video._hlsReopen = isHlsLocal ? (t => load(url, t, viaProxy, isLocal, true)) : null;
   const myGen = ++loadGen;
   if (isHlsLocal) {
     // 拖到还没转出来的地方 (或第一次打开就要从中间续播): 先问服务端「这个时间点要不要重开转码」, 等它就位,
@@ -3845,24 +3849,27 @@ function subTrackUrl(choice) {
   if (choice.mode === 'remote') return '/api/subtitle/fetch?' + new URLSearchParams({ source: choice.source || '', url: choice.url || '', ext: choice.ext || 'srt', id: choice.id || '' });
   return '';
 }
-// 真正把字幕挂到 <video> 上 (一个 <track data-sub>，没有就新建); persist=true 才写回 (本地字幕菜单点一下选 / 关才算「选过」，
+// 控制条 (进度条那一块) 压在画面底部时, 字幕往上让一让, 别被它盖住; 控制条收起就回到设置的位置。
+// 只让到进度条上沿再往上 34px (控制条最上面 40px 只是渐变的淡出部分, 字幕停在渐变里比较自然)。
+const ctrlReserve = r => {
+  const c = $('#player .ctrl'); if (!c) return 0;
+  const b = SUB.box(c, player);
+  return Math.max(0, Math.min(r.h * .45, r.y + r.h - b.y - 34));
+};
+// 真正把字幕挂到 <video> 上 (subcap.js 自己画在画面底部, 样式可调; 那边的 <track> 只当 iPhone 原生全屏时的兜底);
+// persist=true 才写回 (本地字幕菜单点一下选 / 关才算「选过」，
 // 刚打开视频按规则套默认值不算，不然每次打开都把这一集焊死成当时的默认值，用户自己选的反而被盖掉)。
 function applySub(choice, persist = true) {
   if (!subState) return;
   subState.active = choice || null;
-  let tr = video.querySelector('track[data-sub]');
   const url = subTrackUrl(choice);
-  if (!url) { tr?.remove(); }
-  else {
-    if (!tr) { tr = document.createElement('track'); tr.dataset.sub = '1'; tr.kind = 'subtitles'; video.appendChild(tr); }
-    tr.default = true;
-    if (!tr.src.endsWith(url)) tr.src = url;
-    const show = () => { if (tr.track) tr.track.mode = 'showing'; };
-    tr.onload = show; setTimeout(show, 0);
-  }
+  if (!url) SUB.unmount(video);
+  // 字幕盖在画面上, 不压播放器底部那条控制条 (控制条一出来字幕自动往上让一点, 收起再回来)
+  else SUB.mount(video, { url, reserve: r => (player.classList.contains('idle') ? 0 : ctrlReserve(r)) });
   syncSubAct();
   if (!persist) return;
   subGlobalPref.set(choice ? { mode: choice.mode, lang: choice.lang || '' } : { mode: 'off' });
+  subUsedAdd(subState.useK, choice);
   if (subState.key) prog.setSub(subState.key.site, subState.key.id, subState.key.ep, choice || { mode: 'off' }, vdur(video));
 }
 function syncSubAct() {
@@ -3874,7 +3881,8 @@ function syncSubAct() {
 async function subInit() {
   const e = cur?.eps?.[cur.ep];
   if (!e || cur.kind === 'live') { subState = null; syncSubAct(); return; }
-  const mine = subState = { key: subKeyOf(), fileId: subFileIdOf(e.url), local: [], remote: [], active: null };
+  const mine = subState = { key: subKeyOf(), useK: subUseKey(), fileId: subFileIdOf(e.url), local: [], remote: [], used: [], active: null };
+  mine.used = subUsedFor(mine.useK);
   syncSubAct();
   if (mine.fileId) {
     try { const r = await api('local/subs', { id: mine.fileId }, null); if (subState === mine) mine.local = r?.subs || []; } catch {}
@@ -3894,36 +3902,84 @@ function pickLocal(list, lang) { const hit = list.find(s => subLangLabel(s.lang)
 async function subAutoSearch(name) {
   const code = javCode(name);
   const queries = code && code !== String(name || '').trim().toUpperCase() ? [code, name] : [name];
-  const seen = new Set(), all = [];
   const lists = await Promise.all(queries.map(q => q ? api('subtitle/search', { q }, null).then(r => r?.results || []).catch(() => []) : []));
-  for (const list of lists) for (const x of list) {
-    const key = x.source + '|' + (x.id || x.url || '');
-    if (seen.has(key)) continue;
-    seen.add(key); all.push(x);
+  return subUniq(lists.flat());
+}
+// ---------- 用过的字幕: 记在本机, 下次打开同一部片先列出来 (不用等搜索, 也不用在一堆结果里翻) ----------
+// 按「番号 / 片名」分组, 和自动搜索用的是同一套关键词: 同一部片的不同集共用这一份「用过」。
+const SUBUSE_KEY = 'subUsed';
+function subUseKeyOf(name) {
+  const nm = String(name || '').trim();
+  if (!nm) return '';
+  const code = javCode(nm);
+  return (code && code !== nm.toUpperCase() ? code : nm).toLowerCase().slice(0, 90);
+}
+function subUseKey() { return subUseKeyOf(cur?.d?.name || cur?.eps?.[cur.ep]?.name); }
+function subUsedAll() { try { const a = JSON.parse(localStorage[SUBUSE_KEY] || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } }
+// 同一个标题下用过的那几条 (最近的在前), 按「源 + 地址」去重
+const subSig = x => (x.source || '') + '|' + (x.url || '') + '|' + (x.id || '');
+function subUsedFor(k) {
+  if (!k) return [];
+  const seen = new Set(), out = [];
+  for (const x of subUsedAll()) {
+    if (!x || x.k !== k || !x.url || seen.has(subSig(x))) continue;
+    seen.add(subSig(x)); out.push(x);
+    if (out.length >= 6) break;
   }
-  return all;
+  return out;
+}
+function subUsedAdd(k, choice) {
+  if (!k || !choice || choice.mode !== 'remote' || !choice.url) return;
+  const arr = subUsedAll().filter(x => !(x.k === k && subSig(x) === subSig(choice)));
+  arr.unshift({ k, source: choice.source || '', url: choice.url, ext: choice.ext || 'srt', id: choice.id || '', lang: choice.lang || '', name: choice.name || '', at: Date.now() });
+  // 一个标题最多留 8 条, 一共最多 60 条 (超了从最旧的丢)
+  const per = Object.create(null), out = [];
+  for (const x of arr) { per[x.k] = (per[x.k] || 0) + 1; if (per[x.k] <= 8 && out.length < 60) out.push(x); }
+  try { localStorage[SUBUSE_KEY] = JSON.stringify(out); } catch {}
+}
+// 去重用的键: 有名字就按「来源 + 名字 + 语言」算——同一个字幕常被重复上传 (迅雷按名字一搜能出 6 条一模一样、只是下载地址不同的),
+// 没名字才退回下载地址。
+const subDupKey = x => x.name ? `${x.source || ''}|${x.name}|${x.lang || ''}` : subSig(x);
+function subUniq(list) {
+  const seen = new Set(), out = [];
+  for (const x of list || []) { const k = subDupKey(x); if (seen.has(k)) continue; seen.add(k); out.push(x); }
+  return out;
 }
 const subUiOpen = () => { const b = $('.plist'); return !b.hidden && b.dataset.mode === 'sub'; };
 // 字幕候选项 (关闭 / 本地 / 远程搜索结果) 的列表 + 是否选中: 普通播放器和沉浸播放共用这一份, 不要各自维护一份 map
 // 逻辑——两边字段长得一样, 分开维护很容易一边改了另一边忘了改 (之前几轮 bug 都栽在这上面)。
+const subSrcName = x => x === 'xunlei' ? '迅雷' : x === 'assrt' ? '射手(伪)' : x === 'opensubtitles' ? 'OpenSubtitles' : '在线';
+// 一条远端候选 (搜索结果 / 用过的那条) → 列表项
+const subRemoteItem = (S, s, sep) => ({
+  sep,
+  label: `${s.name || '字幕'}${s.lang ? ' · ' + subLangLabel(s.lang) : ''} · ${subSrcName(s.source)}`,
+  // xunlei 结果没有 id 字段 (undefined), 选中后存的 choice.id 却被 || '' 兜底成空字符串, 两边要统一归一化才能对上
+  on: S.active?.mode === 'remote' && S.active.url === s.url && (S.active.id || '') === (s.id || ''),
+  choice: { mode: 'remote', source: s.source, url: s.url || '', ext: s.ext || 'srt', id: s.id || '', lang: s.lang || '', name: s.name },
+});
+// 字幕候选: 关闭 → 本地同名 → 最近用过 (本机记的, 优先) → 远端搜索结果。用过的不再在搜索结果里重复出现。
 function subItems(S) {
+  // 用过的直接从本机读, 每次重画都是最新的 (刚选完一条, 面板再打开就在最上面)
+  const used = (S.useK ? subUsedFor(S.useK) : (S.used || [])).filter(u => u && u.url);
+  const usedSig = new Set(used.map(subDupKey));
+  const remotes = subUniq(S.remote || []).filter(r => !usedSig.has(subDupKey(r)));
   return [
     { label: '关闭字幕', on: !S.active, choice: null },
-    ...S.local.map(s => ({ label: (subLangLabel(s.lang) || s.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === s.key, choice: { mode: 'local', key: s.key, lang: s.lang } })),
-    ...(S.remote || []).map(s => ({
-      label: `${s.name}${s.lang ? ' · ' + s.lang : ''} · ${s.source === 'xunlei' ? '迅雷' : s.source === 'assrt' ? '射手(伪)' : 'OpenSubtitles'}`,
-      // xunlei 结果没有 id 字段 (undefined), 选中后存的 choice.id 却被 || '' 兜底成空字符串, 两边要统一归一化才能对上
-      on: S.active?.mode === 'remote' && S.active.url === s.url && (S.active.id || '') === (s.id || ''),
-      choice: { mode: 'remote', source: s.source, url: s.url || '', ext: s.ext || 'srt', id: s.id || '', lang: s.lang || '', name: s.name },
-    })),
+    ...(S.local || []).map(s => ({ label: (subLangLabel(s.lang) || s.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === s.key, choice: { mode: 'local', key: s.key, lang: s.lang } })),
+    ...used.map((s, i) => subRemoteItem(S, s, i === 0 ? '最近用过' : '')),
+    ...remotes.map(s => subRemoteItem(S, s, '')),
   ];
 }
 // 字幕面板里「搜索框 + 状态提示 + 候选列表」这部分 (不含外层 phead/关闭按钮——那部分两边壳子不一样, 各自拼)。
 function subListHtml(S) {
   const items = subItems(S);
+  const nRemote = (S.remote || []).length;
+  const stat = S.searching ? '<div class="substatus">搜索中…</div>'
+    : S.offline && !nRemote ? '<div class="substatus">当前离线：先选本机或「最近用过」的字幕</div>'
+    : S.searched && !nRemote ? '<div class="substatus">没搜到，换个关键词试试</div>' : '';
   return `<div class="subsearch"><input type="search" placeholder="搜字幕：片名 / 番号…" value="${esc(S.q || '')}"><button data-subgo>搜索</button></div>
-    ${S.searching ? '<div class="substatus">搜索中…</div>' : S.searched && !(S.remote || []).length ? '<div class="substatus">没搜到，换个关键词试试</div>' : ''}
-    <div class="pitems">${items.map((it, i) => `<button data-i="${i}" class="${it.on ? 'on' : ''}"><span class="sn"><b>${esc(it.label)}</b></span></button>`).join('')}</div>`;
+    ${stat}
+    <div class="pitems">${items.map((it, i) => `${it.sep ? `<div class="subsep">${esc(it.sep)}</div>` : ''}<button data-i="${i}" class="${it.on ? 'on' : ''}"><span class="sn"><b>${esc(it.label)}</b></span></button>`).join('')}</div>`;
 }
 // 接上面这段 HTML 的交互: 点候选项 / 搜索框 + 回车 + 搜索按钮。box 是装了这段 HTML 的容器 (重画只替换它的 innerHTML,
 // box 本身不变); apply(choice) 真正让一个选择生效; rerender() 选完/搜索状态变化都要重画一次; isLive() 搜索结果回来时
@@ -3937,9 +3993,9 @@ function subWireList(box, S, apply, rerender, isLive) {
     const q = input.value.trim(); if (!q) return;
     S.q = q; S.searching = true; S.searched = false; rerender();
     let results = [];
-    try { const r = await api('subtitle/search', { q }, null); results = r?.results || []; } catch {}
+    try { const r = await api('subtitle/search', { q }, null); results = r?.results || []; } catch (e) { S.failed = true; }
     if (!isLive()) return;
-    S.remote = results; S.searching = false; S.searched = true;
+    S.remote = subUniq(results); S.searching = false; S.searched = true; S.offline = navigator.onLine === false;
     rerender(); $('.subsearch input', box)?.focus();
   };
   go.onclick = runSearch;
@@ -3965,7 +4021,9 @@ function subAutoKick() {
   if (!mine || mine.searched || mine.searching) return;
   const name = cur?.d?.name || cur?.eps?.[cur.ep]?.name || '';
   if (!name) return;
-  mine.searching = true; mine.q = javCode(name) || name; drawSub();
+  // 离线: 不发请求 (只会等到超时), 面板里直接给本机 + 用过的那几条
+  if (navigator.onLine === false) { mine.offline = true; mine.searched = true; drawSub(); return; }
+  mine.searching = true; mine.offline = false; mine.q = javCode(name) || name; drawSub();
   subAutoSearch(name).then(results => {
     if (subState !== mine) return;
     mine.remote = results; mine.searching = false; mine.searched = true;
@@ -4111,7 +4169,7 @@ function closePlayer() {
   Z.resetFor(video);
   saveWatch();
   skipStop(); ask = null;
-  subState = null; video.querySelector('track[data-sub]')?.remove();
+  subState = null; SUB.unmount(video);
   if (hls) { hls.destroy(); hls = null; }
   pvReset(); playingSrc = null;
   video.pause(); video.removeAttribute('src'); video.load();
@@ -4242,8 +4300,14 @@ function seekBy(v, d, apply) {
   return v._st;
 }
 // 视频长度: 本地媒体边转码边播 (HLS EVENT 列表), 浏览器报的长度会随转码进度一路变长。服务端用 ffmpeg 读出真实长度 (probe),
-// 记在 video._fixDur 上, 之后进度条 / 快进都按它走; 转码完成后浏览器自己的长度追上来, 取两者较大值。
-function vdur(v) { if (!v) return NaN; const k = v._fixDur; return k > 0 ? Math.max(k, v.duration || 0) : v.duration; }
+// 记在 video._fixDur 上, 之后进度条 / 快进都按它走。拿不到真实长度时 (probe 失败 / 还在路上), 退回「这段转码任务的起点 + 它自己的长度」:
+// 直接拿 v.duration 当总长会让进度条只到「已转出来的那一段」, 位置却是文件里的绝对时间, 两边永远对不上。
+function vdur(v) {
+  if (!v) return NaN;
+  const off = v._hlsOffset || 0, d = v.duration || 0;
+  if (v._fixDur > 0) return Math.max(v._fixDur, off + d);
+  return off > 0 ? (d ? off + d : NaN) : d;
+}
 function fixDuration(v, url) {
   v._fixDur = 0; v._fixUrl = url;
   if (!url || !url.startsWith('/media/h/')) return;
@@ -5336,6 +5400,58 @@ function installSection() {
 
 const testCache = new Map();
 let settingsGoto = '';   // #/settings/account：打开设置页后滚到「账号管理」
+
+// ---------- 设置页: 字幕样式 (渲染和偏好都在 subcap.js, 这里只放界面) ----------
+// 预览框里那块「画面」按真播放器的算法排 (字号跟画面高度走, 位置是画面高度的百分比), 改一下立刻能看到效果,
+// 不用真开一部片; 正在播的片也会马上跟着变 (subcap.js 的 set 会重排已经挂上去的字幕)。
+const SUB_COLORS = ['#ffffff', '#ffe14d', '#7fe9ff', '#9dff8f', '#ff9f6e'];
+const SUB_FONT_NAMES = { sans: '黑体', serif: '宋体', round: '圆体', kai: '楷体', mono: '等宽' };
+const SUB_EDGE_NAMES = { shadow: '阴影', outline: '描边', box: '半透明底', none: '无' };
+function subStyleSection() {
+  const st = SUB.get();
+  return `<section id="subStyleSec"><h2>字幕样式</h2>
+    <p class="hint">只改这台设备上「怎么显示」，不动字幕文件本身。默认贴着正在看的<strong>画面</strong>底部（上下有黑边时以黑边上沿为准），沉浸播放和普通播放器一致，换片换集都不用重设；播放器的控制条出来时字幕会自己往上让一点。</p>
+    <div class="subpv"><div class="subpv-frame"></div><span class="subpv-tag">画面预览</span><div class="subov"><div class="subcap"><span class="subtx">这是一行示例字幕<br>Subtitle sample</span></div></div></div>
+    <div class="subrow"><span class="lb">大小</span><input class="subrange" type="range" min="60" max="200" step="5" data-subsz value="${st.size}"><span class="subval" data-subszv>${st.size}%</span></div>
+    <div class="subrow"><span class="lb">位置</span><input class="subrange" type="range" min="0" max="35" step="1" data-subbot value="${st.bottom}"><span class="subval" data-subbotv>距底部 ${st.bottom}%</span></div>
+    <div class="subrow"><span class="lb">字体</span><div class="seg">${Object.keys(SUB_FONT_NAMES).map(k => `<button data-subfont="${k}" class="${st.font === k ? 'on' : ''}">${SUB_FONT_NAMES[k]}</button>`).join('')}</div></div>
+    <div class="subrow"><span class="lb">颜色</span><div class="subsw">${SUB_COLORS.map(c => `<button data-subsw="${c}" class="${c === st.color.toLowerCase() ? 'on' : ''}" style="background:${c}" title="${c}"></button>`).join('')}<input type="color" data-subcol value="${st.color}" title="自己挑一个颜色"></div></div>
+    <div class="subrow"><span class="lb">描边</span><div class="seg">${Object.keys(SUB_EDGE_NAMES).map(k => `<button data-subedge="${k}" class="${st.edge === k ? 'on' : ''}">${SUB_EDGE_NAMES[k]}</button>`).join('')}</div></div>
+    <div class="actions"><button class="small" data-subdef>恢复默认</button><span class="lan">位置按「画面高度的百分比」算，所以手机和大屏观感一致；字幕最宽不超过画面宽度的 92%，长句会自动折行。</span></div></section>`;
+}
+function subStyleUi() {
+  const sec = $('#subStyleSec');
+  if (!sec || !window.SUB) return;
+  SUB.preview($('.subov', sec));
+  const sync = () => {
+    const st = SUB.get();
+    const sz = $('[data-subsz]', sec), bt = $('[data-subbot]', sec);
+    if (sz) sz.value = st.size;
+    if (bt) bt.value = st.bottom;
+    const szv = $('[data-subszv]', sec), btv = $('[data-subbotv]', sec);
+    if (szv) szv.textContent = st.size + '%';
+    if (btv) btv.textContent = '距底部 ' + st.bottom + '%';
+    $$('[data-subfont]', sec).forEach(x => x.classList.toggle('on', x.dataset.subfont === st.font));
+    $$('[data-subedge]', sec).forEach(x => x.classList.toggle('on', x.dataset.subedge === st.edge));
+    $$('[data-subsw]', sec).forEach(x => x.classList.toggle('on', String(x.dataset.subsw).toLowerCase() === st.color.toLowerCase()));
+    const col = $('[data-subcol]', sec); if (col && col.value.toLowerCase() !== st.color.toLowerCase()) col.value = st.color;
+    SUB.paintPreviews();
+  };
+  const sz = $('[data-subsz]', sec), bt = $('[data-subbot]', sec), col = $('[data-subcol]', sec);
+  if (sz) sz.oninput = e => { SUB.set({ size: +e.target.value }); sync(); };
+  if (bt) bt.oninput = e => { SUB.set({ bottom: +e.target.value }); sync(); };
+  if (col) col.oninput = e => { SUB.set({ color: e.target.value }); sync(); };
+  sec.addEventListener('click', e => {
+    const b = e.target.closest('[data-subfont],[data-subedge],[data-subsw]'); if (!b) return;
+    if (b.dataset.subfont) SUB.set({ font: b.dataset.subfont });
+    else if (b.dataset.subedge) SUB.set({ edge: b.dataset.subedge });
+    else SUB.set({ color: b.dataset.subsw });
+    sync();
+  });
+  $('[data-subdef]', sec).onclick = () => { SUB.reset(); sync(); };
+  sync();
+}
+
 async function renderSettings() {
   settingsDirty = false;
   const localP = get('/api/local'); // sent together with the rest, so it never queues behind speed tests
@@ -5411,6 +5527,7 @@ async function renderSettings() {
     <section><h2>封面</h2><p class="hint">竖版：2:3 海报；横版：16:9，一屏能放更多标题，详情页和首页大图同步变成横版。</p>
       <div class="seg big"><button data-cardmode="poster" class="${cardMode() === 'poster' ? 'on' : ''}">竖版</button><button data-cardmode="wide" class="${cardMode() === 'wide' ? 'on' : ''}">横版</button></div>
       <div class="actions"><span class="lan">大小</span><button class="small" data-csz="-">−</button><button class="small" data-csz="0" data-cs="val">${Math.round(cardScale() * 100)}%</button><button class="small" data-csz="+">+</button><span class="lan">也可以按 ⌘/Ctrl 加 + / − / 0，触控板双指捏合也行；放大到 135% 以上封面会换成高清图。</span></div></section>
+    ${subStyleSection()}
     ${safety.level === 'kids' ? '' : `<section><h2>首页豆瓣分类</h2><p class="hint">在点播首页显示豆瓣热门榜单，只影响这个浏览器。儿童模式下不显示；本地媒体源也不显示。</p>
       <div class="field">${DB_ROWS.map(([k, t]) => `<label class="flag"><input type="checkbox" data-dbrow="${k}" ${dbRows()[k] ? 'checked' : ''}>${esc(t.replace('豆瓣热门', ''))}</label>`).join('')}</div></section>`}
     <section id="adminSec"><h2>管理员</h2><p class="lan">加载中…</p></section>
@@ -5434,6 +5551,8 @@ async function renderSettings() {
       <div class="field"><textarea id="raw" spellcheck="false">${esc(JSON.stringify(cfg, null, 2))}</textarea></div>
       <div class="actions"><button class="small" id="saveRaw">保存 JSON</button><button class="small" id="reset">恢复默认</button></div></section>
     </div></div>`;
+
+  subStyleUi();   // 字幕样式的预览框 / 滑杆 / 色板
 
   const collect = (box, kind) => $$('.srow', box).map(r => {
     const name = $('.nm', r).value.trim(), url = $('.url', r).value.trim();

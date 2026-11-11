@@ -469,7 +469,7 @@ const tipSub = (s, t, d) => `/ ${fmtT(d)}${s?.sk && markAt(t, s.sk, s.video) ? '
 
 // ---------- 字幕: 每屏 (slide) 自己的 <video> 自己的 state, 跟普通播放器共用规则 (app.js 的 subFileIdOf/subLangLabel/subGlobalPref/epProg.getSub/setSub,
 // 服务端 /media/sub/<id> 和 /api/subtitle/search|fetch) ----------
-function subStop(s) { s.sub = null; s.video.querySelector('track[data-sub]')?.remove(); }
+function subStop(s) { s.sub = null; SUB.unmount(s.video); }
 function subKeyOf(s) { return s.d && s.it ? { site: s.d.site, id: s.d.id, ep: s.ep } : null; }
 function subTrackUrl(sub, choice) {
   if (!choice || !sub) return '';
@@ -477,24 +477,26 @@ function subTrackUrl(sub, choice) {
   if (choice.mode === 'remote') return '/api/subtitle/fetch?' + new URLSearchParams({ source: choice.source || '', url: choice.url || '', ext: choice.ext || 'srt', id: choice.id || '' });
   return '';
 }
+// 画面下半部分被底部的标题 / 简介压住时, 字幕停在它们上面 (横屏片上提以后画面在上半部分, 这里算出来是 0, 字幕就贴画面底)
+function feedReserve(s, r) {
+  const inf = s.el.querySelector('.fd-info');
+  if (!inf || s.el.classList.contains('empty')) return 0;
+  const bottom = r.y + r.h, top = inf.offsetTop - 10;
+  return Math.max(0, Math.min(r.h * .5, bottom - top));
+}
 // persist=true 才写回 (手动选 / 关才算「选过」, 刚打开按规则套默认值不算, 不然每次打开都把这一集焊死成当时的默认值)
 function subApply(s, choice, persist = true) {
   if (!s.sub) return;
   s.sub.active = choice || null;
   const v = s.video;
-  let tr = v.querySelector('track[data-sub]');
   const url = subTrackUrl(s.sub, choice);
-  if (!url) tr?.remove();
-  else {
-    if (!tr) { tr = document.createElement('track'); tr.dataset.sub = '1'; tr.kind = 'subtitles'; v.appendChild(tr); }
-    tr.default = true;
-    if (!tr.src.endsWith(url)) tr.src = url;
-    const show = () => { if (tr.track) tr.track.mode = 'showing'; };
-    tr.onload = show; setTimeout(show, 0);
-  }
+  if (!url) SUB.unmount(v);
+  // anchor: 放进 .fd-shade 后面, 不然底部那层压暗的渐变会把字幕一起压暗
+  else SUB.mount(v, { url, anchor: s.el.querySelector('.fd-shade'), reserve: r => feedReserve(s, r) });
   if (s === cur()) syncSubAct(s);
   if (!persist) return;
   subGlobalPref.set(choice ? { mode: choice.mode, lang: choice.lang || '' } : { mode: 'off' });
+  subUsedAdd(s.sub.useK, choice);
   if (s.sub.key) epProg.setSub(s.sub.key.site, s.sub.key.id, s.sub.key.ep, choice || { mode: 'off' }, vdur(v));
 }
 function syncSubAct(s) {
@@ -505,8 +507,9 @@ function syncSubAct(s) {
 // 新绑定 / 换集重判一次: 这一集自己是不是存过选择 (哪怕存的是「关」也认), 没存过才按全局偏好匹配语言套到这一集的候选里。
 async function subEnsure(s) {
   const e = s.eps[s.ep];
-  if (!e) { s.sub = null; if (s === cur()) syncSubAct(s); return; }
-  const mine = s.sub = { key: subKeyOf(s), fileId: subFileIdOf(e.url), local: [], remote: [], active: null, q: '', searching: false, searched: false };
+  if (!e) { s.sub = null; SUB.unmount(s.video); if (s === cur()) syncSubAct(s); return; }
+  const mine = s.sub = { key: subKeyOf(s), useK: subUseKeyOf(s.d?.name || e.name), fileId: subFileIdOf(e.url), local: [], remote: [], used: [], active: null, q: '', searching: false, searched: false };
+  mine.used = subUsedFor(mine.useK);
   if (s === cur()) syncSubAct(s);
   if (mine.fileId) {
     try { const r = await api('local/subs', { id: mine.fileId }, null); if (s.sub === mine) mine.local = r?.subs || []; } catch {}
@@ -535,11 +538,12 @@ function subKick(s) {
   if (!mine || mine.searched || mine.searching) return;
   const name = s.d?.name || s.eps?.[s.ep]?.name || '';
   if (!name) return;
-  mine.searching = true; mine.q = javCode(name) || name;
+  if (navigator.onLine === false) { mine.offline = true; mine.searched = true; if (s === cur() && sheetEl.dataset.mode === 'sub') renderSubSheet(); return; }   // 离线: 不搜, 只列本机 + 用过
+  mine.searching = true; mine.offline = false; mine.q = javCode(name) || name;
   if (s === cur() && !sheetEl.hidden && sheetEl.dataset.mode === 'sub') renderSubSheet();
   subAutoSearch(name).then(results => {
     if (s.sub !== mine) return;
-    mine.remote = results; mine.searching = false; mine.searched = true;
+    mine.remote = subUniq(results); mine.searching = false; mine.searched = true; mine.offline = navigator.onLine === false;
     if (s === cur() && !sheetEl.hidden && sheetEl.dataset.mode === 'sub') renderSubSheet();
   });
 }

@@ -1150,6 +1150,8 @@ html.touchui .pfind { height: 40px; font-size: 16px; margin-top: 10px; }
 .plist.subset .pitems button, .fd-sheet .pitems button { justify-content: flex-start; background: none; min-height: 42px; padding: 0 10px; }
 .plist.subset .pitems button:hover, .fd-sheet .pitems button:hover { background: #ffffff14; }
 .plist.subset .pitems button.on, .fd-sheet .pitems button.on { background: var(--red); }
+/* 分组小标题 (「最近用过」): 网格里横跨一整行, 只是一条淡淡的标签 */
+.subsep { grid-column: 1 / -1; padding: 8px 2px 2px; font-size: 11.5px; letter-spacing: .06em; color: #ffffff66; }
 .subsearch { display: flex; gap: 8px; padding: 0 12px 10px; flex: none; }
 .subsearch input { flex: 1; min-width: 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 6px; padding: 0 10px; height: 34px; font-size: 14px; }
 .subsearch button { background: var(--red); color: #fff; border: 0; border-radius: 6px; padding: 0 14px; height: 34px; font-size: 13px; flex: none; }
@@ -2357,3 +2359,44 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .dd-ops { display: flex; gap: 8px; margin-top: 8px; }
 .dd-ops button { flex: 1; height: 34px; border: 0; border-radius: 10px; background: #ffffff1a; color: #fff; font: inherit; font-size: 13px; }
 .dd-ops button.danger { color: #ff6a60; }
+
+/* ---------- 字幕叠加层 (subcap.js): 画在「画面」区域内, 贴画面底部 ---------- */
+/* 普通播放器 (#player) 和沉浸播放 (.fd-slide) 共用: 位置 / 尺寸由 subcap.js 按 video 的实际画面算,
+   这里只负责长什么样 (字体 / 颜色 / 描边由 --sub* 变量给) */
+.subov { position: absolute; z-index: 1; pointer-events: none; overflow: hidden; }
+.subov[hidden] { display: none; }
+.subcap { position: absolute; left: 0; right: 0; bottom: var(--subgap, 6%); padding: 0 4%; text-align: center;
+  pointer-events: none; font-family: var(--subfont, sans-serif); font-size: var(--subfs, 20px); line-height: 1.34;
+  color: var(--subcolor, #fff); font-weight: 700; letter-spacing: .01em;
+  -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
+  text-shadow: 0 0 3px #000c, 0 1px 5px #000a, 0 0 14px #0006; transition: bottom .18s ease; }
+.subcap[hidden] { display: none; }
+.subtx { display: inline-block; max-width: 100%; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+/* 描边: 用八方向的 text-shadow 画, iOS / 安卓 / 桌面一致 (text-stroke 会把字吃瘦) */
+.subov[data-edge=outline] .subtx { text-shadow: .05em 0 0 #000, -.05em 0 0 #000, 0 .05em 0 #000, 0 -.05em 0 #000,
+  .035em .035em 0 #000, -.035em -.035em 0 #000, .035em -.035em 0 #000, -.035em .035em 0 #000; }
+.subov[data-edge=box] .subtx { padding: .06em .42em; border-radius: .22em; background: #000000a6; text-shadow: 0 1px 3px #0008;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.subov[data-edge=none] .subtx { text-shadow: none; }
+
+/* iPhone 系统原生全屏 (这时 DOM 浮层看不见, 字幕交给系统画): ::cue 能改的很少, 只把字体 / 颜色 / 描边跟上。
+   变量由 subcap.js 写到 <html> 上 (paintRoot) */
+video::cue { color: var(--subcolor, #fff); font-family: var(--subfont, sans-serif); font-weight: 700;
+  text-shadow: 0 0 3px #000c, 0 1px 4px #0009; }
+
+/* ---------- 设置页: 字幕样式 (预览框 + 色板 + 滑杆) ---------- */
+.subpv { position: relative; width: 100%; max-width: 560px; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden;
+  background: #000; border: 1px solid #ffffff1a; margin: 0 0 16px; }
+.subpv .subov { inset: 0; }
+.subpv-frame { position: absolute; inset: 0; background: linear-gradient(150deg, #2c4257 0%, #16202b 42%, #241d2a 100%); }
+.subpv-frame::before { content: '▶'; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 46px; line-height: 1; color: #ffffff12; }
+.subpv-frame::after { content: ''; position: absolute; inset: 0; box-shadow: inset 0 -40% 60% -30% #000c; }
+.subpv-tag { position: absolute; left: 10px; top: 8px; z-index: 2; font-size: 11px; color: #ffffff70; letter-spacing: .08em; }
+.subrow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.subrow > .lb { flex: none; width: 52px; color: var(--muted); font-size: 13px; }
+.subrange { flex: 1 1 120px; min-width: 96px; max-width: 320px; accent-color: var(--red); }
+.subval { flex: none; min-width: 94px; font-size: 12.5px; color: #ddd; font-variant-numeric: tabular-nums; }
+.subsw { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.subsw button { width: 30px; height: 30px; border-radius: 50%; border: 2px solid #ffffff2e; padding: 0; cursor: pointer; }
+.subsw button.on { border-color: #fff; box-shadow: 0 0 0 2px #ffffff33; }
+.subsw input[type=color] { width: 36px; height: 30px; padding: 0; border: 1px solid #ffffff33; border-radius: 6px; background: #0009; cursor: pointer; }

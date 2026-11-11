@@ -3315,9 +3315,13 @@ if (IS_MEDIA) {
 // The playlist grows while ffmpeg runs (EVENT); a finished one (.done) is kept a day after last use.
 const hlsJobs = new Map(), hlsFail = new Map();
 const HLS_MAX = Math.max(2, Math.min(4, Math.floor(CPUS / 3)));
-const HLS_IDLE = 5 * 60e3;
+const HLS_IDLE = 10 * 60e3;   // 退出播放后转码再跑 10 分钟: 这期间回到这一集是直接接着放的 (顺便把文件转完, 之后有 .done 缓存)
 const HLS_VER = 'v2';   // bump when the ffmpeg arguments change: finished transcodes from an older version are redone
+// 一个文件能不能直接 copy 是固定的: 记下来, 后面每次重开转码 (拖动 / 续播) 不用再起一个 ffmpeg -i 读头, 少等几百毫秒
+const videoProbeCache = new Map();
 function probeVideo(file) {
+  const hit = videoProbeCache.get(file);
+  if (hit) return Promise.resolve(hit);
   return new Promise(ok => {
     let err = '';
     const p = spawn(FFMPEG, ['-hide_banner', '-i', file], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
@@ -3327,7 +3331,34 @@ function probeVideo(file) {
     p.on('close', () => {
       clearTimeout(t);
       const line = err.split('\n').find(l => /Stream #.*Video:/.test(l) && !/attached pic/.test(l)) || '';
-      ok({ copy: /Video: h264\b/.test(line) && !/high 10|10le|4:2:2|4:4:4|yuv42[24]/i.test(line) });
+      const v = { copy: /Video: h264\b/.test(line) && !/high 10|10le|4:2:2|4:4:4|yuv42[24]/i.test(line) };
+      videoProbeCache.set(file, v);
+      if (videoProbeCache.size > 3000) videoProbeCache.delete(videoProbeCache.keys().next().value);
+      ok(v);
+    });
+  });
+}
+// 「不晚于 t 的最后一个关键帧」在文件里是第几秒。stream copy 的 -ss 只能从关键帧起跳 (实测: 拖到 33 秒, 实际从 30 秒的关键帧开始),
+// 客户端拿 offset 换算真实进度, offset 报的是 t 的话, 进度条就会比画面快出这一整个 GOP。这里先问出真实起点, 再按它去 -ss。
+const keyCache = new Map();
+function keyframeBefore(file, t) {
+  const ck = file + '|' + Math.floor(t);
+  if (keyCache.has(ck)) return Promise.resolve(keyCache.get(ck));
+  return new Promise(ok => {
+    let out = '';
+    const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-copyts', '-ss', String(t), '-i', file,
+      '-map', '0:V:0?', '-frames:v', '1', '-c', 'copy', '-f', 'framecrc', '-'], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    const tm = setTimeout(() => p.kill('SIGKILL'), 8000);
+    p.stdout.on('data', d => { if (out.length < 20000) out += d; });
+    p.on('error', () => { clearTimeout(tm); ok(null); });
+    p.on('close', () => {
+      clearTimeout(tm);
+      const tb = /#tb 0:\s*(\d+)\/(\d+)/.exec(out);
+      const row = out.split('\n').find(l => /^\d+,/.test(l));
+      let v = null;
+      if (tb && row) { const pts = Number(row.split(',')[2]); if (Number.isFinite(pts)) v = Math.max(0, pts * (+tb[1] / +tb[2])); }
+      if (v !== null) { keyCache.set(ck, v); if (keyCache.size > 800) keyCache.delete(keyCache.keys().next().value); }
+      ok(v);
     });
   });
 }
@@ -3350,6 +3381,12 @@ function startHls(f, offset = 0) {
   j.ready = (async () => {
     const v = await probeVideo(f.path);
     if (j.stopped) return;
+    // copy 视频时 -ss 只能从关键帧起跳: 先把真实起点问出来, 用关键帧时间当 offset (客户端按它换算进度, 也对齐画面)
+    if (offset > 0 && v.copy) {
+      const kb = await keyframeBefore(f.path, offset);
+      if (j.stopped) return;
+      if (kb !== null && kb >= 0 && kb < offset) { offset = kb; j.offset = kb; }
+    }
     const vargs = v.copy ? ['-c:v', 'copy'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p', '-force_key_frames', 'expr:gte(t,n_forced*6)'];
     // Audio: resampled onto one continuous 48 kHz timeline (aresample async) so segment joins don't click / crackle.
     const p = j.proc = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
@@ -3370,7 +3407,7 @@ function startHls(f, offset = 0) {
     });
     // Ready once the first segment is listed (or ffmpeg gave up).
     for (let i = 0; i < 200 && !j.exited && !j.stopped; i++) {
-      if (/\\.ts\\s*$/m.test(await fsp.readFile(path.join(dir, 'index.m3u8'), 'utf8').catch(() => ''))) return;
+      if (/\.ts\s*$/m.test(await fsp.readFile(path.join(dir, 'index.m3u8'), 'utf8').catch(() => ''))) return;
       await new Promise(ok => setTimeout(ok, 300));
     }
   })();
@@ -3380,7 +3417,7 @@ function startHls(f, offset = 0) {
 async function hlsCoveredEnd(dir, offset) {
   const text = await fsp.readFile(path.join(dir, 'index.m3u8'), 'utf8').catch(() => '');
   let sum = 0;
-  for (const m of text.matchAll(/#EXTINF:([\\d.]+)/g)) sum += parseFloat(m[1]) || 0;
+  for (const m of text.matchAll(/#EXTINF:([\d.]+)/g)) sum += parseFloat(m[1]) || 0;
   return offset + Math.max(0, sum - 6);
 }
 // Duration + resolution of a local file: one `ffmpeg -i` (header only), remembered (LRU, 3000 files).
@@ -3422,10 +3459,13 @@ rpcHandlers.hlsOpen = async ({ id, t }) => {
   // 整个文件已经转完并缓存: 任何位置都能跳, offset 恒为 0。
   if (fs.existsSync(done) && fs.readFileSync(done, 'utf8') === HLS_VER) { const now = new Date(); fsp.utimes(done, now, now).catch(() => {}); return { ok: true, offset: 0 }; }
   const fail = hlsFail.get(id);
-  if (!hlsJobs.has(id) && fail && Date.now() - fail.at < 10 * 60e3) return { error: 'ffmpeg 转换失败：' + fail.error };
+  // 失败后短暂退避: 磁盘抖动 / 上一次目录刚好被删掉都可能让 ffmpeg 报一次错, 别让这一集 10 分钟都打不开
+  if (!hlsJobs.has(id) && fail && Date.now() - fail.at < 90e3) return { error: 'ffmpeg 转换失败：' + fail.error };
   let j = hlsJobs.get(id);
   // 目标时间不在当前任务已经转出来的范围内 (包括往前跳到比 j.offset 还早的位置): 停掉重开, 从目标时间点转。
-  if (j) { const end = await hlsCoveredEnd(dir, j.offset); if (target < j.offset || target > end) { j.stop(); j = null; } }
+  // 只超前一点点 (退出时的位置刚好落在转码前沿之后 / 续播点比转码进度稍微靠前) 不算: 任务还在往后转, 等一两秒新分片就出来了,
+  // 重开反而要把已经转好的分片全删掉、重新起 ffmpeg、再等第一个分片。
+  if (j) { const end = await hlsCoveredEnd(dir, j.offset); if (target < j.offset || target > end + (j.exited ? 0 : 15)) { j.stop(); j = null; } }
   if (!j) j = startHls(f, target);
   j.last = Date.now();
   await j.ready;

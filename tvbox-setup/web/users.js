@@ -26,7 +26,7 @@ const NAME_RE = /^[\p{L}\p{N}_-]{2,20}$/u;
 const MIN_PW = 6, MAX_PW = 64;
 const HIST_KEEP = 100, FAV_KEEP = 800, LFAV_KEEP = 800, PROG_KEEP = 3000;
 const PROG_MIN_DUR = 180;   // 总长不到 3 分钟的视频不记进度
-const KV_KEYS = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols', 'cardMode', 'cardScale', 'subGlobal']);   // cardMode / cardScale: 封面设置 (竖版 / 横版 + 大小) 跟账号走; subGlobal: 字幕全局偏好 (开/关、哪种语言), 没单独存过字幕的片/集按它来
+const KV_KEYS = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols', 'cardMode', 'cardScale', 'subGlobal', 'subStyle']);   // cardMode / cardScale: 封面设置 (竖版 / 横版 + 大小) 跟账号走; subGlobal: 字幕全局偏好 (开/关、哪种语言), 没单独存过字幕的片/集按它来; subStyle: 字幕长什么样 (字号 / 字体 / 颜色 / 位置)
 const LEVELS = ['kids', 'standard', 'all'];   // favCols: 收藏合集 [{id,name,at}]; 哪部片在哪些合集里写在收藏条目自己的 cols 字段里
 const KV_MAX = 200e3;
 const ENTRY_MAX = 8e3;

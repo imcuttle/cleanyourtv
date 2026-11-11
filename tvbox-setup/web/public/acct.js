@@ -12,7 +12,7 @@
 const PV = new URLSearchParams(location.search).get('pv');
 const ls = window.localStorage;
 const LIST = 'tvbox_accts', ACTIVE = 'tvbox_acct', LOST = 'tvbox_acct_lost', ON = 'tvbox_acct_on';
-const KV = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols', 'cardMode', 'cardScale', 'subGlobal']);   // cardMode / cardScale: 封面设置; subGlobal: 字幕全局偏好
+const KV = new Set(['feedProf', 'feedSeen', 'feedLikes', 'recentSearches', 'favCols', 'cardMode', 'cardScale', 'subGlobal', 'subStyle']);   // cardMode / cardScale: 封面设置; subGlobal: 字幕全局偏好; subStyle: 字幕长什么样 (字号 / 字体 / 颜色 / 位置)
 const rj = (k, d) => { try { const v = JSON.parse(ls.getItem(k)); return v ?? d; } catch { return d; } };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
