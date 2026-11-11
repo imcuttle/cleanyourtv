@@ -530,7 +530,7 @@ function renderSubSheet() {
     ...S.local.map(x => ({ label: (subLangLabel(x.lang) || x.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === x.key, apply: () => subApply(s, { mode: 'local', key: x.key, lang: x.lang }) })),
     ...(S.remote || []).map(x => ({
       label: x.name + (x.lang ? ' · ' + x.lang : '') + ' · ' + (x.source === 'xunlei' ? '迅雷' : x.source === 'assrt' ? '射手(伪)' : 'OpenSubtitles'),
-      on: S.active?.mode === 'remote' && S.active.url === x.url && S.active.id === x.id,
+      on: S.active?.mode === 'remote' && S.active.url === x.url && (S.active.id || '') === (x.id || ''),   // xunlei 结果没有 id 字段 (undefined), 选中后存的 choice.id 却被 || '' 兜底成空字符串, 两边不归一化对不上
       apply: () => subApply(s, { mode: 'remote', source: x.source, url: x.url || '', ext: x.ext || 'srt', id: x.id || '', lang: x.lang || '', name: x.name }),
     })),
   ];

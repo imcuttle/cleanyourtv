@@ -3912,7 +3912,7 @@ function drawSub() {
     ...S.local.map(s => ({ label: (subLangLabel(s.lang) || s.ext.toUpperCase()) + '（本地）', on: S.active?.mode === 'local' && S.active.key === s.key, apply: () => applySub({ mode: 'local', key: s.key, lang: s.lang }) })),
     ...(S.remote || []).map(s => ({
       label: `${s.name}${s.lang ? ' · ' + s.lang : ''} · ${s.source === 'xunlei' ? '迅雷' : s.source === 'assrt' ? '射手(伪)' : 'OpenSubtitles'}`,
-      on: S.active?.mode === 'remote' && S.active.url === s.url && S.active.id === s.id,
+      on: S.active?.mode === 'remote' && S.active.url === s.url && (S.active.id || '') === (s.id || ''),   // xunlei 结果没有 id 字段 (undefined), 选中后存的 choice.id 却被 || '' 兜底成空字符串, 两边不归一化对不上
       apply: () => applySub({ mode: 'remote', source: s.source, url: s.url || '', ext: s.ext || 'srt', id: s.id || '', lang: s.lang || '', name: s.name }),
     })),
   ];
@@ -4105,6 +4105,11 @@ function closePlayer() {
   cur = null;
 }
 player.addEventListener('click', e => {
+  // composedPath() 在事件派发那一刻就定好了, 不受后面 DOM 变化影响; 用它 (而不是实时的 e.target.closest(...))
+  // 来判断「点在 X 里面没有」, 不然面板里的按钮自己把面板内容整个重画一遍 (比如选中字幕后 drawSub() 重画列表) 时,
+  // 原来的 e.target 已经被换掉的节点脱离了文档, closest() 找不到祖先, 会被这里误判成「点在外面」而把面板关掉。
+  const path = e.composedPath();
+  const inside = sel => path.some(n => n.nodeType === 1 && n.matches?.(sel));
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'close') closeOverlay();
   if (act === 'next') step(1);
@@ -4137,9 +4142,9 @@ player.addEventListener('click', e => {
   if (act === 'fs') return toggleFs();
   if (act === 'cast') return sysToggle();
   if (act === 'lock') return setLock(true);
-  if (!$('.pmore').hidden && !e.target.closest('.pmore, [data-act=more]')) { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); }
-  if (!sysPanel.hidden && !e.target.closest('.psyspanel, .psys')) sysClose();
-  if (!$('.plist').hidden && !e.target.closest('.plist, .pbar, .pacts')) togglePlist(false);
+  if (!$('.pmore').hidden && !inside('.pmore, [data-act=more]')) { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); }
+  if (!sysPanel.hidden && !inside('.psyspanel, .psys')) sysClose();
+  if (!$('.plist').hidden && !inside('.plist, .pbar, .pacts')) togglePlist(false);
 });
 function poke() { player.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => !video.paused && $('.plist').hidden && sysPanel.hidden && !scrubbing && !gesturing && !(fineCursor && ctrl.matches(':hover')) && player.classList.add('idle'), fineCursor ? 3000 : 4000); }
 // touch: a tap on the picture shows / hides the controls (see below); only touches on the controls themselves keep them up
