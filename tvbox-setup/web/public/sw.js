@@ -1,6 +1,6 @@
 // Service worker：PWA 外壳离线可用 + 冷启动不等网络；/api/sites 和批量接口里的首页数据做 stale-while-revalidate。
 // /hls /img /dl /media 永远走网络。所有缓存操作都可能失败（存储空间不足 / 被系统清理 / 缓存损坏）：失败一律退回「直接走网络」，绝不让缓存问题影响页面。
-const CACHE = 'tvbox-shell-v136', API_CACHE = 'tvbox-api-v3';
+const CACHE = 'tvbox-shell-v137', API_CACHE = 'tvbox-api-v3';
 const SHELL = ['./', 'style.css', 'zoom.js', 'acct.js', 'subcap.js', 'app.js', 'feed.js', 'vendor/hls.min.js', 'icon.svg', 'icons/icon-192.png'];
 
 // ---------- 过期策略 ----------
@@ -159,21 +159,24 @@ async function batchSWR(e, r) {
   const allHit = keys.every((k, i) => k && hit[i]);
   // 只问服务端「需要问」的：没缓存的、过期的、不缓存的路由，以及写入已超过 REVAL_MIN 的。刚写入的不用再确认。
   const need = reqs.map((_, i) => i).filter(i => !(keys[i] && hit[i] && hit[i].age < REVAL_MIN));
-  if (!need.length) return pipe(e, c, reqs, keys, hit, late, Promise.resolve(null), null);
+  if (!need.length) return pipe(e, c, reqs, keys, hit, late, Promise.resolve(null), null, null);
   const sub = need.length < reqs.length;
-  // 后台更新不能跟着页面走：用户刷新 / 切页会取消页面这边的请求，但这次更新要做完，下次打开才是新的
-  const sig = AbortSignal.timeout ? AbortSignal.timeout(allHit ? REVAL_MS : 60e3) : undefined;
+  // 后台更新不能跟着页面走：用户刷新 / 切页会取消页面这边的请求，但这次更新要做完，下次打开才是新的。
+  // nctl 是这次更新的总开关：到点自动断（上面那个 sig 的语义），页面走了 3 秒还在读也断——不然被放弃的请求会一直
+  // 占着浏览器每条连接（每个站点只有 6 条），切几页之后新页面的请求就全排在它们后面（看起来就是「一直在加载」）。
+  const nctl = new AbortController();
+  setTimeout(() => nctl.abort(), allHit ? REVAL_MS : 60e3);
   const init = sub ? { method: 'POST', headers: r.headers, credentials: r.credentials, body: JSON.stringify({ ...body, requests: need.map(i => reqs[i]) }) } : null;
-  const net = fetch(sub ? new Request(r.url, { ...init, ...(sig ? { signal: sig } : {}) }) : sig ? new Request(r, { signal: sig }) : r);
+  const net = fetch(sub ? new Request(r.url, { ...init, signal: nctl.signal }) : new Request(r, { signal: nctl.signal }));
   net.catch(() => {});
-  if (anyHit) return pipe(e, c, reqs, keys, hit, late, net, sub ? need : null);
+  if (anyHit) return pipe(e, c, reqs, keys, hit, late, net, sub ? need : null, nctl);
   // 没有可先给页面的：先看网络
   const res = await net.catch(() => null);
   if (res && res.status === 401) await dropAll();
   if (res && !res.ok && !anyLate) return res;      // 出错且没有兜底：原样交给页面（401 / 429 的登录蒙层逻辑靠它）
-  return pipe(e, c, reqs, keys, hit, late, Promise.resolve(res), sub ? need : null);
+  return pipe(e, c, reqs, keys, hit, late, Promise.resolve(res), sub ? need : null, nctl);
 }
-function pipe(e, c, reqs, keys, hit, late, source, map) {
+function pipe(e, c, reqs, keys, hit, late, source, map, nctl) {
   const enc = new TextEncoder(), dec = new TextDecoder();
   let rd = null, gone = false, finish;
   const done = new Promise(ok => { finish = ok; });
@@ -223,7 +226,11 @@ function pipe(e, c, reqs, keys, hit, late, source, map) {
       await prune(c);
       finish();
     },
-    cancel() { gone = true; }   // 页面走了也把后台更新读完、写进缓存，不取消
+    cancel() {
+      // 页面走了：后台更新还能把已经在飞的那一小段读完写进缓存，但别为了它一直占着连接
+      gone = true;
+      setTimeout(() => nctl?.abort(), 3000);
+    }
   });
   return new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store' } });
 }

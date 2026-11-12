@@ -179,12 +179,26 @@ function previewSource(kind, { url = '', name = '', cats = '', text = '' } = {})
   if (!(kind === 'vod' ? /^https?:\/\/|^local:[\w.-]+\.txt$/ : /^https?:\/\/|^local:[\w.-]+$/).test(url)) return toast('这个地址没法预览');
   window.open(page(kind === 'vod' ? { pvapi: url, ...(cats ? { pvcats: cats } : {}) } : { pvu: url }), '_blank');
 }
+// 每个请求都有上限: 服务端卡住 / 本地进程正忙 / 上游不响应时, 页面不能跟着一直转圈。
+// 本地转码的准备 (/api/local/hlsat) 天生可能慢 (要等 ffmpeg 吐出第一个分片), 给 45 秒; 探测 25 秒; 其余 20 秒。
+const API_TIMEOUT = 20e3;
+const timeoutFor = p => p.startsWith('/api/local/hlsat') ? 45e3 : /^\/api\/(local\/)?probe/.test(p) ? 25e3 : p.startsWith('/api/checklive') ? 30e3 : p.startsWith('/api/check') ? 25e3 : p.startsWith('/api/search') ? 30e3 : API_TIMEOUT;
+// 到点 / 页面切走 → 中断; 「超时」和「自己切页面走的」区分开 (后者 route 静默收场, 前者给用户看错误 + 重试)
+function deadline(ms, outer) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(new DOMException('请求超时', 'TimeoutError')), ms);
+  const hop = () => ctl.abort();
+  if (outer) { if (outer.aborted) ctl.abort(); else outer.addEventListener('abort', hop, { once: true }); }
+  return { signal: ctl.signal, done: () => { clearTimeout(t); outer?.removeEventListener('abort', hop); } };
+}
 async function req(method, path, body, _unused, signal) {
-  const headers = { 'Content-Type': 'application/json' };
-  const r = await fetch(path, { method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body) });
-  const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-  if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
-  return j;
+  const d = deadline(timeoutFor(path), signal);
+  try {
+    const r = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, signal: d.signal, body: body === undefined ? undefined : JSON.stringify(body) });
+    const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+    if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+    return j;
+  } finally { d.done(); }
 }
 // signal: omitted → current page; null → never aborted (app-level reads); or a specific controller's signal.
 const get = (path, signal) => req('GET', path, undefined, false, signal === undefined ? pageCtl.signal : signal || undefined);
@@ -306,7 +320,14 @@ async function swrFresh(key) {
 async function fetchBatch(keys, settle, signal) {
   const requests = keys.map(k => { const q = k.indexOf('?'); return { route: k.slice(0, q), q: Object.fromEntries(new URLSearchParams(k.slice(q + 1))) }; });
   const headers = { 'Content-Type': 'application/json' };
-  const r = await fetch('/api/batch', { method: 'POST', headers, signal, body: JSON.stringify({ requests, lvl: state.level }) });
+  // 响应头都迟迟不来的情况 (连接被中间设备吊住 / 服务端正忙) 也要有上限: 15 秒拿不到就报错, 交给页面显示 + 重试。
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(new DOMException('请求超时', 'TimeoutError')), 15e3);
+  const hop = () => ctl.abort();
+  if (signal) { if (signal.aborted) ctl.abort(); else signal.addEventListener('abort', hop, { once: true }); }
+  let r;
+  try { r = await fetch('/api/batch', { method: 'POST', headers, signal: ctl.signal, body: JSON.stringify({ requests, lvl: state.level }) }); }
+  finally { clearTimeout(timer); }
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const line = t => {
     if (!t) return;
@@ -316,14 +337,21 @@ async function fetchBatch(keys, settle, signal) {
   };
   if (!r.body || !r.body.getReader) { (await r.text()).split('\n').forEach(line); return; }
   const rd = r.body.getReader(), dec = new TextDecoder();
-  let buf = '';
-  for (;;) {
-    const { done, value } = await rd.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    for (let nl; (nl = buf.indexOf('\n')) >= 0;) { line(buf.slice(0, nl)); buf = buf.slice(nl + 1); }
-  }
-  line(buf + dec.decode());
+  let buf = '', idle = 0, hung = false;
+  // 后台没有任何进展 (服务端一条子请求卡住 / 连接被中间设备吊着) 超过 20 秒 → 自己结束, 别让页面无限等
+  const kick = () => { clearTimeout(idle); idle = setTimeout(() => { hung = true; rd.cancel().catch(() => {}); }, 20e3); };
+  kick();
+  try {
+    for (;;) {
+      const { done, value } = await rd.read();
+      if (done) break;
+      kick();
+      buf += dec.decode(value, { stream: true });
+      for (let nl; (nl = buf.indexOf('\n')) >= 0;) { line(buf.slice(0, nl)); buf = buf.slice(nl + 1); }
+    }
+    line(buf + dec.decode());
+  } finally { clearTimeout(idle); }
+  if (hung) throw new DOMException('加载超时', 'TimeoutError');
 }
 // Background enrichment: nobody is waiting on these, so they are debounced into big batches (see DataLoader).
 const LAZY = /^(javdb|probe|douban\/rating)$/;
@@ -2399,7 +2427,20 @@ async function renderCategory(t, name, siteKey) {
   const more = async () => {
     if (busy || pg >= count || !$('#grid')) return;
     busy = true;
-    const j = await api('list', { site, t, pg: pg + 1 });
+    let j;
+    try { j = await api('list', { site, t, pg: pg + 1 }); }
+    catch (e) {
+      busy = false;
+      if (isAbort(e)) return;
+      // 这一页没拿到 (超时 / 源出错): 留在原地给一个重试, 不要一直转圈 (也不能让 busy 卡住, 那样滚动再也拉不动)
+      const tail = $('#tail');
+      if (tail) {
+        tail.innerHTML = `<div class="empty">加载失败：${esc(e.message || '网络错误')}　<button class="small" data-more-retry>重试</button></div>`;
+        const b = tail.querySelector('[data-more-retry]');
+        if (b) b.onclick = () => { tail.innerHTML = spinner; more().catch(() => { busy = false; }); };
+      }
+      return;
+    }
     pg = j.page; count = j.pagecount;
     if (sk) saveScroll(sk + '#p', pg);                      // how deep this entry was, so Back can rebuild it at once
     const fresh = j.list.filter(it => !seen.has(it.id) && seen.add(it.id));
@@ -3612,7 +3653,7 @@ function duckFlash(ms = 600) {
   flashT = setTimeout(() => { if (video._duck) video._unduck?.(); }, ms);
 }
 // rebuild: 播放中悄悄重建 (见 FRAG_CHANGED 里的说明): 不弹「加载中」、不盖封面, 倍速保留
-let lastLoad = null, loadGen = 0;
+let lastLoad = null, loadGen = 0, loadCtl = null;
 async function load(url, startAt, viaProxy, isLocal, rebuild = false, native = false) {
   lastLoad = { url, viaProxy, isLocal };
   const keepRate = rebuild ? video.playbackRate : 0;
@@ -3636,10 +3677,13 @@ async function load(url, startAt, viaProxy, isLocal, rebuild = false, native = f
   video._hlsReopen = isHlsLocal ? (t => load(url, t, viaProxy, isLocal, true)) : null;
   const myGen = ++loadGen;
   if (isHlsLocal) {
+    loadCtl?.abort(); const ctl = loadCtl = new AbortController();   // 很快又点了别的: 撤掉上一个, 服务端跟着停
     // 拖到还没转出来的地方 (或第一次打开就要从中间续播): 先问服务端「这个时间点要不要重开转码」, 等它就位,
     // 再去拿 index.m3u8——两边 (这里的控制面请求和下面 hls.js 真正发的播放列表请求) 都带同一个 t, 所以后者只是确认, 不会再触发一次重开。
-    const r = await api('local/hlsat', { id: hlsIdOf(url), t: Math.round(startAt || 0) }, null).catch(e => ({ error: e.message || String(e) }));
-    if (myGen !== loadGen) return;   // 这次加载已经被后来的取代 (比如用户很快又点了别的)
+    const hint = setTimeout(() => { if (myGen === loadGen) msg('首次打开需要转码，正在准备…'); }, 6000);
+    const r = await api('local/hlsat', { id: hlsIdOf(url), t: Math.round(startAt || 0) }, ctl.signal).catch(e => ({ error: e.message || String(e) }));
+    clearTimeout(hint);
+    if (myGen !== loadGen || ctl.signal.aborted) return;   // 这次加载已经被后来的取代 (比如用户很快又点了别的)
     if (r?.error) { msg('播放失败：' + r.error + '。换一集或换个源试试', true); return; }
     video._hlsOffset = r?.offset || 0;
   }

@@ -213,6 +213,7 @@ function saveHist(s) {
 
 function teardown(s) {
   clearTimeout(s.dog); s.tried = null; skStop(s); subStop(s);
+  s.ctl?.abort(); s.ctl = null;
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = s.video;
   v.onerror = null; v.onloadedmetadata = null;
@@ -273,6 +274,7 @@ const bufCfg = role => role === 0 ? { maxBufferLength: 90, maxMaxBufferLength: 1
 function release(s) {
   clearTimeout(s.dog);
   if (s.released) return;
+  s.ctl?.abort(); s.ctl = null;   // 划走的这一屏还在等服务端转码就撤掉, 让服务端把活留给现在这一屏
   s.released = true; s.resumeAt = curT(s.video) || s.startAt || 0;
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = s.video;
@@ -291,10 +293,17 @@ async function attach(s, viaProxy = false) {
   fixDuration(v, growing ? url : '');       // 本地转码中的长度: 用真实长度, 不跟着转码进度变长
   v._hlsOffset = 0; v._hlsUrl = growing ? url : ''; v._hlsReopen = null;
   const myGen = ++s.loadGen;
+  s.ctl?.abort(); const ctl = s.ctl = new AbortController();
   if (growing) {
+    // 转码要等第一个分片出来 (新片 / 大文件可能要十几秒): 先转圈并给一句话, 别让人对着封面以为卡死了。
+    if (s === cur()) { s.el.classList.add('wait'); s.msg.textContent = '准备中…'; }
+    const hint = setTimeout(() => { if (s === cur() && s.loadGen === myGen) s.msg.textContent = '首次打开需要转码，正在准备…'; }, 6000);
     // 拖到还没转出来的地方 / 从中间续播: 先问服务端这个时间点要不要重开转码, 等它就位——跟普通播放器的 load() 是同一套机制。
-    const r = await api('local/hlsat', { id: hlsIdOf(url), t: Math.round(s.startAt || 0) }, null).catch(e => ({ error: e.message || String(e) }));
-    if (s.loadGen !== myGen) return;   // 这次加载已经被取代 (比如很快又划走 / 点了重试)
+    // 带 ctl: 又划走 / 点了下一部就撤掉这个请求 (服务端跟着停), 不再为没人看的片子空转一个转码。
+    const r = await api('local/hlsat', { id: hlsIdOf(url), t: Math.round(s.startAt || 0) }, ctl.signal).catch(e => ({ error: e.message || String(e) }));
+    clearTimeout(hint);
+    if (ctl.signal.aborted || s.loadGen !== myGen) return;   // 这次加载已经被取代 (比如很快又划走 / 点了重试)
+    s.msg.textContent = '';
     if (r?.error) { fail(s, r.error); return; }
     v._hlsOffset = r?.offset || 0;
     v._hlsReopen = t => { s.startAt = t; return attach(s, viaProxy); };

@@ -105,6 +105,10 @@ function primary() {
         if (!to || !to.isConnected()) return w.send({ t: 'rpc-res', id: m.id, error: '服务重启中，稍后再试' });
         pending.set(m.id, w);
         to.send(m);
+      } else if (m.t === 'rpc-abort') {
+        // 请求方已经走了 (切页面 / 换了视频): 转给真正在做这件事的进程, 让它停掉还没开始的活
+        const to = MEDIA_OP.test(m.op) ? media : leader;
+        if (to && to.isConnected()) to.send(m);
       } else if (m.t === 'rpc-res') {
         const to = pending.get(m.id);
         pending.delete(m.id);
@@ -212,28 +216,49 @@ async function publicIp() {
 
 // ---- RPC: run `op` in the process that owns it (leader, or media for local*/hls*) — directly when that is us ----
 const rpcHandlers = {};
-const rpcWait = new Map();
+const rpcWait = new Map(), rpcLive = new Map();
 let rpcSeq = 0;
 const ownsOp = op => !cluster.isWorker || (MEDIA_OP.test(op) ? IS_MEDIA : IS_LEADER);
-function rpc(op, args, ms = 60000) {
-  if (ownsOp(op)) return Promise.resolve().then(() => rpcHandlers[op](args));
+const abortErr = () => Object.assign(new Error('aborted'), { name: 'AbortError' });
+// signal: 谁在等这个结果。默认取当前请求的 (浏览器断开 → 这里也跟着断), 用 rpc-abort 告诉所有者「这个结果没人要了」,
+// 所有者据此把还没开始的活 (做海报的 ffmpeg / 刚起的转码) 停掉, 别让它们把后面真正要看的请求堵住。
+function rpc(op, args, ms = 60000, signal) {
+  if (signal === undefined) signal = reqCtx.getStore()?.signal;
+  if (ownsOp(op)) return Promise.resolve().then(() => rpcHandlers[op](args, { signal }));
   return new Promise((ok, bad) => {
     const id = `${process.pid}:${++rpcSeq}`;
-    const t = setTimeout(() => { rpcWait.delete(id); bad(new Error('内部请求超时')); }, ms);
-    rpcWait.set(id, { ok, bad, t });
+    const off = () => { rpcWait.delete(id); clearTimeout(t); if (signal) signal.removeEventListener('abort', onAbort); };
+    const t = setTimeout(() => { off(); bad(new Error('内部请求超时')); }, ms);
+    const onAbort = () => { off(); try { process.send({ t: 'rpc-abort', id, op }); } catch {} bad(abortErr()); };
+    rpcWait.set(id, { ok, bad, t, off });
+    if (signal) { if (signal.aborted) return onAbort(); signal.addEventListener('abort', onAbort, { once: true }); }
     process.send({ t: 'rpc', id, op, args, lvl: reqCtx.getStore()?.level || '' });
   });
 }
+// 排队的 / 正在飞的活: 请求方走了就别再往下做 (能停的停, 不能停的至少不再起新的)。
+const raceAbort = (p, signal) => !signal ? p : new Promise((ok, bad) => {
+  if (signal.aborted) return bad(abortErr());
+  const onAbort = () => bad(abortErr());
+  signal.addEventListener('abort', onAbort, { once: true });
+  p.then(ok, bad).finally(() => signal.removeEventListener('abort', onAbort));
+});
 if (cluster.isWorker) {
   process.on('message', async m => {
     if (!m || typeof m !== 'object') return;
     if (m.t === 'rpc' && ownsOp(m.op)) {
-      try { process.send({ t: 'rpc-res', id: m.id, result: await reqCtx.run({ level: m.lvl || 'standard' }, () => rpcHandlers[m.op](m.args)) }); }
+      const ctl = new AbortController();
+      rpcLive.set(m.id, ctl);
+      const done = () => { if (rpcLive.get(m.id) === ctl) rpcLive.delete(m.id); };
+      try { process.send({ t: 'rpc-res', id: m.id, result: await reqCtx.run({ level: m.lvl || 'standard', signal: ctl.signal }, () => rpcHandlers[m.op](m.args, { signal: ctl.signal })) }); }
       catch (e) { process.send({ t: 'rpc-res', id: m.id, error: e.message || String(e) }); }
+      finally { done(); }
+    } else if (m.t === 'rpc-abort') {
+      const ctl = rpcLive.get(m.id);
+      if (ctl) { rpcLive.delete(m.id); ctl.abort(); }
     } else if (m.t === 'rpc-res') {
       const w = rpcWait.get(m.id);
       if (!w) return;
-      rpcWait.delete(m.id); clearTimeout(w.t);
+      rpcWait.delete(m.id); clearTimeout(w.t); w.off();
       m.error !== undefined ? w.bad(new Error(m.error)) : w.ok(m.result);
     } else if (m.t === 'reload') reloadState();
   });
@@ -3291,12 +3316,23 @@ const thumbFail = new Map(), thumbHot = new Map(), thumbQ = [];
 let thumbRun = 0;
 const hotGet = id => { const f = thumbHot.get(id); if (f) { thumbHot.delete(id); thumbHot.set(id, f); } return f; };
 function hotSet(id, f) { thumbHot.delete(id); thumbHot.set(id, f); if (thumbHot.size > THUMB_HOT_MAX) thumbHot.delete(thumbHot.keys().next().value); }
-function thumbJob(fn) {
-  return new Promise((ok, bad) => {
-    thumbQ.push({ fn, ok, bad });
+function thumbJob(fn, signal) {
+  let off = () => {};
+  const p = new Promise((ok, bad) => {
+    const job = { fn, ok, bad };
+    // 页面已经切走 / 这一屏已经滑过去了: 还排在队里的封面就别做了 (ffmpeg 很贵, 让它先服务现在真的在看的这一页)
+    if (signal) {
+      if (signal.aborted) return bad(abortErr());
+      // 还在排队 → 直接撤掉; 已经在做了 → 让它做完 (同一个文件别的请求还要用, 中途放弃会重复起 ffmpeg)
+      const onAbort = () => { const i = thumbQ.indexOf(job); if (i >= 0) { thumbQ.splice(i, 1); bad(abortErr()); } };
+      off = () => signal.removeEventListener('abort', onAbort);
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    thumbQ.push(job);
     if (thumbQ.length > THUMB_BACKLOG) thumbQ.shift().bad(new Error('busy')); // oldest request = most likely scrolled away
     drainThumbs();
   });
+  return p.finally(() => off());
 }
 function drainThumbs() {
   while (thumbRun < THUMB_CONC && thumbQ.length) {
@@ -3306,8 +3342,8 @@ function drainThumbs() {
   }
 }
 // Resolves to a file path, null (no cover possible) or rejects with 'busy'.
-rpcHandlers.localThumb = ({ id }) => localThumb(id);
-async function localThumb(id) {
+rpcHandlers.localThumb = ({ id }, ctx) => localThumb(id, ctx?.signal);
+async function localThumb(id, signal) {
   const hot = hotGet(id);
   if (hot) return hot;
   const it = localIndex().byItem.get(id);
@@ -3315,6 +3351,7 @@ async function localThumb(id) {
   const pic = it.pic ? await io(() => fsp.stat(it.pic)).catch(() => null) : null;
   if (pic && (pic.size <= PIC_DIRECT || !FFMPEG)) { hotSet(id, it.pic); return it.pic; }
   if (!FFMPEG) return null;
+  if (signal?.aborted) throw abortErr();
   const src = pic ? it.pic : it.files[0].path;
   const file = path.join(THUMBS, `local-${hashId(id + '|' + src + '|' + (pic ? pic.mtimeMs : ''), 12)}.jpg`);
   const done = await fsp.stat(file).catch(() => null);
@@ -3331,10 +3368,10 @@ async function localThumb(id) {
           '-map', '0:v:0', '-vf', 'thumbnail=30,scale=480:-2', '-frames:v', '1', '-q:v', '5', tmp];
         return ffmpeg(args(90), 40000, 10).then(() => fsp.stat(tmp)).catch(() => ffmpeg(args(0), 40000, 10));
       };
-    mediaJobs.set(key, thumbJob(run)
+    mediaJobs.set(key, thumbJob(run, signal)
       .then(() => fsp.rename(tmp, file)).then(() => { hotSet(id, file); return file; }, e => {
         fsp.rm(tmp, { force: true }).catch(() => {});
-        if (e.message === 'busy') throw e; // dropped from the backlog: not a failure of the source
+        if (e.message === 'busy' || e.name === 'AbortError') throw e; // dropped from the backlog / nobody is looking any more: not a failure of the source
         thumbFail.set(id, Date.now());
         return pic ? it.pic : null; // an image we could not shrink is still better than nothing
       })
@@ -3357,12 +3394,21 @@ const gifHot = new Map(), gifFail = new Map();
 const GIF_BACKLOG = 8, GIF_WAIT = 15e3;
 const gifQ = []; let gifRun = 0;
 const gifIdle = () => thumbRun === 0 && thumbQ.length === 0 && !localScan.running && hlsJobs.size === 0;
-function gifJob(fn) {
-  return new Promise((ok, bad) => {
-    gifQ.push({ fn, ok, bad, at: Date.now() });
+function gifJob(fn, signal) {
+  let off = () => {};
+  const p = new Promise((ok, bad) => {
+    const job = { fn, ok, bad, at: Date.now() };
+    if (signal) {
+      if (signal.aborted) return bad(abortErr());
+      const onAbort = () => { const i = gifQ.indexOf(job); if (i >= 0) { gifQ.splice(i, 1); bad(abortErr()); } };
+      off = () => signal.removeEventListener('abort', onAbort);
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    gifQ.push(job);
     if (gifQ.length > GIF_BACKLOG) gifQ.shift().bad(new Error('busy'));
     drainGifs();
   });
+  return p.finally(() => off());
 }
 function drainGifs() {
   for (let i = gifQ.length - 1; i >= 0; i--) if (Date.now() - gifQ[i].at > GIF_WAIT) gifQ.splice(i, 1)[0].bad(new Error('busy'));
@@ -3373,13 +3419,14 @@ function drainGifs() {
   }
 }
 if (IS_MEDIA) setInterval(() => { if (gifQ.length) drainGifs(); }, 1500).unref(); // the gate opens without an event of its own
-rpcHandlers.localGif = ({ id }) => localGif(id);
-async function localGif(id) {
+rpcHandlers.localGif = ({ id }, ctx) => localGif(id, ctx?.signal);
+async function localGif(id, signal) {
   const hot = gifHot.get(id);
   if (hot) { gifHot.delete(id); gifHot.set(id, hot); return hot; }
   const it = localIndex().byItem.get(id);
   if (!it || !FFMPEG) return null;
   const f = it.files[0];
+  if (signal?.aborted) throw abortErr();
   const st = await io(() => fsp.stat(f.path)).catch(() => null);
   if (!st) return null;
   const file = path.join(THUMBS, `localgif3-${hashId(id + '|' + f.path + '|' + st.size + '|' + Math.round(st.mtimeMs), 12)}.gif`);
@@ -3405,10 +3452,10 @@ async function localGif(id) {
       return ffmpeg([...base, ...inputs, '-filter_complex', fc, ...tail], 60000, 10)
         .catch(() => ffmpeg([...base, '-t', '5', '-i', f.path, '-an', '-vf', 'fps=6,scale=240:-2:flags=bilinear,split[a][b];[a]palettegen=max_colors=48:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', tmp], 60000, 10));
     };
-    mediaJobs.set(key, gifJob(run)
+    mediaJobs.set(key, gifJob(run, signal)
       .then(() => fsp.rename(tmp, file)).then(keep, e => {
         fsp.rm(tmp, { force: true }).catch(() => {});
-        if (e.message === 'busy') throw e;
+        if (e.message === 'busy' || e.name === 'AbortError') throw e;
         gifFail.set(id, Date.now());
         return null;
       })
@@ -3576,9 +3623,10 @@ function mediaInfo(file) {
     });
   });
 }
-rpcHandlers.localProbe = async ({ id }) => {
+rpcHandlers.localProbe = async ({ id }, ctx) => {
   const f = localIndex().byFile.get(id);
   if (!f || !FFMPEG) return {};
+  if (ctx?.signal?.aborted) throw abortErr();
   const { width, height, duration } = await mediaInfo(f.path);
   return width || duration ? { ...(width ? { width, height } : {}), ...(duration > 0 ? { duration } : {}) } : {};
 };
@@ -3595,7 +3643,8 @@ function hlsSerial(id, fn) {
 }
 // passive: 这是播放器来拿播放列表本身 (不是「请服务端跳到 t」), 允许等, 不许重开转码。
 // 播放器的旧实例在拖动瞬间常常还有一个带旧 t 的请求在路上, 它要是也能重开, 就会把新任务杀掉 (黑屏 + ffmpeg 转换失败)。
-async function hlsOpenAt(f, target, passive, depth = 0) {
+async function hlsOpenAt(f, target, passive, depth = 0, signal) {
+  if (signal?.aborted) throw abortErr();   // 请求方已经走了 (又划到下一部了): 别再为它起一个转码
   const id = f.id, dir = path.join(TRANS, id), done = path.join(dir, '.done');
   // 整个文件已经转完并缓存: 任何位置都能跳, offset 恒为 0。(并发重开时 .done 可能刚好被删, 读失败就当没有)
   let doneVer = '';
@@ -3614,20 +3663,21 @@ async function hlsOpenAt(f, target, passive, depth = 0) {
   }
   if (!j) j = startHls(f, target);
   j.last = Date.now();
-  await j.ready;
+  await raceAbort(j.ready, signal);
+  if (signal?.aborted) throw abortErr();
   if (fs.existsSync(path.join(dir, 'index.m3u8'))) {
     // 等的这段时间里这个任务可能已经被换成别的了 (目录里的 offset 也就变了): 按新任务再来一次, 别报错也别把旧 offset 交给客户端
     const now = hlsJobs.get(id);
-    if (now && now !== j && now.offset !== j.offset && depth < 2) return hlsOpenAt(f, target, passive, depth + 1);
+    if (now && now !== j && now.offset !== j.offset && depth < 2) return hlsOpenAt(f, target, passive, depth + 1, signal);
     return { ok: true, offset: j.offset };
   }
   return { error: 'ffmpeg 转换失败：' + (j.error.trim() || '没有输出') };
 }
-rpcHandlers.hlsOpen = async ({ id, t, passive }) => {
+rpcHandlers.hlsOpen = async ({ id, t, passive }, ctx) => {
   const f = localIndex().byFile.get(id);
   if (!f || !FFMPEG) return { error: '找不到文件' };
   const target = Math.max(0, Number(t) || 0), ps = !!passive;
-  return hlsSerial(id, () => hlsOpenAt(f, target, ps));
+  return hlsSerial(id, () => hlsOpenAt(f, target, ps, 0, ctx?.signal));
 };
 if (IS_MEDIA) {
   // Unfinished output from an earlier run can't be resumed.
@@ -3919,10 +3969,20 @@ async function api(route, q, res, req) {
       return shared.get(key);
     };
     let next = 0;
+    // 一条子请求卡住 (上游不响应 / 本地进程正忙) 不能让整条 NDJSON 流一直开着: 到点就回一条超时,
+    // 页面那颗转圈才会停下来给用户一个「重试」, 而不是无限转。
+    const SUB_TIMEOUT = Number(process.env.BATCH_SUB_TIMEOUT_MS) || 25e3;
+    const withDeadline = p => new Promise(ok => {
+      let fin;
+      const t = setTimeout(() => fin({ status: 503, body: { error: '加载超时，请重试' } }), SUB_TIMEOUT);
+      t.unref?.();
+      fin = v => { clearTimeout(t); ok(v); };
+      p.then(fin, e => fin({ status: 502, body: { error: e.message || String(e) } }));
+    });
     const worker = async () => {
       while (next < list.length && !res.destroyed) {
         const i = next++;
-        const out = await run(list[i]);
+        const out = await withDeadline(run(list[i]));
         if (!res.destroyed) res.write(JSON.stringify({ i, ...out }) + '\n');
       }
     };
