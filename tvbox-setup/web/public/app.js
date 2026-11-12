@@ -5322,17 +5322,31 @@ const LPV_GROW = { duration: 440, easing: 'cubic-bezier(.32,.72,0,1)', fill: 'fo
 const LPV_FADE = { duration: 180, easing: 'ease-out', fill: 'forwards' };
 let lpv = null;
 const lpvFree = me => { if (me.obj) { try { URL.revokeObjectURL(me.obj); } catch {} me.obj = ''; } };
+// 移开卡片不要立刻掐: 指针从封面挪到卡片边上、滚一格又停下、手抖一下都会触发 mouseout,
+// 立刻断就是「刚开始转 → 杀掉 → 回来 → 又重新转」的反复。给一小段宽限期, 期间回到卡片上就当没离开过;
+// 宽限期到了还没回来才真的停 (服务端跟着把还在转的 ffmpeg 停掉)。
+const lpvGrace = 400;          // 还在生成: 宽限久一点, 别为了指针抖一下就重新转
+const lpvShownGrace = 120;    // 已经显示出来了: 收起来很快, 回来再打开也快 (图中已经有缓存)
+function lpvSoon(me) {
+  if (!me || me.leaveT) return;
+  me.leaveT = setTimeout(() => {
+    me.leaveT = 0;
+    if (lpv !== me) return;
+    if (me.el.matches(':hover')) return;        // 宽限期内已经回到卡片上 (滚动挪走后回来也算): 什么都不做
+    stopLocalPreview();
+  }, me.ov ? lpvShownGrace : lpvGrace);
+}
+function lpvStay(me) { if (me && me.leaveT) { clearTimeout(me.leaveT); me.leaveT = 0; } }
 function startLocalPreview(el, url, box = el) {
   if (!url || !matchMedia('(hover: hover) and (pointer: fine)').matches) return;
-  if (lpv && lpv.el === el) return;
+  if (lpv && lpv.el === el) { lpvStay(lpv); return; }
   stopLocalPreview();
-  const me = lpv = { el, box, ov: null, img: null, timer: 0, off: null, ctl: null, obj: '' };
-  // 鼠标移开 / 一滚动 / 切页面: 还没下载完的预览立刻断 (服务端跟着把还在转的 ffmpeg 停掉), 不再为看不见的卡片空转。
+  const me = lpv = { el, box, ov: null, img: null, timer: 0, off: null, ctl: null, obj: '', leaveT: 0 };
   // 用 fetch 而不是 <img src> 就是为了能真正 abort: 换 src 只能指望浏览器自己取消, 请求会一直占着连接。
-  const off = () => { if (lpv === me) stopLocalPreview(); };
+  const off = () => lpvSoon(me);
   me.off = off;
-  addEventListener('scroll', off, { passive: true, once: true, capture: true });
-  addEventListener('resize', off, { once: true });
+  addEventListener('scroll', off, { passive: true, capture: true });
+  addEventListener('resize', off);
   me.timer = setTimeout(async () => {
     if (lpv !== me) return;
     const info = serverInfo || await infoP();
@@ -5350,6 +5364,8 @@ function startLocalPreview(el, url, box = el) {
       await new Promise((ok, bad) => { img.onload = ok; img.onerror = bad; img.src = obj; });
       await img.decode().catch(() => {});                 // first frame ready before anything moves
       if (lpv !== me || !box.isConnected) return;
+      // 已经移开、只是还在宽限期里: 别在这时候弹出来 (回来后 lpvStay 会清掉标记, 那时照常弹)
+      if (me.leaveT) { if (!me.el.matches(':hover')) return stopLocalPreview(); lpvStay(me); }
       me.img = img;
       box.classList.remove('pvload');
       lpvSeen.delete(url); lpvSeen.add(url); if (lpvSeen.size > 300) lpvSeen.delete(lpvSeen.values().next().value);
@@ -5387,7 +5403,7 @@ function openLocalPreview(me) {
 function stopLocalPreview(immediate) {
   const me = lpv; if (!me) return;
   lpv = null;
-  clearTimeout(me.timer);
+  clearTimeout(me.timer); clearTimeout(me.leaveT); me.leaveT = 0;
   me.ctl?.abort(); me.ctl = null;     // 还没下载完 (服务端还在做 gif) → 立刻断, 那边跟着停 ffmpeg
   me.box.classList.remove('pvload');
   if (me.off) { removeEventListener('scroll', me.off, true); removeEventListener('resize', me.off); me.off = null; }
@@ -5410,13 +5426,13 @@ document.addEventListener('mouseover', e => {
   const t = e.target instanceof Element ? e.target : null; if (!t) return;
   const host = lpvTarget(t); if (!host) return;
   if (t !== host && t.closest(LPV_ACTION) && host.contains(t.closest(LPV_ACTION))) { if (lpv) stopLocalPreview(); return; }
-  if (lpv && lpv.el === host) return;
+  if (lpv && lpv.el === host) { lpvStay(lpv); return; }
   startLocalPreview(host, host.dataset.pv, host.classList.contains('card') ? $('.img', host) || host : host);
 });
 document.addEventListener('mouseout', e => {
   if (!lpv) return;
   const to = e.relatedTarget instanceof Node ? e.relatedTarget : null;
-  if (!to || !lpv.el.contains(to)) stopLocalPreview();
+  if (!to || !lpv.el.contains(to)) lpvSoon(lpv);   // 宽限期后再断, 不立刻掐
 });
 
 // Hover preview: a fresh 3-second gif cut by the server's ffmpeg; without ffmpeg, a muted live mini-player
