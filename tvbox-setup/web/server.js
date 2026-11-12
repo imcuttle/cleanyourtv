@@ -2541,6 +2541,115 @@ async function subtitleFetch({ source, url, ext, id }) {
   if (cache) fsp.writeFile(cache, vtt).catch(() => {});
   return { vtt };
 }
+// ---- 成人资源: 默认字幕按番号精确匹配, 再在简体里挑字数最多的那条 ----
+// 迅雷的字幕库是网友上传的: 同一个番号常有好几条 (简 / 繁 / 机翻 / 干脆是邻居番号的), 光看「源 + 语言标签」挑会挂错片 ——
+// languages 经常是空的或者只写「中文」, 名字里带不带番号也说明不了内容对不对。
+// 所以这里把候选的正文真的下下来数一遍: 名字能对上番号 + 中文够多 + 简体字占多数, 再按字数最多取一条。
+const SUB_PICK_N = 6;              // 最多下几条正文来比 (每条一个请求, 太多就慢了)
+const SUB_PICK_BUDGET = 7000;       // 整个挑选的总预算, 超了就拿手上已经数完的
+const SUB_PICK_TTL = 10 * 60e3;     // 同一个番号挑出来的结果记 10 分钟 (换集 / 重进播放器不用重新比)
+const subEscRe = s => str(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// 番号 → 用来在候选名字里找它的正则。分隔符不参与比较 (上传者常写成 SSIS001 / SSIS.001 / SSIS 001, 都是同一个番号),
+// 但数字后面不能再跟数字: 不然 SSIS-001 会连 SSIS-0012 / SSIS-0010 这些别的片一起命中。
+function subCodeRe(code) {
+  const m = /^(.+)-(\d+)$/.exec(str(code).toUpperCase().trim());
+  if (!m) return null;
+  const head = m[1].split('-').map(subEscRe).join('[\\s._-]*');
+  const nums = [...new Set([m[2], m[2].replace(/^0+/, '') || '0'])].sort((a, b) => b.length - a.length).map(subEscRe).join('|');
+  return new RegExp(`(?:^|[^A-Z]|\\d(?=[A-Z]))${head}[\\s._-]*(?:${nums})(?![0-9])`, 'i');
+}
+// 常用繁简对照表 (每两个字符一对: 繁 简)。判断整篇是简体还是繁体就靠两边各自出现多少次 ——
+// 比语言标签可靠得多, 而且不用引一份完整的转换表 (这里只做统计, 不做转换)。
+const TRAD_SIMP = '這这們们說说時时會会個个國国學学沒没現现過过開开關关愛爱與与為为對对頭头點点麼么樣样紀纪'
+  + '實实聽听讓让覺觉邊边問问題题嗎吗媽妈歡欢經经濟济應应該该後后從从兩两畫画電电車车東东風风飛飞馬马鳥鸟魚鱼'
+  + '龍龙门门長长陽阳陰阴際际陸陆隊队階阶隨随險险難难靈灵頁页項项順顺須须顏颜願愿類类餘余驗验體体發发鬥斗鬧闹'
+  + '麗丽黨党齊齐齒齿龜龟兒儿萬万專专業业絲丝嚴严豐丰臨临舉举義义烏乌樂乐喬乔習习鄉乡書书買买亂乱爭争於于虧亏'
+  + '雲云亞亚產产親亲億亿僅仅倉仓儀仪價价眾众優优偉伟傳传傷伤倫伦偽伪俠侠侶侣偵侦側侧僑侨儉俭債债傾倾償偿燈灯'
+  + '牆墙場场塊块壞坏壓压壯壮聲声處处備备復复憶忆態态慣惯慮虑慶庆憂忧憐怜戰战戲戏戶户掃扫掛挂採采換换揮挥損损'
+  + '搖摇搶抢撫抚攝摄擺摆攜携敵敌數数斷断無无舊旧榮荣標标機机橫横檢检權权欄栏殺杀氣气決决況况淚泪淨净淺浅減减'
+  + '測测湯汤溫温滅灭滿满漢汉潔洁濕湿營营燒烧爺爷獨独獎奖環环畢毕異异當当療疗盤盘監监盡尽礙碍確确礎础禮礼禍祸'
+  + '離离種种積积稱称穩稳窮穷竊窃競竞筆笔節节範范築筑簡简簽签籃篮籌筹綁绑綜综綠绿緊紧練练組组細细終终絕绝統统'
+  + '給给費费貼贴資资賊贼賓宾賞赏賠赔賢贤賣卖質质賴赖贊赞趕赶跡迹蹤踪軍军輕轻載载輸输辦办農农遞递遠远適适選选'
+  + '還还郵邮醫医釋释鐘钟鋼钢錯错錄录鏡镜鐵铁閉闭閃闪閱阅陣阵隻只雞鸡靜静頂顶頓顿預预領领頻频顆颗飄飘飯饭飲饮'
+  + '飾饰駕驾騙骗驚惊髒脏鬆松魯鲁髮发';
+const TRAD_SET = new Set(), SIMP_SET = new Set();
+for (let i = 0; i + 1 < TRAD_SIMP.length; i += 2) { TRAD_SET.add(TRAD_SIMP[i]); SIMP_SET.add(TRAD_SIMP[i + 1]); }
+const CJK_CH = /[\u3400-\u4dbf\u4e00-\u9fff]/;
+// 字幕正文 → 中文字数 + 简繁信号 (只数 cue 里的字, 时间轴 / 序号行 / 标签不算)
+function subTextStats(vtt) {
+  let cjk = 0, trad = 0, simp = 0;
+  for (const raw of str(vtt).split('\n')) {
+    const s = raw.trim();
+    if (!s || s === 'WEBVTT' || /-->/.test(s) || /^\d+$/.test(s) || /^(NOTE|STYLE|REGION)\b/.test(s)) continue;
+    for (const ch of s.replace(/<[^>]*>/g, '')) {
+      if (!CJK_CH.test(ch)) continue;
+      cjk++;
+      if (TRAD_SET.has(ch) && !SIMP_SET.has(ch)) trad++;
+      else if (SIMP_SET.has(ch) && !TRAD_SET.has(ch)) simp++;
+    }
+  }
+  return { cjk, trad, simp };
+}
+const subPickCache = new Map();
+async function subtitlePick(code, name) {
+  code = str(code).toUpperCase().trim() || javCode(name);
+  if (!code) return null;
+  const ck = code + '|' + str(name).slice(0, 48);
+  const hit = subPickCache.get(ck);
+  if (hit && Date.now() - hit.at < SUB_PICK_TTL) return hit.val;
+  const re = subCodeRe(code);
+  let list = [];
+  try { list = await subtitleSearch(code); } catch { list = []; }   // 番号本身当关键词搜一次
+  const usable = (list || []).filter(x => x && (x.url || x.id));
+  if (!usable.length) { subPickCache.set(ck, { at: Date.now(), val: null }); return null; }
+  // 只认名字里对得上番号的候选。迅雷按番号搜经常回一堆别的片 (比如搜 SSIS-001, 回来全是某剧的 SSS01E01),
+  // 这种下下来再比字数, 只会挑出一条「别的片的、字数最多的」字幕 —— 挂上去剧情全不对, 比没有字幕还糟。
+  // 所以一条都对不上就直接说没有 (前端这时不再退回去硬挑), 让用户自己在面板里选。
+  const codeHit = re ? usable.filter(x => re.test(str(x.name))) : usable;
+  if (!codeHit.length) {
+    const val = { pick: null, code, reason: 'no-code-match', tried: usable.length };
+    subPickCache.set(ck, { at: Date.now(), val });
+    return val;
+  }
+  // 再排「值不值得下」: 迅雷 > 语言看着像中文。只下前几条, 剩下的当兜底不用。
+  const zhHint = l => /中|简|繁|双|chinese|chi|chs|cht|zh/i.test(str(l)) ? 0
+    : /英|日|韩|english|japanese|korean|eng|jpn|kor/i.test(str(l)) ? 2 : 1;
+  const rank = x => (x.source === 'xunlei' ? 0 : 2) + zhHint(x.lang);
+  const top = codeHit.slice().sort((a, b) => rank(a) - rank(b)).slice(0, SUB_PICK_N);
+  const deadline = Date.now() + SUB_PICK_BUDGET;
+  const scored = [];
+  await Promise.all(top.map(async x => {
+    const left = Math.max(600, deadline - Date.now());
+    const r = await Promise.race([
+      subtitleFetch({ source: x.source, url: x.url || '', ext: x.ext || '', id: x.id || '' }).catch(() => null),
+      new Promise(ok => { const t = setTimeout(() => ok(null), left); t.unref?.(); }),
+    ]);
+    if (!r || !r.vtt) return;
+    const s = subTextStats(r.vtt);
+    if (s.cjk < 20) return;                       // 没中文字幕 (英 / 日 / 空壳) 当默认等于没开
+    scored.push({ x, ...s });
+  }));
+  if (!scored.length) { subPickCache.set(ck, { at: Date.now(), val: null }); return null; }
+  // 简体判定: 繁体字不比简体信号多 (留两个字容错) 就算简体 —— 繁体条目几乎每句都有 這 / 們 / 說 这类字,
+  // 简体条目里那些「只 / 后 / 云」的少量误判扳不回来。
+  const isSimp = s => s.trad <= s.simp + 2;
+  // 一层层退: 迅雷+简体 → 迅雷 → 简体 → 全都要; 同一层里取字数最多的 (字数一样再比简体字多少)
+  const pool = [
+    scored.filter(s => s.x.source === 'xunlei' && isSimp(s)),
+    scored.filter(s => s.x.source === 'xunlei'),
+    scored.filter(isSimp),
+    scored,
+  ].find(b => b.length);
+  pool.sort((a, b) => b.cjk - a.cjk || b.simp - a.simp);
+  const best = pool[0];
+  const val = {
+    pick: { source: best.x.source, url: best.x.url || '', ext: best.x.ext || 'srt', id: best.x.id || '', lang: best.x.lang || '', name: best.x.name || '' },
+    code, cjk: best.cjk, trad: best.trad, simp: best.simp, tried: scored.length,
+  };
+  if (subPickCache.size > 200) subPickCache.clear();   // 就一个内存小抄, 别无限长
+  subPickCache.set(ck, { at: Date.now(), val });
+  return val;
+}
 
 
 const LOCAL_DEFAULT = { enabled: true, name: '本地媒体', exts: ['mp4', 'mkv', 'avi', 'mov', 'm4v', 'webm', 'flv', 'wmv', 'rmvb', 'ts', 'm2ts', 'mts'], rescan: 60, dirs: [] };
@@ -4033,6 +4142,8 @@ async function api(route, q, res, req) {
     if (r.error) return send(res, 404, r.error, 'text/plain; charset=utf-8');
     return send(res, 200, r.vtt, 'text/vtt; charset=utf-8');
   }
+  // 成人资源的默认字幕: 按番号搜一遍, 把候选正文下下来比字数和简繁, 挑一条最好的 (见 subtitlePick)
+  if (route === 'subtitle/pick') return send(res, 200, (await subtitlePick(q.get('code') || '', q.get('q') || '')) || { pick: null });
   if (route === 'probe') return send(res, 200, await probeStream(q.get('u') || ''));
   if (route === 'speed') return send(res, 200, await speedOf(q.get('u') || '', q.get('fresh') === '1'));
   // 自动识别片头 / 片尾 / 每集重复的广告: 立刻返回，没算完是 pending，客户端过一会儿再问

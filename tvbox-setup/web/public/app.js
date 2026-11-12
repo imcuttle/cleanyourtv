@@ -3906,7 +3906,7 @@ async function subInit() {
     try { const r = await api('local/subs', { id: mine.fileId }, null); if (subState === mine) mine.local = r?.subs || []; } catch {}
   }
   if (subState !== mine) return;
-  const choice = await subPickFor(mine, saved, name);
+  const choice = await subPickFor(mine, saved, name, { adult: isJav(cur?.d) });
   if (subState !== mine) return;
   applySub(choice, false);
 }
@@ -4031,6 +4031,23 @@ function subPickBest(list, g) {
   }
   return best;
 }
+// 成人资源: 默认字幕让服务端按番号挑一条 —— 迅雷的候选里名字对得上番号的、简体的、字数最多的那条
+// (见 server.js 的 subtitlePick)。这里挑不了: 迅雷按番号搜会把邻居番号 (SSIS-0012 / SSIS-0010) 甚至别的剧一起带回来,
+// 光看「源 + 语言标签」经常挂到别的片上去; 而候选正文在别的域, 前端拿不到, 只能服务端下下来数字数。
+// 返回 { pick, reason } —— reason='no-code-match' 表示一条都没匹配上番号 (别退回去硬挑)。
+async function subPickAdult(name, code) {
+  if (!code) return null;
+  let timer = 0;
+  try {
+    const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    if (ctl) timer = setTimeout(() => ctl.abort(), 9000);   // 服务端自己有 7s 预算, 这里再兜一层
+    const j = await api('subtitle/pick', { code, q: String(name || '').trim() }, ctl ? ctl.signal : undefined);
+    if (!j) return null;
+    const p = j.pick;
+    if (p && !(p.url || p.id)) return null;
+    return j;
+  } catch { return null; } finally { clearTimeout(timer); }
+}
 // 上一个看过的那部片, 字幕最后是开着还是关着 (不管是因为自己存过、还是跟着上一次自动接上的)。
 // 每次给「当前这屏 / 当前这部片」定下字幕状态就记一次 (邻居屏的预载不算); null = 还没播过, 用最近一次手动设置兜底。
 // 用它决定: 下一部片要不要默认开字幕 / 邻居屏要不要提前把候选 (含远端搜索) 准备好。
@@ -4044,13 +4061,30 @@ function subWantOn() {
 }
 // saved: 这一集自己存过的选择 (undefined = 从没选过 / 没记录)
 // opts.noRemote: 不许打远端 (离线, 或者这是「上一屏」这种不需要提前准备的邻居)
+// opts.adult: 成人资源 —— 默认那条走「番号 + 迅雷 + 简体字数最多」, 见 subPickAdult
 async function subPickFor(mine, saved, name, opts = {}) {
   if (saved !== undefined) return saved === null || saved.mode === 'off' ? null : saved;
   if (!subWantOn()) return null;
   const g = subGlobalPref.get() || {};
   const local = mine.local || [];
-  const hit = local.find(x => subSameLang(x.lang, g.lang)) || local[0];
+  const adult = !!opts.adult;
+  // 本机同名字幕 (视频旁边那个文件) 一定对得上, 还是先上; 成人资源只额外要求它看着像中文,
+  // 是个没语言的英文 / 日文轨就别占着位置了, 让下面的番号匹配接手。
+  const hit = local.find(x => subSameLang(x.lang, g.lang)) || (adult ? local.find(x => subZhLike(x.lang)) : local[0]);
   if (hit) return { mode: 'local', key: hit.key, lang: hit.lang };
+  // 成人资源: 番号匹配出的简体字幕。用户明确把语言偏好设成英文 / 日文之类 (不是中文) 时不抢,
+  // 那种情况按他自己的偏好来 (下面的老逻辑)。
+  if (adult && !opts.noRemote && (!g.lang || subZhLike(g.lang))) {
+    const r = await subPickAdult(name, javCode(name));
+    if (r && r.pick) {
+      // 挑出来的这条也摆进候选列表: 打开面板能看到现在挂的是哪条, 也能顺手换成别的
+      mine.remote = subUniq([r.pick, ...(mine.remote || [])]);
+      return subChoiceOf(r.pick);
+    }
+    // 番号一条都没匹配上: 别退回去按「源 + 语言」硬挑一条别的片的字幕, 宁可不挂 (面板里还能手动选);
+    // 本机确实有字幕 (哪怕不是中文) 就用它, 别把手上现成的那条浪费掉。
+    if (r && r.reason === 'no-code-match') return local[0] ? { mode: 'local', key: local[0].key, lang: local[0].lang } : null;
+  }
   const used = (mine.used || []).find(x => subUsable(x));
   if (used) return subChoiceOf(used);
   if (opts.noRemote) return null;

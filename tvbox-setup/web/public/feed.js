@@ -579,7 +579,7 @@ async function subWarmNext() {
   if (!mine || !e || mine.active) return;
   const saved = subSavedFor(mine.key);
   if (saved !== undefined) return;
-  const choice = await subPickFor(mine, undefined, nx.d?.name || e.name);
+  const choice = await subPickFor(mine, undefined, nx.d?.name || e.name, { adult: isJav(nx.d || nx.it) });
   if (nx.sub !== mine || mine.active) return;
   subApply(nx, choice, false);
   mine.settled = true;
@@ -610,7 +610,7 @@ async function subEnsure(s) {
     try { const r = await api('local/subs', { id: mine.fileId }, null); if (s.sub === mine) mine.local = r?.subs || []; } catch {}
   }
   if (s.sub !== mine) return;
-  const choice = await subPickFor(mine, saved, name, { noRemote: !wantRemote });
+  const choice = await subPickFor(mine, saved, name, { noRemote: !wantRemote, adult: isJav(s.d || s.it) });
   if (s.sub !== mine) return;
   subApply(s, choice, false);
   mine.settled = true;
