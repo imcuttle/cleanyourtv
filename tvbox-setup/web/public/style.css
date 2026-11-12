@@ -1276,7 +1276,8 @@ nav .mine { display: none; }
 .fd-full { display: none; }
 .fd-slide.land video, .fd-slide.land .fd-cover { transform: translateY(calc(-1 * var(--lshift, 0px))); }
 #feed .fd-slide.land:not(.empty) .fd-full { display: flex; position: absolute; z-index: 3; left: 50%; top: var(--lbtn); transform: translateX(-50%); align-items: center; gap: 3px; padding: 2px 8px 2px 6px;
-  border-radius: 11px; border: 1px solid #ffffff14; background: #ffffff0f; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-size: 12px; line-height: 1.2; color: #fff; white-space: nowrap; }
+  border-radius: 11px; border: 1px solid #ffffff14; background: #ffffff0f; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-size: 12px; line-height: 1.2; color: #fff; white-space: nowrap;
+  transition: opacity .2s ease; }
 .fd-full svg { width: 10px; height: 10px; }
 @media (hover: none), (pointer: coarse) {
 }
@@ -2317,6 +2318,8 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .zoomtag:active { background: #000d; }
 #feed .fd-info, #feed .fd-shade { transition: opacity .2s; }
 #feed.zoomed .fd-info, #feed.zoomed .fd-shade { opacity: 0; }
+/* 放大看画面时「全屏观看」也一起淡出: 那时它正好压在画面底部 / 字幕上, 点它还会跳出沉浸页 */
+#feed.zoomed .fd-full { opacity: 0; pointer-events: none; }
 
 /* ---- 重复视频页 (#/dups) 和某一组的详情浮窗 ---- */
 .dups .dupbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; margin: 0 0 12px; }

@@ -163,16 +163,23 @@ function layout(e) {
   let cw = b.w, ch = b.h;
   if (vw && vh && fit === 'contain') { const k = Math.min(b.w / vw, b.h / vh); cw = vw * k; ch = vh * k; }   // contain: 画面居中, 四周是黑边
   let left = b.x + (b.w - cw) / 2, top = b.y + (b.h - ch) / 2;
-  // 放大镜: 以 <video> 元素中心为原点点缩放, 画面跟着放大 / 平移
   const z = zoomOf(v);
   // 样式本身带的位移 (沉浸页的横屏片上提是写在 <video> 的 transform 上的); 放大镜占了 transform 时以它为准
+  let ox = 0, oy = 0;
   if (!z.inline) {
     const tf = getComputedStyle(v).transform;
-    if (tf && tf !== 'none') { try { const m = new DOMMatrixReadOnly(tf); left += m.e; top += m.f; } catch {} }
+    if (tf && tf !== 'none') { try { const m = new DOMMatrixReadOnly(tf); ox = m.e; oy = m.f; } catch {} }
   }
+  // 放大镜 (zoom.js 的 translate / scale 属性): 浏览器是围着 <video> 元素中心 (transform-origin 50% 50%) 变的,
+  // 画面在元素里不居中时 (沉浸页横屏片整体上提、上下有黑边) 会连同这段偏移一起被推到别处。
+  // 顺序照 CSS 来: 先 transform (上提 / 位移) → 再以元素中心缩放 → 最后 translate。按这个算, 放大后字幕才和画面严丝合缝。
+  // (以前拿「画面中心」当缩放原点, 画面偏离元素中心时越放大偏得越多, 横屏片上字幕会掉到画面下面去。)
+  left += ox; top += oy;
   if (z.s !== 1 || z.x || z.y) {
-    const cx = left + cw / 2 + z.x, cy = top + ch / 2 + z.y;    // 缩放中心 = 画面中心 (contain 时画面在元素里居中)
-    cw *= z.s; ch *= z.s; left = cx - cw / 2; top = cy - ch / 2;
+    const ex = b.x + b.w / 2, ey = b.y + b.h / 2;
+    left = ex + (left - ex) * z.s + z.x;
+    top = ey + (top - ey) * z.s + z.y;
+    cw *= z.s; ch *= z.s;
   }
   // 只画在容器看得见的那一块里: 画面放大到屏幕外时, 字幕跟着画面走, 但不会被 overflow 裁掉、也不会跑到画面外看不见。
   // 画面没被裁时这块就是画面本身, 和以前的算法完全一样。
@@ -181,11 +188,17 @@ function layout(e) {
   if (bw < 12 || bh < 12) { ov.hidden = true; e.sig = ''; return; }
   ov.hidden = false;
   const st = style();
-  // 字号跟画面高度走 (横屏片在竖屏手机上画面只有 200 多 px 高, 再兜一个按屏幕短边算的下限, 不然小得没法读)
-  const fs = clamp(Math.max(ch * 0.048, Math.min(HW, HH) * 0.036) * st.size / 100, 11, 96);
+  // 字号跟画面高度走 (横屏片在竖屏手机上画面只有 200 多 px 高, 再兜一个按屏幕短边算的下限, 不然小得没法读)。
+  // 放大镜放大时用「没放大前的画面高度」算基准再乘倍数: 直接拿放大后的高度算的话, 那个按屏幕短边的下限会原地不动,
+  // 把比例吃掉 (横屏片 2× 时字号只长到 1.5×), 放大后字和画面就对不上了。
+  const ch0 = ch / z.s;
+  const fs = clamp(Math.max(ch0 * 0.048, Math.min(HW, HH) * 0.036) * st.size / 100, 11, 96) * z.s;
   // 底部留白: 位置设置 (% 画面高度) + 调用方要求的避让 (普通播放器的控制条 / 沉浸页底部的标题, 见 app.js、feed.js)
   let gap = ch * st.bottom / 100;
   if (e.reserve) { try { const r = +e.reserve({ x: x0, y: y0, w: bw, h: bh }); if (r > 0) gap += r; } catch {} }
+  // 画面放大到画面底边出了屏幕 (叠加层被裁到容器底边): 留白按放大倍数一起变大就没边了 (6× 时能飘到半屏),
+  // 这时候收到可见高度的 18%; 画面底边还在屏幕里时一分不改, 比例始终是准的。
+  if (top + ch > HH) gap = Math.min(gap, bh * 0.18);
   gap = Math.min(gap, bh * 0.72);
   // 什么都没变就不碰 DOM (tick 里每 500ms 会重算一次, 免得白白触发样式重算)
   const sig = [x0, y0, bw, bh, fs, gap].map(n => Math.round(n * 10)).join() + '|' + [st.font, st.size, st.size2, st.color, st.edge, st.bottom].join();
@@ -198,6 +211,8 @@ function layout(e) {
   applyVars(ov, st, fs, gap);
 }
 function text(e, s) {
+  // 同一行出现两遍 (滚动式字幕 / 双语文件里同一条 cue 被写了两遍) 只留一份: 否则画面底部会多出一块一模一样的字幕
+  if (s) s = [...new Set(s.split('\n'))].join('\n');
   if (!e.cap || e.txt === s) return;
   e.txt = s;
   // 一段字幕里的换行就是「主 / 副」的分界: 第一行是主字幕, 第二行及之后是副字幕 (双语文件常见)。

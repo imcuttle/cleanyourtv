@@ -537,10 +537,11 @@ function subTrackUrl(sub, choice) {
   if (choice.mode === 'remote') return '/api/subtitle/fetch?' + new URLSearchParams({ source: choice.source || '', url: choice.url || '', ext: choice.ext || 'srt', id: choice.id || '' });
   return '';
 }
-// 画面下半部分被底部的标题 / 简介压住时, 字幕停在它们上面 (横屏片上提以后画面在上半部分, 这里算出来是 0, 字幕就贴画面底)
+// 画面下半部分被底部的标题 / 简介压住时, 字幕停在它们上面 (横屏片上提以后画面在上半部分, 这里算出来是 0, 字幕就贴画面底)。
+// 放大镜放大以后底部那层文字整体淡出了 (style.css 的 #feed.zoomed), 就不用再给它让位置, 否则字幕会被顶到画面中间。
 function feedReserve(s, r) {
   const inf = s.el.querySelector('.fd-info');
-  if (!inf || s.el.classList.contains('empty')) return 0;
+  if (!inf || s.el.classList.contains('empty') || root.classList.contains('zoomed')) return 0;
   const bottom = r.y + r.h, top = inf.offsetTop - 10;
   return Math.max(0, Math.min(r.h * .5, bottom - top));
 }
