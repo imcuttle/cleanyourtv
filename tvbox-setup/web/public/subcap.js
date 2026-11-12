@@ -189,10 +189,10 @@ function layout(e) {
   ov.hidden = false;
   const st = style();
   // 字号跟画面高度走 (横屏片在竖屏手机上画面只有 200 多 px 高, 再兜一个按屏幕短边算的下限, 不然小得没法读)。
-  // 放大镜放大时用「没放大前的画面高度」算基准再乘倍数: 直接拿放大后的高度算的话, 那个按屏幕短边的下限会原地不动,
-  // 把比例吃掉 (横屏片 2× 时字号只长到 1.5×), 放大后字和画面就对不上了。
+  // 放大镜只放大画面, 不放大字: 基准一律用「没放大前的画面高度」(ch / z.s) 算, 放大 2× / 3× 字号一分不变,
+  // 字的块头跟屏幕上那台手机一致, 不会放大到糊成一片。位置仍旧跟着画面走 (见下面的 gap)。
   const ch0 = ch / z.s;
-  const fs = clamp(Math.max(ch0 * 0.048, Math.min(HW, HH) * 0.036) * st.size / 100, 11, 96) * z.s;
+  const fs = clamp(Math.max(ch0 * 0.048, Math.min(HW, HH) * 0.036) * st.size / 100, 11, 96);
   // 底部留白: 位置设置 (% 画面高度) + 调用方要求的避让 (普通播放器的控制条 / 沉浸页底部的标题, 见 app.js、feed.js)
   let gap = ch * st.bottom / 100;
   if (e.reserve) { try { const r = +e.reserve({ x: x0, y: y0, w: bw, h: bh }); if (r > 0) gap += r; } catch {} }
