@@ -1644,7 +1644,7 @@ function card(it, opts = {}) {
   const data = it.douban ? `data-db="${esc(it.name)}"` : `data-site="${esc(it.site)}" data-id="${esc(it.id)}"${isJav(it) ? ` data-jav="${esc(javCode(it.name))}"` : ''}`;
   const rate = it.douban ? (it.rate ? `<span class="db">${esc(it.rate)}</span>` : '')
     : isJav(it) ? `<span class="db" hidden data-javfb data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`
-    : isLocalKey(it.site) ? '' : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
+    : isLocalKey(it.site) ? `${it.bytes ? `<span class="sz">${fmtSize(it.bytes)}</span>` : ''}` : `<span class="db" hidden data-n="${esc(it.name)}" data-y="${esc(it.year || '')}"></span>`;
   return `<a class="card${opts.rank ? ' top' : ''}" href="${esc(href)}" ${data}${pv}${opts.removable ? ` data-rm="${opts.removable}"` : ''}>${opts.rank ? `<span class="num">${opts.rank}</span>` : ''}
     <div class="img${it.pic ? '' : ' noimg'}">${it.pic ? posterImg(it.pic) : ''}<span class="ph">${esc(it.name)}</span>${qChip(vodQ(it))}${rate}${opts.dup > 1 ? `<span class="dup" title="${esc(opts.dupTitle || '')}">${opts.dup} 源</span>` : ''}
       ${pct ? `<div class="prog"><i style="width:${pct}%"></i></div>` : ''}</div>
@@ -2388,29 +2388,36 @@ const SORTS = {
   year: ['年份', (a, b) => (parseInt(b.year) || 0) - (parseInt(a.year) || 0) || (b.time || '').localeCompare(a.time || '')],
   quality: ['画质', (a, b) => (Q_RANK[b.quality] ?? -1) - (Q_RANK[a.quality] ?? -1)],
   name: ['名称', (a, b) => (a.name || '').localeCompare(b.name || '', 'zh')],
+  size: ['大小 大→小', (a, b) => (b.bytes || 0) - (a.bytes || 0)],       // 本地媒体: 整部 (所有集) 的字节数
+  size_asc: ['大小 小→大', (a, b) => (a.bytes || 0) - (b.bytes || 0)],
 };
 // '' = 不排序 (保持原顺序)
 const sortPref = (key, allowed) => ({ get: () => allowed.includes(localStorage[key]) ? localStorage[key] : '', set(v) { localStorage[key] = v; } });
 // 桌面: 原生下拉。手机 (≤760px): 同一个 select 藏起来当数据源，露出一个按钮，点开是底部上拉浮窗 (openSortSheet)
 const sortSelect = (id, cur, first, keys, tip) => `<div class="ssort" title="${esc(tip)}"><span>排序</span><select id="${id}"><option value="">${first}</option>${keys.map(k => `<option value="${k}"${k === cur ? ' selected' : ''}>${SORTS[k][0]}</option>`).join('')}</select><button type="button" class="sbtn" data-for="${id}" aria-haspopup="listbox">${esc(cur ? SORTS[cur][0] : first)}</button></div>`;
-const catSort = sortPref('catSort', ['time', 'year', 'name']);
+const catSort = sortPref('catSort', ['time', 'year', 'name', 'size', 'size_asc']);
 
 // ---------- category grid (infinite scroll) ----------
 async function renderCategory(t, name, siteKey) {
   const site = state.sites.some(x => x.key === siteKey) ? siteKey : state.site;
   const other = site !== state.site ? state.sites.find(x => x.key === site)?.name : '';
-  let mode = ['time', 'year', 'name'].includes(hashParams().get('s')) ? hashParams().get('s') : catSort.get();
+  const local = isLocalKey(site);
+  const sortKeys = local ? ['time', 'year', 'name', 'size', 'size_asc'] : ['time', 'year', 'name'];
+  const want = hashParams().get('s') || catSort.get();
+  let mode = sortKeys.includes(want) ? want : '';
+  // 按大小是整库排的 (连着分页一起), 只能由服务端排; 其余在本页里排已加载的那些
+  let byParam = local && /^size(_asc)?$/.test(mode) ? mode : '';
   const base = [];                                         // everything loaded so far, in load order
   const order = list => mode ? [...list].sort(SORTS[mode][1]) : list;
-  const head = `<div class="page"><div class="pagehead cathead">${BACK_BTN}<h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><button class="small ibs feedgo" data-feed="cat" data-t="${esc(t || '')}" data-name="${esc(name || '全部')}" data-site="${esc(site)}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button></div><div class="stool">${sortSelect('cSort', mode, '默认', ['time', 'year', 'name'], '只对已加载的内容排序；继续下滑加载的新内容在各自这一批里排序')}</div><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
-  let pg = 0, count = 1, busy = false;
+  const head = `<div class="page"><div class="pagehead cathead">${BACK_BTN}<h1>${esc(name || '全部')}${other ? ` <span class="role">${esc(other)}</span>` : ''}</h1><button class="small ibs feedgo" data-feed="cat" data-t="${esc(t || '')}" data-name="${esc(name || '全部')}" data-site="${esc(site)}" title="沉浸观看" aria-label="沉浸观看">${IC.feed}</button></div><div class="stool">${sortSelect('cSort', mode, '默认', sortKeys, local ? '按大小是整库排序；其余只对已加载的内容排序' : '只对已加载的内容排序；继续下滑加载的新内容在各自这一批里排序')}</div><div class="grid" id="grid"></div><div id="tail">${spinner}</div></div>`;
+  let pg = 0, count = 1, busy = false, gen = 0;   // gen: 换排序会清空重拉, 上一轮还在飞的请求回来时丢掉
   const seen = new Set();
   const sk = history.state?.sk;
   const wantPages = keepView && sk ? Math.max(1, Math.min(scrollMap[sk + '#p'] || 1, 12)) : 1;
   if (!keepView) view.innerHTML = head;
   else {                                                   // coming Back: fetch the pages seen before in parallel, paint once
     let js;
-    try { js = await Promise.all(Array.from({ length: wantPages }, (_, i) => api('list', { site, t, pg: i + 1 }))); }
+    try { js = await Promise.all(Array.from({ length: wantPages }, (_, i) => api('list', { site, t, pg: i + 1, ...(byParam ? { by: byParam } : {}) }))); }
     catch (e) { if (isAbort(e)) return; js = null; }
     if (js && js[0]) {
       view.innerHTML = head;
@@ -2427,11 +2434,12 @@ async function renderCategory(t, name, siteKey) {
   const more = async () => {
     if (busy || pg >= count || !$('#grid')) return;
     busy = true;
+    const my = gen;
     let j;
-    try { j = await api('list', { site, t, pg: pg + 1 }); }
+    try { j = await api('list', { site, t, pg: pg + 1, ...(byParam ? { by: byParam } : {}) }); }
     catch (e) {
       busy = false;
-      if (isAbort(e)) return;
+      if (isAbort(e) || my !== gen) return;
       // 这一页没拿到 (超时 / 源出错): 留在原地给一个重试, 不要一直转圈 (也不能让 busy 卡住, 那样滚动再也拉不动)
       const tail = $('#tail');
       if (tail) {
@@ -2441,6 +2449,7 @@ async function renderCategory(t, name, siteKey) {
       }
       return;
     }
+    if (my !== gen) return;                                 // 期间换了排序: 这一页作废
     pg = j.page; count = j.pagecount;
     if (sk) saveScroll(sk + '#p', pg);                      // how deep this entry was, so Back can rebuild it at once
     const fresh = j.list.filter(it => !seen.has(it.id) && seen.add(it.id));
@@ -2457,6 +2466,14 @@ async function renderCategory(t, name, siteKey) {
   $('#cSort', view).onchange = e => {
     mode = e.target.value; catSort.set(mode); setQuery({ s: mode });
     const g = $('#grid'); if (!g) return;
+    const by = /^size(_asc)?$/.test(mode) ? mode : '';
+    if (local && by !== byParam) {
+      // 换到 / 换出「按大小」: 排序在服务端, 得从头拉, 只重排已加载的几页没有意义
+      byParam = by; gen++; base.length = 0; seen.clear(); pg = 0; count = 1; busy = false;
+      g.innerHTML = ''; if ($('#tail')) $('#tail').innerHTML = spinner;
+      more().catch(() => { busy = false; });
+      return;
+    }
     g.innerHTML = order(base).map(it => card(it)).join('');
     observeRatings(g); observeJav(g);
   };
@@ -2465,7 +2482,7 @@ async function renderCategory(t, name, siteKey) {
   const sig = pageCtl.signal;
   // revalidate：第一页有新片，插到网格最前面（已有的不动；页面滚到下面时补偿高度，不跳）
   swrWatch((route, p, body) => {
-    if (route !== 'list' || p.site !== site || (p.t || '') !== (t || '') || String(p.pg) !== '1') return;
+    if (route !== 'list' || p.site !== site || (p.t || '') !== (t || '') || String(p.pg) !== '1' || (p.by || '') !== byParam) return;
     const g = $('#grid'); if (!g) return;
     const nu = body.list.filter(it => !seen.has(it.id) && seen.add(it.id)); if (!nu.length) return;
     const h = view.scrollHeight;

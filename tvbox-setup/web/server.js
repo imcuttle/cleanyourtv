@@ -1036,6 +1036,7 @@ function item(site, d) {
   const p1 = firstPlay(site, d);
   return { site: site.key, siteName: site.name, id: str(d.vod_id), name: str(d.vod_name), pic: str(d.vod_pic),
     remarks: str(d.vod_remarks), type: str(d.type_name), typeId: str(d.type_id), year: str(d.vod_year), area: str(d.vod_area), time: str(d.vod_time),
+    ...(Number(d.vod_size) > 0 ? { bytes: Number(d.vod_size) } : {}),   // 本地媒体才有: 按文件大小排序用
     quality: qualityOf(d.vod_remarks, d.vod_version, d.vod_name), blurb: clean(d.vod_content).slice(0, 300),
     ...(adult ? { adult } : {}), ...(p1 ? { p1 } : {}) };
 }
@@ -2772,6 +2773,13 @@ function localCms(params, base, srcId) {
     list = snap.items.filter(it => ok.has(it.cat) && (!t || it.cat === t)
       && (!wd || it.name.toLowerCase().includes(wd) || str(it.actor).toLowerCase().includes(wd)));
   }
+  // 按文件大小整库排序 (本地索引就在手上, 不用像远程源那样只排已加载的几页)
+  const by = str(params.by);
+  if (!ids.length && (by === 'size' || by === 'size_asc')) {
+    const sz = new Map(list.map(it => [it, it.files.reduce((n, f) => n + f.size, 0)]));
+    const dir = by === 'size_asc' ? 1 : -1;
+    list = [...list].sort((a, b) => dir * (sz.get(a) - sz.get(b)));
+  }
   const pg = Math.max(1, Number(params.pg) || 1);
   const page = ids.length ? list : list.slice((pg - 1) * LOCAL_PAGE, pg * LOCAL_PAGE);
   return { code: 1, msg: '数据列表', page: pg, pagecount: Math.max(1, Math.ceil(list.length / LOCAL_PAGE)), limit: String(LOCAL_PAGE),
@@ -2786,6 +2794,7 @@ function localVod(it, type, base) {
     vod_remarks: it.files.length > 1 ? `${it.files.length}集` : fmtBytes(size), vod_version: it.quality || '',
     vod_content: it.plot || `${it.files.length} 个文件 · ${fmtBytes(size)}`,
     vod_time: new Date(it.mtime).toISOString().replace('T', ' ').slice(0, 19),
+    vod_size: size,   // 整部 (所有集) 的字节数: 列表页可以按大小排
     vod_play_from: '本地', vod_play_url: it.files.map(f => `${f.name}$${url(f)}`).join('#') };
 }
 
@@ -4452,7 +4461,8 @@ async function api(route, q, res, req) {
     let t = q.get('t') || '';
     // Whitelisted (e.g. 少儿) sites: "latest" comes from their first allowed category.
     if (!t && (site.categories || safety.level === 'kids')) t = (await categories(site))[0]?.id || '';
-    const b = await cmsGet(site, { ac: 'detail', t, pg: q.get('pg') || '1' });
+    // by: 只有本地媒体认 (整库排序), 别的源别把这个参数抛给上游
+    const b = await cmsGet(site, { ac: 'detail', t, pg: q.get('pg') || '1', ...(site.local ? { by: q.get('by') || '' } : {}) });
     return send(res, 200, { list: (b.list || []).map(d => item(site, d)).filter(it => itemOk(site, it)),
       page: Number(b.page) || 1, pagecount: Number(b.pagecount) || 1 });
   }

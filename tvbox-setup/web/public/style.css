@@ -2079,6 +2079,8 @@ body.detail-wait .modal:not(.under-modal) { visibility: hidden; }
 .card .img .q, .card .db, .card .jav { box-sizing: border-box; display: inline-flex; align-items: center; height: 15px; padding: 0 4px; font-size: 9.5px; line-height: 1; font-weight: 800; letter-spacing: 0; border-radius: 3px; font-variant-numeric: tabular-nums; }
 .card .img .q { left: 5px; top: 5px; }
 .card .db, .card .jav { right: 5px; bottom: 5px; }
+/* 本地媒体卡片: 右下角是整部大小 (本地卡片没有评分角标, 这个位置空着) */
+.card .sz { position: absolute; right: 5px; bottom: 5px; z-index: 1; box-sizing: border-box; display: inline-flex; align-items: center; height: 15px; padding: 0 4px; font-size: 9.5px; line-height: 1; font-weight: 800; border-radius: 3px; background: #000000a8; color: #e8e8e8; box-shadow: 0 1px 4px #0006; font-variant-numeric: tabular-nums; }
 @media (max-width: 760px) {
   .metaRow .tag:not([hidden]):not(:empty), .metaRow .dbtag:not([hidden]):not(:empty), .metaRow .q.big { box-sizing: border-box; display: inline-flex; align-items: center; height: 21px; padding: 0 7px; font-size: 12px; font-weight: 700; line-height: 1; border-radius: 4px; }
   .metaRow .dbtag { margin-right: 0; }
