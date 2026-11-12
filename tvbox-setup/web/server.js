@@ -468,12 +468,12 @@ function drainMedia() {
 }
 function ffmpeg(args, ms, nice, signal) {
   return new Promise((ok, bad) => {
-    if (signal?.aborted) return bad(new Error('aborted'));
+    if (signal?.aborted) return bad(abortErr());
     const p = spawn(FFMPEG, args, { stdio: 'ignore', windowsHide: true });
     signal?.addEventListener('abort', () => p.kill('SIGKILL'), { once: true });
     if (nice) try { os.setPriority(p.pid, nice); } catch {} // background work yields to request handling
     const t = setTimeout(() => p.kill('SIGKILL'), ms);
-    p.on('exit', code => { clearTimeout(t); code === 0 ? ok() : bad(new Error('ffmpeg exit ' + code)); });
+    p.on('exit', code => { clearTimeout(t); if (signal?.aborted) return bad(abortErr()); code === 0 ? ok() : bad(new Error('ffmpeg exit ' + code)); });
     p.on('error', e => { clearTimeout(t); bad(e); });
   });
 }
@@ -3345,7 +3345,8 @@ function drainThumbs() {
 rpcHandlers.localThumb = ({ id }, ctx) => localThumb(id, ctx?.signal);
 async function localThumb(id, signal) {
   const hot = hotGet(id);
-  if (hot) return hot;
+  // 「热」缓存里记的是路径: 文件可能已经被清理 (清缓存 / 系统清空间 / 手动删) 了, 别再一直回一个 404
+  if (hot) { if (await fsp.access(hot).then(() => true, () => false)) return hot; thumbHot.delete(id); }
   const it = localIndex().byItem.get(id);
   if (!it) return null;
   const pic = it.pic ? await io(() => fsp.stat(it.pic)).catch(() => null) : null;
@@ -3420,9 +3421,18 @@ function drainGifs() {
 }
 if (IS_MEDIA) setInterval(() => { if (gifQ.length) drainGifs(); }, 1500).unref(); // the gate opens without an event of its own
 rpcHandlers.localGif = ({ id }, ctx) => localGif(id, ctx?.signal);
+// hover 预览: 鼠标移开卡片 → 浏览器断开这个请求 → 这里没人要了就立刻收工。
+// 按文件记引用: 还在排队的撤掉, 已经在跑的 ffmpeg 直接杀掉 (一次 gif 要转好几秒, 不能为看不见的卡片空转)。
+const gifCtl = new Map();   // file -> { refs, ctl, job }
+function gifLeave(file) {
+  const e = gifCtl.get(file);
+  if (!e || --e.refs > 0) return;
+  gifCtl.delete(file);
+  e.ctl.abort();
+}
 async function localGif(id, signal) {
   const hot = gifHot.get(id);
-  if (hot) { gifHot.delete(id); gifHot.set(id, hot); return hot; }
+  if (hot) { if (await fsp.access(hot).then(() => true, () => false)) { gifHot.delete(id); gifHot.set(id, hot); return hot; } gifHot.delete(id); }
   const it = localIndex().byItem.get(id);
   if (!it || !FFMPEG) return null;
   const f = it.files[0];
@@ -3434,34 +3444,42 @@ async function localGif(id, signal) {
   const keep = () => { gifHot.delete(id); gifHot.set(id, file); if (gifHot.size > GIF_HOT_MAX) gifHot.delete(gifHot.keys().next().value); return file; };
   if (done) { fsp.utimes(file, new Date(), new Date()).catch(() => {}); return keep(); } // touch = LRU stamp for pruning
   if (Date.now() - (gifFail.get(id) || 0) < 3600e3) return null;
-  const key = 'lg|' + file;
-  if (!mediaJobs.has(key)) {
-    const tmp = file.replace(/\.gif$/, '.tmp.gif');
-    const run = async () => {
-      const { duration: dur = 0 } = await mediaInfo(f.path);
-      const clip = dur >= 40 ? 2 : 5;
-      const starts = dur >= 40 ? [0.15, 0.45, 0.75].map(p => dur * p) : dur >= 8 ? [Math.min(dur * 0.25, dur - 5.5)] : [0];
-      const inputs = starts.flatMap(t => ['-ss', t.toFixed(2), '-t', String(clip), '-i', f.path]);
-      const chains = starts.map((_, n) => `[${n}:v:0]fps=6,${GIF_FIT},setpts=PTS-STARTPTS[v${n}]`);
-      if (starts.length > 1) chains.push(`${starts.map((_, n) => `[v${n}]`).join('')}concat=n=${starts.length}:v=1:a=0[c]`);
-      const fc = [...chains, `${starts.length > 1 ? '[c]' : '[v0]'}split[a][b]`, '[a]palettegen=max_colors=64:stats_mode=diff[p]',
-        '[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle'].join(';');
-      const base = ['-hide_banner', '-loglevel', 'error', '-y'];
-      const tail = ['-an', '-loop', '0', tmp];
-      // Odd containers (no index) can't seek; fall back to the first 5 s.
-      return ffmpeg([...base, ...inputs, '-filter_complex', fc, ...tail], 60000, 10)
-        .catch(() => ffmpeg([...base, '-t', '5', '-i', f.path, '-an', '-vf', 'fps=6,scale=240:-2:flags=bilinear,split[a][b];[a]palettegen=max_colors=48:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', tmp], 60000, 10));
-    };
-    mediaJobs.set(key, gifJob(run, signal)
-      .then(() => fsp.rename(tmp, file)).then(keep, e => {
-        fsp.rm(tmp, { force: true }).catch(() => {});
-        if (e.message === 'busy' || e.name === 'AbortError') throw e;
-        gifFail.set(id, Date.now());
-        return null;
-      })
-      .finally(() => mediaJobs.delete(key)));
+  let e = gifCtl.get(file);
+  if (!e) gifCtl.set(file, e = { refs: 0, ctl: new AbortController(), job: null });
+  e.refs++;
+  try {
+    if (!e.job) {
+      // 每次尝试用不一样的临时文件名: 上一次被中途掐掉时的清理 (删 tmp) 不会碰到这一次正在写的那份
+      const tmp = file.replace(/\.gif$/, '.' + process.pid + '-' + Date.now() + '.tmp.gif'), sig = e.ctl.signal;
+      const run = async () => {
+        if (sig.aborted) throw abortErr();
+        const { duration: dur = 0 } = await mediaInfo(f.path);
+        const clip = dur >= 40 ? 2 : 5;
+        const starts = dur >= 40 ? [0.15, 0.45, 0.75].map(p => dur * p) : dur >= 8 ? [Math.min(dur * 0.25, dur - 5.5)] : [0];
+        const inputs = starts.flatMap(t => ['-ss', t.toFixed(2), '-t', String(clip), '-i', f.path]);
+        const chains = starts.map((_, n) => `[${n}:v:0]fps=6,${GIF_FIT},setpts=PTS-STARTPTS[v${n}]`);
+        if (starts.length > 1) chains.push(`${starts.map((_, n) => `[v${n}]`).join('')}concat=n=${starts.length}:v=1:a=0[c]`);
+        const fc = [...chains, `${starts.length > 1 ? '[c]' : '[v0]'}split[a][b]`, '[a]palettegen=max_colors=64:stats_mode=diff[p]',
+          '[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle'].join(';');
+        const base = ['-hide_banner', '-loglevel', 'error', '-y'];
+        const tail = ['-an', '-loop', '0', tmp];
+        // Odd containers (no index) can't seek; fall back to the first 5 s.
+        return ffmpeg([...base, ...inputs, '-filter_complex', fc, ...tail], 60000, 10, sig)
+          .catch(err => { if (sig.aborted) throw abortErr(); return ffmpeg([...base, '-t', '5', '-i', f.path, '-an', '-vf', 'fps=6,scale=240:-2:flags=bilinear,split[a][b];[a]palettegen=max_colors=48:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', '-loop', '0', tmp], 60000, 10, sig); });
+      };
+      e.job = gifJob(run, sig)
+        .then(() => fsp.rename(tmp, file)).then(keep, err => {
+          fsp.rm(tmp, { force: true }).catch(() => {});
+          if (err.message === 'busy' || err.name === 'AbortError') throw err;
+          gifFail.set(id, Date.now());
+          return null;
+        })
+        .finally(() => { if (gifCtl.get(file) === e) e.job = null; });
+    }
+    return await raceAbort(e.job, signal);
+  } finally {
+    gifLeave(file);
   }
-  return mediaJobs.get(key);
 }
 
 // Disk caps: keep the most recently used covers / gifs (mtime is touched on first use after a restart / LRU eviction).

@@ -5321,30 +5321,42 @@ const lpvSeen = new Set();
 const LPV_GROW = { duration: 440, easing: 'cubic-bezier(.32,.72,0,1)', fill: 'forwards' };
 const LPV_FADE = { duration: 180, easing: 'ease-out', fill: 'forwards' };
 let lpv = null;
+const lpvFree = me => { if (me.obj) { try { URL.revokeObjectURL(me.obj); } catch {} me.obj = ''; } };
 function startLocalPreview(el, url, box = el) {
   if (!url || !matchMedia('(hover: hover) and (pointer: fine)').matches) return;
   if (lpv && lpv.el === el) return;
   stopLocalPreview();
-  const me = lpv = { el, box, ov: null, img: null, timer: 0, off: null };
+  const me = lpv = { el, box, ov: null, img: null, timer: 0, off: null, ctl: null, obj: '' };
+  // 鼠标移开 / 一滚动 / 切页面: 还没下载完的预览立刻断 (服务端跟着把还在转的 ffmpeg 停掉), 不再为看不见的卡片空转。
+  // 用 fetch 而不是 <img src> 就是为了能真正 abort: 换 src 只能指望浏览器自己取消, 请求会一直占着连接。
+  const off = () => { if (lpv === me) stopLocalPreview(); };
+  me.off = off;
+  addEventListener('scroll', off, { passive: true, once: true, capture: true });
+  addEventListener('resize', off, { once: true });
   me.timer = setTimeout(async () => {
     if (lpv !== me) return;
     const info = serverInfo || await infoP();
     if (lpv !== me || !info.ffmpeg) return;
+    const ctl = me.ctl = new AbortController();
     box.classList.add('pvload');
-    const img = new Image();
-    img.className = 'lpv-img'; img.decoding = 'async'; img.alt = '';
-    me.img = img;
-    img.onerror = () => {
-      if (lpv === me) { box.classList.remove('pvload'); lpv = null; }
-    };
-    img.onload = async () => {
+    try {
+      const r = await fetch(url, { signal: ctl.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const blob = await r.blob();
+      if (lpv !== me || ctl.signal.aborted || !box.isConnected) return;
+      const obj = URL.createObjectURL(blob); me.obj = obj;
+      const img = new Image();
+      img.className = 'lpv-img'; img.decoding = 'async'; img.alt = '';
+      await new Promise((ok, bad) => { img.onload = ok; img.onerror = bad; img.src = obj; });
       await img.decode().catch(() => {});                 // first frame ready before anything moves
       if (lpv !== me || !box.isConnected) return;
+      me.img = img;
       box.classList.remove('pvload');
       lpvSeen.delete(url); lpvSeen.add(url); if (lpvSeen.size > 300) lpvSeen.delete(lpvSeen.values().next().value);
       openLocalPreview(me);
-    };
-    img.src = url;
+    } catch (e) {
+      if (lpv === me) { box.classList.remove('pvload'); lpv = null; lpvFree(me); }
+    }
   }, lpvSeen.has(url) ? 120 : 350);
 }
 function openLocalPreview(me) {
@@ -5370,26 +5382,23 @@ function openLocalPreview(me) {
   document.body.append(ov);
   me.ov = ov; me.inner = inner; me.from = from; me.to = to;
   inner.animate([{ clipPath: from }, { clipPath: to }], LPV_GROW);
-  inner.animate([{ opacity: 0 }, { opacity: 1 }], LPV_FADE);
-  const off = () => { if (lpv === me) stopLocalPreview(); };
-  me.off = off;
-  addEventListener('scroll', off, { passive: true, once: true, capture: true });
-  addEventListener('resize', off, { once: true });
+  inner.animate([{ opacity: 0 }, { opacity: 1 }], LPV_FADE);   // 滚动 / resize 的监听在 startLocalPreview 就挂好了
 }
 function stopLocalPreview(immediate) {
   const me = lpv; if (!me) return;
   lpv = null;
   clearTimeout(me.timer);
+  me.ctl?.abort(); me.ctl = null;     // 还没下载完 (服务端还在做 gif) → 立刻断, 那边跟着停 ffmpeg
   me.box.classList.remove('pvload');
-  if (me.img) me.img.onload = me.img.onerror = null;
-  if (me.off) { removeEventListener('scroll', me.off, true); removeEventListener('resize', me.off); }
-  if (!me.ov) { if (me.img) me.img.src = ''; return; }
-  if (immediate) return me.ov.remove();
+  if (me.off) { removeEventListener('scroll', me.off, true); removeEventListener('resize', me.off); me.off = null; }
+  if (me.img) { me.img.onload = me.img.onerror = null; if (!me.ov) me.img.removeAttribute('src'); }
+  if (!me.ov) { lpvFree(me); return; }
+  if (immediate) { me.ov.remove(); return lpvFree(me); }
   // Fold back into the cover's rectangle, then go (a quick re-hover elsewhere can already start the next one).
   me.inner.getAnimations().forEach(x => x.cancel());
   me.inner.animate([{ clipPath: me.to }, { clipPath: me.from }], { duration: 240, easing: 'cubic-bezier(.4,0,.2,1)', fill: 'forwards' });
   const a = me.inner.animate([{ opacity: 1 }, { opacity: 1, offset: .5 }, { opacity: 0 }], { duration: 240, easing: 'linear', fill: 'forwards' });
-  a.onfinish = a.oncancel = () => me.ov.remove();
+  a.onfinish = a.oncancel = () => { me.ov.remove(); lpvFree(me); };
 }
 // The preview belongs to the cover itself. Pointing at an action on it (✕ 删除 / 取消收藏 / a link or button) is a different
 // intent and gets no hover effect: a running preview folds away and none starts until the pointer is back on the plain cover.
