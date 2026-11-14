@@ -116,6 +116,7 @@ const entries = new Map();
 function mkOverlay(video, after) {
   const ov = document.createElement('div');
   ov.className = 'subov';
+  ov.hidden = true;          // 第一次 layout 算准画面之前先别露面, 免得拿 CSS 默认字号 (20px) 闪一帧
   ov.innerHTML = '<div class="subcap"><span class="subtx"></span><span class="subtx2"></span></div>';
   (after && after.parentElement === video.parentElement ? after : video).after(ov);
   return ov;
@@ -160,6 +161,11 @@ function layout(e) {
   if (!b.w || !b.h || !HW || !HH) { ov.hidden = true; e.sig = ''; return; }
   const fit = getComputedStyle(v).objectFit || 'contain';
   const vw = v.videoWidth, vh = v.videoHeight;
+  // contain 时画面在元素里居中, 得等 loadedmetadata 拿到真实宽高比才算得准。元数据没到时 videoWidth /
+  // videoHeight 是 0, 以前会退化成「整个元素都算画面」: 沉浸页横屏片在竖屏手机上元素高 844px, 字幕按
+  // 40.5px 排版、留白 114px (真实是 14px / 15px) —— 播放开头字幕会巨大地闪一下, 元数据到了才收回去。
+  // 画面都还没出来就先不画字幕; bind 里的 loadedmetadata / resize / 500ms 兜底会补这次 layout。
+  if (fit === 'contain' && !(vw > 0 && vh > 0)) { ov.hidden = true; e.sig = ''; return; }
   let cw = b.w, ch = b.h;
   if (vw && vh && fit === 'contain') { const k = Math.min(b.w / vw, b.h / vh); cw = vw * k; ch = vh * k; }   // contain: 画面居中, 四周是黑边
   let left = b.x + (b.w - cw) / 2, top = b.y + (b.h - ch) / 2;
