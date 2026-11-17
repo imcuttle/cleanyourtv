@@ -2803,14 +2803,8 @@ const natural = (a, b) => a.localeCompare(b, 'zh-CN', { numeric: true, sensitivi
 const hashId = (s, n) => crypto.createHash('sha1').update(s).digest('hex').slice(0, n);
 // Category identity: same-named folders merge regardless of case, surrounding spaces or unicode form (NFC/NFD from NAS/macOS).
 const catId = (name, src) => hashId('c|' + (src && src !== 'local' ? src + '|' : '') + str(name).normalize('NFC').trim().toLowerCase(), 8);   // 第一个源 (local) 的分类 id 和以前一样; 别的源各算各的，同名分类不跨源合并
-// 子目录分类: 目录名前面的排序前缀 (01- / 1. / A_ / 「3 电影」) 只用来控磁盘顺序, 不算分类名 ——
-// 不剥的话分类名会变成「01-电影」, 而且 01-电影 / 02-电影 会变成两个分类而不是一个。
-const SORT_PREFIX = /^\d{1,3}\s*[-._、．)）]\s*|^[A-Za-z]\s*[-._]\s*|^\d{1,3}\s+/;
-const catName = raw => {
-  const s = str(raw).normalize('NFC').trim(), t = s.replace(SORT_PREFIX, '').trim();
-  return t || s;   // 剥光了 (目录就叫「01-」) 就保留原名
-};
-// 分类顺序: 汉字按拼音排 (localeCompare 的 zh-CN 对汉字其实是按部首/编码, 中文用户看着就是「乱序」), 数字按大小, 英文不分大小写
+// 分类名就是目录名 (原样, 不剥前缀: `01-电影` 就叫「01-电影」, 前缀是用户自己的排序手段)
+// 分类顺序: 按目录名排 —— 汉字按拼音 (localeCompare 的 zh-CN 对汉字其实是按部首/编码, 中文用户看着就是「乱序」), 数字按大小, 英文不分大小写
 const CAT_CMP = new Intl.Collator('zh-CN-u-co-pinyin', { numeric: true, sensitivity: 'base' }).compare;
 const noDelim = s => str(s).replace(/[$#]+/g, ' ').trim(); // $ and # separate episodes in 苹果CMS play lists
 const SEASON = /^(?:season|series|s)[\s._-]*(\d{1,2})$|^第\s*([一二三四五六七八九十\d]+)\s*季$/i;
@@ -2976,17 +2970,17 @@ async function scanLocal() {
       dirs.push(ds);
       const st = await io(() => fsp.stat(d.path)).catch(() => null);
       if (!st || !st.isDirectory()) { ds.error = '目录不存在或没有权限'; return []; }
-      const own = d.name || catName(path.basename(d.path)) || d.path;
+      const own = d.name || path.basename(d.path) || d.path;
       const roots = [];
       if (d.sub) {
         const subs = [];
         for (const e of await io(() => fsp.readdir(d.path, { withFileTypes: true })).catch(() => [])) {
-          if (e.isDirectory() && !SKIP_NAME.test(e.name)) subs.push({ dir: path.join(d.path, e.name), raw: e.name, name: catName(e.name) });
+          if (e.isDirectory() && !SKIP_NAME.test(e.name)) subs.push(e.name);
         }
-        // 分类顺序跟目录名走 (拼音 / 数字大小), 不再跟 readdir 的返回顺序走;
-        // 剥掉排序前缀后同名的目录合并成一个分类 (01-电影 + 02-电影 → 电影)。
-        subs.sort((a, b) => CAT_CMP(a.name, b.name) || natural(a.raw, b.raw));
-        for (const s of subs) roots.push({ dir: s.dir, cat: s.name, deep: true });
+        // 分类顺序跟目录名走 (汉字拼音 / 数字大小 / 英文不分大小写), 不再跟 readdir 的返回顺序走;
+        // 名字原样当分类名, `01-电影` 就是「01-电影」, 想让某个分类靠前就靠前缀, 不剥。
+        subs.sort((a, b) => CAT_CMP(a, b) || natural(a, b));
+        for (const s of subs) roots.push({ dir: path.join(d.path, s), cat: s, deep: true });
         roots.push({ dir: d.path, cat: own, deep: false }); // loose files in the folder itself
       } else roots.push({ dir: d.path, cat: own, deep: true });
       return Promise.all(roots.map(async r => {
