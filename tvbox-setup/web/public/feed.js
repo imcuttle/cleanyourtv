@@ -104,7 +104,7 @@ const saveLikes = () => { UD.set('feedLikes', JSON.stringify([...likes].slice(-5
 
 // ---------- state ----------
 const F = { recN: 0, names: new Set(), gen: 0, mode: 'rec', extra: null, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
-  visited: new Set(), pool: [], pcount: {}, cats: null, catsSite: '', catUsed: new Set(), catCount: 1, once: false, dir: 1, lastCats: new Set(),
+  visited: new Set(), pool: [], pcount: {}, cats: null, catsSite: '', catUsed: new Set(), catCount: 1, once: false, dir: 1, lastCats: new Set(), autoSkips: 0,
   muted: localStorage.feedMuted === '1', autoMuted: false, userPaused: false };   // autoMuted: the browser refused sound-on autoplay, muted for now only
 const AHEAD = 6;                                    // titles kept validated (detail fetched) beyond the current one
 
@@ -165,7 +165,7 @@ function mkSlide() {
   { const vol = parseFloat(localStorage.playerVolume); if (Number.isFinite(vol)) v.volume = Math.min(1, Math.max(0, vol)); }   // same level as the main player
   for (const ev of ['durationchange', 'loadedmetadata']) v.addEventListener(ev, () => { if (s === cur()) feedMarks(); });
   for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize']) v.addEventListener(ev, () => layoutLand(s));   // HLS 的画面尺寸有时晚一点才知道
-  v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); });
+  v.addEventListener('playing', () => { el.classList.remove('wait', 'paused'); F.autoSkips = 0; });   // 真播起来了: 连续跳过坏片的计数清零
   duckOnSeek(v, () => F.muted || F.autoMuted);
   const framed = () => { if (v.readyState >= 2 && v.videoWidth && !el.classList.contains('framed')) { el.classList.add('framed'); layoutLand(s); } };
   for (const ev of ['loadeddata', 'canplay', 'playing', 'seeked', 'timeupdate']) v.addEventListener(ev, framed);
@@ -247,7 +247,7 @@ function paintCover(s, it) {
 function bind(s, i) {
   teardown(s);
   const it = F.items[i] || null;
-  Object.assign(s, { i, it, d: null, err: false, watched: 0, judged: !it, loading: false, via: false, pre: false, stage: 0, compat: false, retried: false, released: false });
+  Object.assign(s, { i, it, d: null, err: false, watched: 0, judged: !it, loading: false, via: false, pre: false, stage: 0, compat: false, retried: false, released: false, transcoded: false, skipNoticed: false });
   s.msg.textContent = '';
   s.el.classList.toggle('empty', !it);
   if (!it) { s.bg.style.cssText = ''; s.cover.style.cssText = ''; s.el.classList.remove('hascover'); return; }
@@ -349,6 +349,17 @@ function fail(s, why) {
   clearTimeout(s.dog);
   if (s.released || ring.indexOf(s) < 1) return;            // 已经划过去的不再折腾
   const url = s.eps[s.ep]?.url || '';
+  // 本地原文件浏览器解不了 (HEVC / 10bit / 不支持的音轨 …): 服务端有 ffmpeg 就改成边转边播的 HLS 再试一次,
+  // 和普通播放器的 load() 是同一套兜底。换过的地址记在这一集上, 划回来 / 再看这一部直接用转码。
+  if (url.startsWith('/media/f/') && !s.transcoded && serverInfo?.ffmpeg) {
+    const id = fileIdOf(url);
+    if (id && s.eps[s.ep]) {
+      s.transcoded = true; s.tried = null; s.stage = 0; s.compat = false;
+      s.eps[s.ep].url = `/media/h/${id}/index.m3u8`;
+      s.msg.textContent = '浏览器播不了这个文件，正在转码播放…';
+      return attach(s);
+    }
+  }
   // 同一条线路依次试: 直连 -> 中转 -> 普通播放器的配置直连 -> 普通播放器的配置 + 中转
   if (!url.startsWith('/media/') && s.stage < 3) { s.stage++; s.compat = s.stage >= 2; attach(s, s.stage % 2 === 1); return; }
   s.tried = s.tried || new Set(); s.tried.add(s.line);
@@ -363,11 +374,17 @@ function fail(s, why) {
       return;
     }
   }
+  // 走到这里说明直连失败、中转 / 换线路 / 转码都试过了。本地坏文件 (缺 moov / 不是有效视频) 直接自动跳到下一部,
+  // 别停在黑屏上让人一屏一屏手动划; 连续 5 部都打不开就停下, 免得划到底。
+  const mediaBad = url.startsWith('/media/');
   s.err = true; s.el.classList.remove('wait');
-  s.msg.textContent = '这部暂时播不了' + (touchUi ? '，点一下重试，上滑看下一部' : '，点一下重试，↓ 看下一部');
-  if (s === cur() && canAutoSkip(s)) setTimeout(() => { if (s === cur() && s.err && canAutoSkip(s)) go(F.dir); }, 1200);
+  s.msg.textContent = mediaBad ? '这个文件打不开，已跳过' : '这部暂时播不了' + (touchUi ? '，点一下重试，上滑看下一部' : '，点一下重试，↓ 看下一部');
+  if (s === cur() && (mediaBad ? (++F.autoSkips <= 5) : canAutoSkip(s))) {
+    if (mediaBad && !s.skipNoticed) { s.skipNoticed = true; toast('这个文件打不开，已跳过'); }   // 直连 / 转码会各失败一次, 只提示一遍
+    setTimeout(() => { if (s === cur() && s.err) go(F.dir > 0 ? 1 : -1); }, 800);
+  }
 }
-// 只有「往回翻 (下滑) 到一部从没看过的」才会自动跳走; 上滑遇到播不了的、或下滑回到已经看过的, 都停在原地由用户决定。
+// 普通源只有「往回翻 (下滑) 到一部从没看过的」才自动跳走; 本地坏文件 (上面 mediaBad 那条) 不论方向都跳过。
 const canAutoSkip = s => F.dir < 0 && !F.visited.has(s.i);
 function retry(s) {
   if (!s.d) { bind(s, s.i); return; }
@@ -1470,4 +1487,15 @@ document.addEventListener('click', e => {
 window.openFeed = openFeed;
 window.feedOpen = () => !root.hidden;
 window.closeFeedQuiet = () => hideFeed();
+// 主播放器里删掉了一部片 (或删掉最后一集): 沉浸模式的候选 / 详情缓存里同一部也得清掉,
+// 不然划到它时还拿着旧 detail 里的播放地址 (/media/f/… 已经 404), 表现为「这部暂时播不了」。
+window.feedDrop = (site, id) => {
+  const k = site + '|' + id, hit = it => !!it && keyOf(it) === k;
+  const drop = arr => { for (let i = arr.length - 1; i >= 0; i--) if (hit(arr[i])) arr.splice(i, 1); };
+  const names = new Set([...F.items, ...F.cand, ...F.pool].filter(hit).map(nameOf));
+  drop(F.items); drop(F.cand); drop(F.pool);
+  F.keys.delete(k); names.forEach(n => F.names.delete(n));
+  F.idx = Math.max(0, Math.min(F.idx, F.items.length - 1));
+  ring.forEach(s => { if (hit(s.it)) s.it._d = null; });
+};
 })();

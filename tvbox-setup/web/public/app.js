@@ -3530,13 +3530,38 @@ async function playerTrash(quiet) {
   if (!cur || cur.kind !== 'vod' || !cur.d.local) return;
   if (!(await adminCheck(true))) return quiet || toast('需要先在设置里登录管理员');
   const d = cur.d, line = cur.line, idx = cur.ep, e = cur.eps[idx], many = cur.eps.length > 1, was = !video.paused;
+  const pl = cur.pl;                       // 顺序播放: 删完要接着播下一部, 不能退出播放器
   $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false);
   video.pause();
   if (!await trashLocal([fileIdOf(e.url)], many ? `把「${d.name} · ${e.name}」移到回收站？` : `把「${d.name}」移到回收站？`)) { if (was) video.play().catch(() => {}); return; }
   dropEpHist(d, line, idx);
   cur.eps.splice(idx, 1);                      // 和 d.lines[line].episodes 是同一个数组
-  if (cur.eps.length) { cur.ep = Math.min(idx, cur.eps.length - 1); openPlayer(epResume()); $('#modal')?.refresh?.(); return; }
-  localGone(d); closeAllOverlays();
+  if (cur.eps.length) {                      // 只删了其中一集: 接着放这一部剩下的集
+    cur.ep = Math.min(idx, cur.eps.length - 1);
+    openPlayer(epResume()); $('#modal')?.refresh?.();
+    return;
+  }
+  // 整部都没了: 记录 / 收藏 / 页面卡片 / 沉浸模式的缓存一起清掉
+  localGone(d);
+  window.feedDrop?.(d.site, d.id);
+  // 顺序播放: 把这部从列表里拿掉, 「下一部」就是原位置上的下一部, 面板和进度同步刷新
+  if (pl && cur?.pl === pl) {
+    const at = pl.items.findIndex(it => it.site === d.site && it.id === d.id);
+    if (at >= 0) pl.items.splice(at, 1);
+    if (pl.items.length) {
+      pl.idx = Math.min(at >= 0 ? at : pl.idx, pl.items.length - 1);
+      if (!$('.plist').hidden) { renderPlist(); revealPl(); }
+      toast('已删除，接着播下一部');
+      return plLoad(pl, pl.idx, 1);
+    }
+    // 手上这一批正好删空了: 分类页还能往下翻页, 翻到了就接着放
+    if (await plGrow(pl) && pl.items.length) {
+      pl.idx = 0;
+      if (!$('.plist').hidden) { renderPlist(); revealPl(); }
+      return plLoad(pl, 0, 1);
+    }
+  }
+  toast('已删除'); closeAllOverlays();
 }
 // The player's buttons are an icon plus a small label (shown on touch screens, a tooltip on desktop).
 function setL(act, text) { const b = $(`[data-act=${act}]`); if (!b) return; const l = $('.l', b); if (l) l.textContent = text; b.title = text; }
@@ -3674,6 +3699,24 @@ function showCover(url) {
   pcover.classList.remove('gone'); pcover.hidden = false;
 }
 function hideCover() { if (!pcover || pcover.hidden) return; pcover.classList.add('gone'); setTimeout(() => { if (pcover.classList.contains('gone')) pcover.hidden = true; }, 260); }
+// 顺序播放里某一部打不开 (文件损坏 / 浏览器解不了 / 连转码也失败): 别停在黑屏上, 把这部从列表剔掉接着放下一部。
+// 普通播放没有列表, 只给一句更明确的提示 (见 plainFail), 不自动换片。
+let plSkipLast = '';
+function plSkipBroken(why) {
+  const pl = cur?.pl;
+  if (!pl || !cur?.d) return false;
+  const k = cur.d.site + '|' + cur.d.id;
+  if (plSkipLast === k) return true;             // 直连 / 转码会各报一次错, 同一部只跳一次
+  plSkipLast = k;
+  const at = pl.items.findIndex(it => it.site === cur.d.site && it.id === cur.d.id);
+  if (at >= 0) pl.items.splice(at, 1);
+  pl.idx = Math.max(0, Math.min(at >= 0 ? at : pl.idx, pl.items.length - 1));
+  toast(`「${cur.title}」打不开，已跳过`);
+  if (!$('.plist').hidden) { renderPlist(); revealPl(); }
+  if (pl.items.length) { plLoad(pl, pl.idx, 1); return true; }
+  plGrow(pl).then(ok => { if (ok && pl.items.length) plLoad(pl, 0, 1); else toast('列表里没有更多能播放的片子了'); });
+  return true;
+}
 // 致命错误先让 hls.js 自己恢复 (网络抖动 / 解码器卡住), 各最多两次; 恢复不了才换线路 / 报错。
 function hlsRecover(h, data) {
   const t = h._rec || (h._rec = { net: 0, media: 0 });
@@ -3723,7 +3766,10 @@ async function load(url, startAt, viaProxy, isLocal, rebuild = false, native = f
     const r = await api('local/hlsat', { id: hlsIdOf(url), t: Math.round(startAt || 0) }, ctl.signal).catch(e => ({ error: e.message || String(e) }));
     clearTimeout(hint);
     if (myGen !== loadGen || ctl.signal.aborted) return;   // 这次加载已经被后来的取代 (比如用户很快又点了别的)
-    if (r?.error) { msg('播放失败：' + r.error + '。换一集或换个源试试', true); return; }
+    if (r?.error) {
+      if (!rebuild && plSkipBroken(r.error)) return;
+      msg('播放失败：' + r.error + '。换一集或换个源试试', true); return;
+    }
     video._hlsOffset = r?.offset || 0;
   }
   const localAt = Math.max(0, (startAt || 0) - video._hlsOffset);
@@ -3731,7 +3777,22 @@ async function load(url, startAt, viaProxy, isLocal, rebuild = false, native = f
   playingSrc = { src, hls: !direct };
   pvReset();
   const seek = () => { if (localAt) video.currentTime = localAt; if (keepRate) video.playbackRate = keepRate; video.play().catch(() => msg('点一下播放')); };
-  const retry = why => { if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); } else msg('播放失败：' + why + '。换一集或换个源试试', true); };
+  const plainFail = why => {
+    if (!viaProxy && !isLocal) { msg('直连失败，改走中转…'); load(url, startAt, true); return; }
+    if (!rebuild && plSkipBroken(why)) return;
+    msg('播放失败：' + why + '（文件可能已损坏或不是有效视频）。换一集或换个源试试', true);
+  };
+  const retry = why => {
+    // 本地原文件浏览器解不了 (HEVC / 10bit / 不支持的音轨 …): 服务端有 ffmpeg 就换成边转边播的 HLS 再试一次。
+    // 沉浸模式有同样的兜底 (见 feed.js fail); 已经是 /media/h/ 的不再兜底, 免得转码失败时来回重试。
+    const id = (!isHlsLocal && isLocal && !viaProxy) ? fileIdOf(url) : '';
+    if (!id) return plainFail(why);
+    const go = info => {
+      if (info?.ffmpeg && loadGen === myGen) { msg('浏览器播不了这个文件，正在转码播放…'); load(`/media/h/${id}/index.m3u8`, startAt, false, true); }
+      else plainFail(why);
+    };
+    if (serverInfo) go(serverInfo); else infoP().then(go, () => plainFail(why));
+  };
   if (window.Hls && Hls.isSupported() && !direct && !native) {
     // 缓冲只留近处: 向前最多 30 秒 / 30MB, 向后只留 30 秒。码率高的源 (2~3Mbps) 如果让它一路缓冲下去, 几分钟后音频
     // SourceBuffer 先满, 浏览器被迫丢旧数据, 音频出现缺口, 之后就是一段「电流声」; 刷新后缓冲清空又正常。
@@ -4452,22 +4513,41 @@ async function plStep(n) {
   await plLoad(pl, i, n > 0 ? 1 : -1); return true;
 }
 async function plLoad(pl, i, dir, tries = 0) {
-  const it = pl.items[i], t = toast(`正在打开「${it.name}」…`, true);
-  const skip = why => {                                           // 打不开 / 没有可播放的内容: 提示一下, 接着试下一部 (同方向), 一圈试完就停
-    toast(`「${it.name}」${why}，已跳过`);
-    const j = i + dir;
-    if (tries + 1 < pl.items.length && j >= 0 && j < pl.items.length) return plLoad(pl, j, dir, tries + 1);
-  };
-  try {
-    const d = await api('detail', { site: it.site, id: it.id }, null);
-    t.remove();
-    if (pl.started && (!cur || cur.pl !== pl)) return;           // 等的时候已经退出播放 / 换成别的了
-    if (!d.lines?.length) return skip('没有可播放的内容');
-    const h = hist.get(d.site, d.id), line = h && d.lines[h.line] ? h.line : 0, ep = h && h.line === line && d.lines[line].episodes[h.ep] ? h.ep : 0;
-    pl.idx = i; pl.started = true;
-    cur = { kind: 'vod', d, line, ep, eps: d.lines[line].episodes, title: d.name, pl };
-    openPlayer(prog.resume(d, line, ep));
-  } catch (err) { t.remove(); if (!isAbort(err)) skip('打开失败'); }
+  if (!pl.items.length) return;
+  const at = Math.max(0, Math.min(i, pl.items.length - 1));
+  const it = pl.items[at], t = toast(`正在打开「${it.name}」…`, true);
+  let d = null, aborted = false;
+  try { d = await api('detail', { site: it.site, id: it.id }, null); }
+  catch (err) { aborted = isAbort(err); }
+  t.remove();
+  if (aborted || (pl.started && (!cur || cur.pl !== pl))) return;   // 等的时候已经退出播放 / 换成别的了
+  if (d?.lines?.length) {
+    const h = hist.get(d.site, d.id);
+    let line = h && d.lines[h.line]?.episodes?.length ? h.line : 0;
+    if (!d.lines[line]?.episodes?.length) line = d.lines.findIndex(l => l.episodes?.length);
+    if (line >= 0) {
+      const ep = h && h.line === line && d.lines[line].episodes[h.ep] ? h.ep : 0;
+      pl.idx = at; pl.started = true; plSkipLast = '';
+      cur = { kind: 'vod', d, line, ep, eps: d.lines[line].episodes, title: d.name, pl };
+      openPlayer(prog.resume(d, line, ep));
+      return;
+    }
+  }
+  // 打不开的片 (删掉了 / 索引里的老卡片 / 资源失效) 从列表里剔掉再接着试下一部:
+  // 留着它的话, 点「下一部」会一直撞在同一部上, 最后播放器卡在空列表里退回首页。
+  toast(`「${it.name}」${d ? '没有可播放的内容' : '打开失败'}，已跳过`);
+  pl.items.splice(at, 1);
+  if (at < pl.idx) pl.idx--;
+  pl.idx = Math.max(0, Math.min(pl.idx, pl.items.length - 1));
+  if (cur?.pl === pl && !$('.plist').hidden && pl.tab === 'vid') { renderPlist(); revealPl(); }
+  const giveUp = () => toast('这个列表里暂时没有能播放的片子了');
+  if (tries >= 20) return giveUp();
+  if (!pl.items.length) {
+    if (await plGrow(pl) && pl.items.length) return plLoad(pl, 0, 1, tries + 1);
+    return giveUp();
+  }
+  const j = dir > 0 ? Math.min(at, pl.items.length - 1) : Math.max(at - 1, 0);
+  return plLoad(pl, j, dir, tries + 1);
 }
 // 播放器底部那排 (下一集 / 选集) 的文字和显隐 —— 顺序播放时「下一集」是「下一部」, 面板开着时「选集」是「收起」
 // 选集按钮后面带进度 (3/24): 顺序播放时是「第几部 / 一共几部」, 普通播放时是「第几集 / 一共几集」
@@ -4533,10 +4613,22 @@ function renderPlist() {
     $$('.pitems button', box).forEach(b => { b.hidden = !!q && !cur.eps[+b.dataset.i].name.toLowerCase().includes(q) && String(+b.dataset.i + 1) !== q; });
   };
 }
+// 面板滚动到「当前正在放的」那一项: 顺序播放是视频选择里的当前卡片, 普通播放是选集里的当前集。
+// 面板还 hidden 的时候量不到 clientHeight / offsetTop, 所以只在显示之后调 (renderPlPlist 和 togglePlist 都会调)。
+function revealPl(box = $('.plist')) {
+  if (!box || box.hidden) return;
+  const wrap = $('.pvids', box), on = $('.pvids .pl-on', box);
+  if (wrap && on) { wrap.scrollTop = Math.max(0, on.offsetTop - wrap.offsetTop - (wrap.clientHeight - on.offsetHeight) / 2); return; }
+  const list = $('.pitems', box), curEp = $('.pitems .on', box);
+  if (list && curEp) list.scrollTop = Math.max(0, curEp.offsetTop - list.offsetTop - (list.clientHeight - curEp.offsetHeight) / 2);
+}
 // 顺序播放的面板: 两个 tab —— 「视频选择」是列表里的片子 (分类页那种卡片形式), 「选集」是当前这一部自己的集。
 // 有视频选择的数据 (列表里不止这一部) 就默认开在「视频选择」, 用户点过「选集」的话记住他的选择; 只有一部的片子没得选, 只出「选集」。
 // 顶栏的「下一部」/ 放完这一部 走列表, 换集在「选集」这一页点。
 function renderPlPlist(box, pl) {
+  // 刷新 / 分享链接重建出来的列表, 顺序可能和当时不一样: 以「现在正在放的这一部」为准校准 idx, 面板才不会高亮错片
+  const mine = cur?.d ? pl.items.findIndex(it => it.site === cur.d.site && it.id === cur.d.id) : -1;
+  if (mine >= 0) pl.idx = mine;
   const canVid = pl.items.length > 1, canEp = (cur.eps || []).length > 1;
   // 有视频选择就默认开在视频选择; 只有「选集」这一页也有内容 (当前这部不止一集) 时, 才尊重用户上次手动选的「选集」
   const tab = canVid ? (pl.tab === 'ep' && canEp ? 'ep' : 'vid') : 'ep';
@@ -4561,13 +4653,12 @@ function renderPlPlist(box, pl) {
     $$('.pitems button', box).forEach(b => b.onclick = () => { cur.ep = +b.dataset.i; togglePlist(false); openPlayer(epResume()); });
     const f = $('.pfind', box);
     if (f) f.oninput = () => { const q = f.value.trim().toLowerCase(); $$('.pitems button', box).forEach(b => { b.hidden = !!q && !eps[+b.dataset.i].name.toLowerCase().includes(q) && String(+b.dataset.i + 1) !== q; }); };
-    const list = $('.pitems', box), on = $('.pitems .on', box);
-    if (list && on) list.scrollTop = on.offsetTop - list.offsetTop - (list.clientHeight - on.offsetHeight) / 2;
+    revealPl(box);
     return;
   }
   const wrap = $('.pvids', box), cards = $$('.card', wrap);
-  const me = cards[pl.idx];
-  if (me) { me.classList.add('pl-on'); wrap.scrollTop = Math.max(0, me.offsetTop - wrap.offsetTop - (wrap.clientHeight - me.offsetHeight) / 2); }
+  const me = (mine >= 0 && cards[mine]) || cards[pl.idx];
+  if (me) me.classList.add('pl-on');
   wrap.onclick = e => {
     if (e.target.closest('[data-plmore]')) return void plGrow(pl);
     const a = e.target.closest('.card'); if (!a) return;
@@ -4577,20 +4668,21 @@ function renderPlPlist(box, pl) {
     if (i !== pl.idx) plLoad(pl, i, i > pl.idx ? 1 : -1);
   };
   if (more) wrap.onscroll = () => { if (wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 160) { wrap.onscroll = null; plGrow(pl); } };
-  const f = $('.pfind', box);
-  if (f) f.oninput = () => { const q = f.value.trim().toLowerCase(); cards.forEach((a, i) => { a.hidden = !!q && !String(pl.items[i]?.name || '').toLowerCase().includes(q); }); };
+  const f2 = $('.pfind', box);
+  if (f2) f2.oninput = () => { const q = f2.value.trim().toLowerCase(); cards.forEach((a, i) => { a.hidden = !!q && !String(pl.items[i]?.name || '').toLowerCase().includes(q); }); };
+  revealPl(box);
 }
 function togglePlist(open = $('.plist').hidden) {
   const box = $('.plist');
   if (open) sysClose();
+  if (open && cur?.pl) renderPlist();   // 删过片 / 换过片: 每次打开都按最新列表重画
   box.hidden = !open;
   $('[data-act=list]').classList.toggle('on', open && box.dataset.mode === 'ep');
   if (cur) paintNav();                                 // 按钮文字跟着变: 选集 ⇄ 收起
   player.classList.toggle('plopen', open);
   player.classList.toggle('srcopen', open && box.dataset.mode === 'src');
   if (open) {
-    const list = $('.pitems', box), on = $('.pitems .on', box);   // 不用 scrollIntoView (会连播放器容器一起滚走)
-    if (list && on) list.scrollTop = on.offsetTop - list.offsetTop - (list.clientHeight - on.offsetHeight) / 2;
+    revealPl(box);                                    // 顺序播放滚到当前这部, 普通播放滚到当前这一集
     player.scrollTop = 0; poke();
   }
 }
