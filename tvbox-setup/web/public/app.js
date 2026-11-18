@@ -4534,6 +4534,7 @@ function renderPlist() {
 // 顶栏的「下一部」/ 放完这一部 走列表, 换集在「选集」这一页点。
 function renderPlPlist(box, pl) {
   const canVid = pl.items.length > 1, canEp = (cur.eps || []).length > 1;
+  // 有视频选择就默认开在视频选择; 只有「选集」这一页也有内容 (当前这部不止一集) 时, 才尊重用户上次手动选的「选集」
   const tab = canVid ? (pl.tab === 'ep' && canEp ? 'ep' : 'vid') : 'ep';
   const eps = cur.eps || [], pm = prog.of(cur.d.site, cur.d.id);
   const more = !!pl.cat && !pl.end;

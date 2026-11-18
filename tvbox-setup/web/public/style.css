@@ -331,9 +331,13 @@ a.ch { color: inherit; }
    max-content, Safari / iOS 上会算成 0, 整行塌掉、卡片全叠在一起。padding-top 是块级盒子的确定高度, 各家一样。 */
 .pvids .card .img, html.wide-cards .pvids .card .img { aspect-ratio: auto; }
 .pvids .card .img::before { content: ""; display: block; width: 100%; padding-top: 150%; }
-/* 宽卡: 海报跟全局一样是 16:9, 面板的列也放宽一点 (88px 宽做 16:9 只有 50px 高, 认不出片子) */
-html.wide-cards .pvids { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+/* 宽卡: 海报跟全局一样是 16:9, 面板本身也放宽 (340 → 460), 16:9 的卡才够大
+   (原来 132px 宽的卡只有 86px 高, 片子认不清; 现在桌面两列 ~212x119, 跟着卡片大小 --cs 一起放大) */
+html.wide-cards .plist { width: min(460px, calc(100vw - 28px)); }
+html.wide-cards .pvids { grid-template-columns: repeat(auto-fill, minmax(calc(190px * var(--cs)), 1fr)); gap: 16px 12px; }
 html.wide-cards .pvids .card .img::before { padding-top: 56.25%; }
+/* 手机上弹层本来就是整屏宽: 16:9 用两列 (~176x99), 比原来的三列 115x65 大一截 */
+html.touchui.wide-cards .pvids { grid-template-columns: repeat(auto-fill, minmax(calc(150px * var(--cs)), 1fr)); }
 /* 正在播的那张: 红框只描海报 (以前描整张卡 + 外扩 2px, 窄面板里会压到旁边那张的边) */
 .pvids .card.pl-on { border-radius: 6px; }
 .pvids .card.pl-on .img { outline: 2px solid var(--red); outline-offset: 1px; }
