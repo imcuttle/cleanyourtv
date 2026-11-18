@@ -806,8 +806,11 @@ const poolAdd = list => {
 const drainPool = n => { const out = []; while (out.length < n && F.pool.length) out.push(out.length % 2 ? takeBest(F.pool) : takeRandom(F.pool)); return out; };
 // ---------- 随机: 当前这个源的整个库里完全随机 ----------
 // 和推荐 (rec) 的区别: 完全不看口味 —— 不加权、不挑演员的作品、也不刻意避开刚看过的类型, 抽到哪部算哪部。
-// 范围就是顶部选中的那一个源 (和推荐一样, 不跨源): 每批在这个源里随便挑 3~4 个分类 → 每个分类随便翻一页,
-// 抽到的片子打散后均匀随机地发下去。只保留两条必要的去重 (不是为了推荐): 同一部片不重复, 眼前刚刷过去的不重复。
+// 范围 = 顶部选中的那一个源的全部资源 (不跨源), 抽法上保证「整个库」都在池子里:
+//   · 分类: 把源的全部分类洗牌后排队轮着用, 一轮走完再洗一次 —— 不会老是那几个分类;
+//   · 页: 每个分类的页码在 1..pagecount 里均匀随机 (pagecount 用源自己报的值, 不封顶), 老片子 / 深页也能抽到;
+//   · 抓取: 池子见底才去抓新的一页, 抓来的一页基本都会被用掉 (不会抓 3~4 页只用掉 6 个、剩下的被挤掉)。
+// 只保留两条必要的去重 (不是为了推荐): 同一部片不重复, 眼前刚刷过去的不重复。
 const randCat = new Map();                        // site → [{id,name}]: 随机模式自己的一份分类缓存 (和推荐模式的 F.cats 分开)
 async function randCatsOf(site) {
   if (randCat.has(site)) return randCat.get(site);
@@ -818,23 +821,41 @@ async function randCatsOf(site) {
   randCat.set(site, v);
   return v;
 }
+const randSeq = new Map();                        // site → { key, queue, i }: 分类的洗牌队列 (整轮走完再洗)
+const shuffled = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+function randNextCat(site, cats) {
+  const key = cats.map(c => c.id).join('\u0001');
+  let st = randSeq.get(site);
+  if (!st || st.key !== key || st.i >= st.queue.length) { st = { key, queue: shuffled(cats.slice()), i: 0 }; randSeq.set(site, st); }
+  return st.queue[st.i++];
+}
+// 抓一页: 分类按洗牌队列轮、页码在整个 pagecount 里均匀随机 (第一次先取第 1 页, 顺便问到 pagecount)
+async function randPage(gen, site, cats) {
+  const c = randNextCat(site, cats);
+  const pk = site + '|' + c.id, known = F.pcount[pk];
+  const pg = known > 1 ? 1 + Math.floor(Math.random() * known) : 1;
+  const j = await api('list', { site, t: c.id, pg }, null).catch(() => null);
+  if (gen !== F.gen) return false;
+  if (!j) return false;
+  F.pcount[pk] = j.pagecount || 1;
+  const got = j.list || [];
+  poolAdd(got);
+  if (got.length) return true;
+  if (pg === 1) return false;
+  // 源报了 pagecount、深页却是空的 (不少苹果CMS把页码封在几百页): 退回第 1 页, 这一趟别白跑
+  const j2 = await api('list', { site, t: c.id, pg: 1 }, null).catch(() => null);
+  if (gen !== F.gen) return false;
+  if (j2) { poolAdd(j2.list || []); return true; }
+  return false;
+}
 async function randMore(gen) {
   const site = state.site;                        // 只随机当前源 (切了源就是新源; 缓存按源分开存, 不用清)
   if (!site) return [];
   const cats = await randCatsOf(site);
   if (gen !== F.gen) return [];
   if (!cats?.length) return [];
-  const bag = cats.slice(), n = 3 + Math.floor(Math.random() * 2), jobs = [];
-  for (let k = 0; k < n && bag.length; k++) {
-    const c = bag.splice(Math.floor(Math.random() * bag.length), 1)[0];
-    const pk = site + '|' + c.id, known = F.pcount[pk];
-    const pg = known ? 1 + Math.floor(Math.random() * Math.min(known, 80)) : 1;   // 头一回先看第 1 页, 顺便问到总页数
-    jobs.push(api('list', { site, t: c.id, pg }, null).then(j => { F.pcount[pk] = j.pagecount || 1; return j.list || []; }).catch(() => []));
-  }
-  const res = await Promise.all(jobs);
-  if (gen !== F.gen) return [];
-  poolAdd(res.flat());
-  if (F.pool.length > 160) F.pool.splice(0, F.pool.length - 160);
+  // 池子够用就不再抓: 已经抓回来的片子先用完, 不浪费 (每页通常 20 部, 够抽 3 轮)
+  for (let guard = 0; F.pool.length < 6 && guard < 5; guard++) await randPage(gen, site, cats);
   let bagOut = F.pool.filter(it => !seen.has(keyOf(it)));
   if (!bagOut.length && F.pool.length) { seen.clear(); UD.set('feedSeen', '[]'); bagOut = F.pool.slice(); }   // 池子里全是看过的: 从头再来
   const out = [];
