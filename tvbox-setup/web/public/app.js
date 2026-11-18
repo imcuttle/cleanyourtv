@@ -4469,18 +4469,15 @@ async function plLoad(pl, i, dir, tries = 0) {
     openPlayer(prog.resume(d, line, ep));
   } catch (err) { t.remove(); if (!isAbort(err)) skip('打开失败'); }
 }
-// 播放器底部那排 (上一集 / 下一集 / 选集) 的文字和显隐 —— 顺序播放时「下一集」是「下一部」, 面板开着时「选集」是「收起」
+// 播放器底部那排 (下一集 / 选集) 的文字和显隐 —— 顺序播放时「下一集」是「下一部」, 面板开着时「选集」是「收起」
 // 选集按钮后面带进度 (3/24): 顺序播放时是「第几部 / 一共几部」, 普通播放时是「第几集 / 一共几集」
 function paintNav() {
   if (!cur) return;
   const live = cur.kind === 'live', pl = cur.pl;
-  setL('prev', live ? '上一台' : pl ? '上一部' : '上一集');
   setL('next', live ? '下一台' : pl ? '下一部' : '下一集');
   const open = !$('.plist').hidden;
   setL('list', open ? '收起' : live ? '频道' : '选集');
   $('[data-act=list]').classList.toggle('on', open && $('.plist').dataset.mode === 'ep');
-  const canPrev = pl ? (pl.idx > 0 || (pmode()[0] === 'loop' && pl.items.length > 1)) : cur.ep > 0;
-  $('[data-act=prev]').hidden = !canPrev;
   $('[data-act=next]').hidden = live ? cur.ep >= cur.eps.length - 1 : !plHasNext();
   const many = pl ? (pl.items.length > 1 || (cur.eps || []).length > 1 || (pl.cat && !pl.end)) : cur.eps.length > 1;
   $('[data-act=list]').hidden = !many;
@@ -4616,7 +4613,6 @@ player.addEventListener('click', e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'close') closeOverlay();
   if (act === 'next') step(1);
-  if (act === 'prev') step(-1);
   if (act === 'pip') togglePip();
   if (act === 'src') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSrcSheet(); }
   if (act === 'list') { if ($('.plist').dataset.mode !== 'ep') { renderPlist(); return togglePlist(true); } return togglePlist(); }
@@ -4677,11 +4673,10 @@ if (!fineCursor) {
   $('.pmore').prepend($('[data-act=star]'), $('[data-act=dl]'));
   $('.pmore').append($('[data-act=pip]'));
   pacts.insertBefore($('[data-act=rate]'), $('[data-act=fs]'));
-  pacts.insertBefore($('[data-act=prev]'), $('[data-act=next]'));   // 触屏: 上一集也在底下那排 (和下一集挨着)
   $('.pnav').hidden = true;                                        // 上面那排空了 (按钮都挪到底下那排了)
 }
 else {
-  $('.pnav').append($('[data-act=next]'), $('[data-act=list]'));   // 大屏: 上一集 / 下一集 / 选集 都在播放器下面 (时间轴上边)
+  $('.pnav').append($('[data-act=next]'), $('[data-act=list]'));   // 大屏: 下一集 / 选集 都在播放器下面 (时间轴上边)
   $('[data-c=rate]').before($('[data-act=sub]'));   // 大屏: 字幕在右下角控制条里, 倍速左边 (触屏留在「更多」浮窗)
   // 下载 / 分享 / 自动跳过 不管窗口多宽都收进「更多」，顶栏只留 收藏 和 更多
   setTimeout(() => { const more = $('.pmore'); for (const x of ['dl', 'share', 'skipt']) more.insertBefore($(`[data-act=${x}]`), $('[data-act=rate]', more)); syncMore?.(); });   // syncMore 在下面才定义，等本段跑完再排
