@@ -1223,6 +1223,9 @@ input::placeholder, textarea::placeholder { color: #ffffff80; opacity: 1; }
 .small.ibs svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
 .small.ibs.ok { background: #fff; color: #000; border-color: #fff; }
 .small.ibs.ok:hover { background: #fffd; }
+/* 图标 + 文字的小按钮 (设置页「随机看片」这种) */
+.small.ics { display: inline-flex; align-items: center; gap: 7px; }
+.small.ics svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
 
 }
 

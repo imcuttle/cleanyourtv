@@ -804,9 +804,56 @@ const poolAdd = list => {
   for (const it of list) if (!F.keys.has(keyOf(it)) && !F.names.has(nameOf(it)) && !keys.has(keyOf(it)) && !names.has(nameOf(it))) { F.pool.push(it); keys.add(keyOf(it)); names.add(nameOf(it)); }
 };
 const drainPool = n => { const out = []; while (out.length < n && F.pool.length) out.push(out.length % 2 ? takeBest(F.pool) : takeRandom(F.pool)); return out; };
+// ---------- 随机: 整个资源库里完全随机 ----------
+// 和推荐 (rec) 的区别: 完全不看口味 —— 不加权、不挑演员的作品、也不刻意避开刚看过的类型, 抽到哪部算哪部。
+// 每批在所有点播源里随便挑两个源 → 每个源随便挑 2~3 个分类 → 每个分类随便翻一页, 抽到的片子打散后均匀随机地发下去。
+// 只保留两条必要的去重 (不是为了推荐): 同一部片不重复 (别的源上同名同年的也算同一部), 眼前刚刷过去的不重复。
+const randCat = new Map();                        // site → [{id,name}]: 随机模式自己的一份分类缓存 (和推荐模式的 F.cats 分开)
+async function randCatsOf(site) {
+  if (randCat.has(site)) return randCat.get(site);
+  const r = await api('categories', { site }, null).catch(() => null);
+  if (!r) return null;                            // 这次没问到: 不写缓存, 下次再问 (别把空分类永久缓存下来)
+  const list = (r.categories || []).filter(c => !JUNK.test(c.name));
+  const v = list.length ? list : [{ id: '', name: '最新' }];
+  randCat.set(site, v);
+  return v;
+}
+async function randMore(gen) {
+  const keys = state.sites.filter(s => !s.inGroup).map(s => s.key);   // 聚合成员的片子从聚合源那一个入口来, 成员本身不再单独抽
+  if (!keys.length) return [];
+  const jobs = [];
+  for (let i = 0; i < 2 && keys.length; i++) {
+    const site = keys.splice(Math.floor(Math.random() * keys.length), 1)[0];
+    const cats = await randCatsOf(site);
+    if (gen !== F.gen) return [];
+    if (!cats?.length) continue;
+    const bag = cats.slice(), n = 2 + Math.floor(Math.random() * 2);
+    for (let k = 0; k < n && bag.length; k++) {
+      const c = bag.splice(Math.floor(Math.random() * bag.length), 1)[0];
+      const pk = site + '|' + c.id, known = F.pcount[pk];
+      const pg = known ? 1 + Math.floor(Math.random() * Math.min(known, 80)) : 1;   // 头一回先看第 1 页, 顺便问到总页数
+      jobs.push(api('list', { site, t: c.id, pg }, null).then(j => { F.pcount[pk] = j.pagecount || 1; return j.list || []; }).catch(() => []));
+    }
+  }
+  if (!jobs.length) return [];
+  const res = await Promise.all(jobs);
+  if (gen !== F.gen) return [];
+  poolAdd(res.flat());
+  if (F.pool.length > 160) F.pool.splice(0, F.pool.length - 160);
+  let bag = F.pool.filter(it => !seen.has(keyOf(it)));
+  if (!bag.length && F.pool.length) { seen.clear(); UD.set('feedSeen', '[]'); bag = F.pool.slice(); }   // 池子里全是看过的: 从头再来
+  const out = [];
+  while (out.length < 6 && bag.length) {
+    const it = bag.splice(Math.floor(Math.random() * bag.length), 1)[0];
+    F.pool.splice(F.pool.indexOf(it), 1);
+    out.push(it);
+  }
+  return out;
+}
 async function moreCands(gen) {
   const m = F.mode, fresh = list => list.filter(it => !F.keys.has(keyOf(it)));
   if (m === 'rec') return fresh(await recMore(gen));
+  if (m === 'rand') return fresh(await randMore(gen));
   // 分类 / 搜索 的沉浸按钮和长按卡片: 随机播放 + 按喜好推荐 (一随机、一按口味, 交替); 'list' 只有不带 rand 时才严格按列表顺序 (现在没有入口用它)
   if (m === 'cat') {
     const x = F.extra;
@@ -878,7 +925,7 @@ async function pump() {
       }
     }
   } finally { F.pumping = false; }
-  if (gen === F.gen && F.done && !F.items.length) { bootEl.querySelector('span').textContent = F.mode === 'rec' ? '这个源暂时没有可播放的内容，换个源试试' : '这里还没有内容'; bootEl.classList.add('empty'); }
+  if (gen === F.gen && F.done && !F.items.length) { bootEl.querySelector('span').textContent = F.mode === 'rec' ? '这个源暂时没有可播放的内容，换个源试试' : F.mode === 'rand' ? '这次没抽到能播的内容，再试一次' : '这里还没有内容'; bootEl.classList.add('empty'); }
 }
 function onItems() {
   root.classList.toggle('booting', !F.items.length);
@@ -923,6 +970,7 @@ function bounce() { root.classList.remove('dragging'); root.style.setProperty('-
 function modeLabel() {
   const x = F.extra;
   if (F.mode === 'rec') return '推荐';
+  if (F.mode === 'rand') return '随机';
   if (F.mode === 'cat') return '分类 · ' + (x?.name || '全部');
   if (F.mode === 'search') return '搜索 · ' + (x?.q || '');
   if (F.mode === 'list') return x?.label || '列表';
@@ -945,7 +993,7 @@ function startMode(mode, extra) {
 }
 function renderMenu() {
   const x = F.extra, kids = kidsMode();
-  const entries = [['rec', '推荐 · ' + (state.sites.find(s => s.key === state.site)?.name || '')]];
+  const entries = [['rec', '推荐 · ' + (state.sites.find(s => s.key === state.site)?.name || '')], ['rand', '随机 · 全部源']];
   if (x && (x.mode === 'cat' || x.mode === 'search' || x.mode === 'list')) entries.push([x.mode, x.mode === 'cat' ? '分类 · ' + (x.name || '全部') : x.mode === 'search' ? '搜索 · ' + x.q : x.label || '列表']);
   if (!kids) entries.push(['fav', '我的收藏']);
   entries.push(['hist', '继续观看']);
@@ -1054,7 +1102,7 @@ function act(a) {
   if (a === 'share') { if (isLocalKey(s.it.site)) return; return shareNow(vodHref(s.it.site, s.it.id), s.it.name || s.d?.name || ''); }
   if (a === 'detail') { s.video.pause(); return openDetail(s.it.site, s.it.id); }
   if (a === 'del') return feedTrash(s);
-  if (a === 'dislike') { bump(s.it, s.d, -3); markSeen(s.it); toast('已减少这类推荐'); s.judged = true; return go(1); }
+  if (a === 'dislike') { bump(s.it, s.d, -3); markSeen(s.it); toast(F.mode === 'rand' ? '已跳过，这一部不会再推' : '已减少这类推荐'); s.judged = true; return go(1); }
 }
 root.addEventListener('click', e => {
   const b = e.target.closest('[data-a]'); if (!b) return;

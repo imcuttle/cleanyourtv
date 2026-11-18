@@ -2868,6 +2868,7 @@ const IC = {
   play: svgI('M7 4.5v15l12-7.5z'),
   retry: svgI('M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5'),
   feed: svgI('M5 3h14v18H5zM10 9.2v5.6l4.5-2.8z'),
+  dice: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="3.2" width="17.6" height="17.6" rx="3.6"/><circle cx="8.6" cy="8.6" r="1.35" fill="currentColor" stroke="none"/><circle cx="15.4" cy="8.6" r="1.35" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.35" fill="currentColor" stroke="none"/><circle cx="8.6" cy="15.4" r="1.35" fill="currentColor" stroke="none"/><circle cx="15.4" cy="15.4" r="1.35" fill="currentColor" stroke="none"/></svg>',
   win: svgI('M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'),
   share: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.7l7.4-4.2M8.3 13.3l7.4 4.2"/></svg>',
   trash: svgI('M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3'),
@@ -5965,8 +5966,8 @@ async function renderSettings() {
         <button data-bulk="delbad">删除不通的</button>${kind === 'site' ? '<button data-bulk="delempty" title="删除能连上、但一部片都没有的点播源">删除 0 部的</button><button data-bulk="classify" title="按分类名自动判断：80% 以上分类是色情词 → 成人，80% 以上是少儿词 → 少儿，否则标准（不勾选）。只处理还没勾少儿 / 成人的源；勾选了源就只看选中的，否则看全部">自动分类</button>' : ''}</div></span>
       <span class="lan" data-bulk="count"></span></div>`;
   view.innerHTML = `<div class="page set"><h1>设置</h1>
-    <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。</p>
-      <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button></div></section>
+    <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。想完全随缘就用「随机看片」：不看口味，从全部点播源的整个库里随手抽，抽到哪部放哪部（进了沉浸页也能在顶部中间的下拉里切换）。</p>
+      <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button><button class="small ics" data-feed="rand" title="不看口味，从全部点播源的整个库里完全随机">${IC.dice}随机看片</button></div></section>
     <section id="acctSec"><h2>账号管理</h2><p class="lan">加载中…</p></section>
     ${installSection()}
     <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。安全级别属于账号：${levelHint}</p>
