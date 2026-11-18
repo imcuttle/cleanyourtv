@@ -3474,9 +3474,7 @@ function openPlayer(startAt) {
   else setOverlayUrl(playUrl());                           // 换集 / 换台: 地址跟着变, 不新增历史记录
   $('.ptitle').textContent = cur.kind === 'live' ? e.name : (cur.eps.length > 1 ? `${cur.title} · ${e.name}` : cur.title);
   const live = cur.kind === 'live';
-  setL('next', live ? '下一台' : '下一集'); setL('list', live ? '频道' : '选集');
-  $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
-  $('[data-act=list]').hidden = cur.eps.length <= 1;
+  paintNav();
   if (cur.pl) paintPl();
   syncFs();
   $('[data-act=pip]').hidden = !pipSupported() || fineCursor;   // desktop has it in the control bar
@@ -3819,7 +3817,7 @@ function paintPmode() {
   const b = $('[data-act=pmode]'); if (!b) return;
   const m = pmode();
   b.hidden = !cur || cur.kind === 'live';
-  if (cur?.pl) $('[data-act=next]').hidden = !plHasNext();
+  if (cur?.pl) paintNav();
   $('svg', b).innerHTML = `<path d="${m[2]}"/>`; setL('pmode', m[1]); b.title = '播放模式：' + m[1] + '（点一下切换）';
   syncMore?.();
 }
@@ -4471,12 +4469,27 @@ async function plLoad(pl, i, dir, tries = 0) {
     openPlayer(prog.resume(d, line, ep));
   } catch (err) { t.remove(); if (!isAbort(err)) skip('打开失败'); }
 }
-// 顶栏跟列表有关的三个按钮: 「下一部」(走列表) / 「选集」(开面板) / 系统媒体键
+// 播放器底部那排 (上一集 / 下一集 / 选集) 的文字和显隐 —— 顺序播放时「下一集」是「下一部」, 面板开着时「选集」是「收起」
+// 选集按钮后面带进度 (3/24): 顺序播放时是「第几部 / 一共几部」, 普通播放时是「第几集 / 一共几集」
+function paintNav() {
+  if (!cur) return;
+  const live = cur.kind === 'live', pl = cur.pl;
+  setL('prev', live ? '上一台' : pl ? '上一部' : '上一集');
+  setL('next', live ? '下一台' : pl ? '下一部' : '下一集');
+  const open = !$('.plist').hidden;
+  setL('list', open ? '收起' : live ? '频道' : '选集');
+  $('[data-act=list]').classList.toggle('on', open && $('.plist').dataset.mode === 'ep');
+  const canPrev = pl ? (pl.idx > 0 || (pmode()[0] === 'loop' && pl.items.length > 1)) : cur.ep > 0;
+  $('[data-act=prev]').hidden = !canPrev;
+  $('[data-act=next]').hidden = live ? cur.ep >= cur.eps.length - 1 : !plHasNext();
+  const many = pl ? (pl.items.length > 1 || (cur.eps || []).length > 1 || (pl.cat && !pl.end)) : cur.eps.length > 1;
+  $('[data-act=list]').hidden = !many;
+  const n = $('[data-act=list] .n');
+  if (n) n.textContent = pl ? `${pl.idx + 1}/${pl.items.length}` : (cur.eps.length > 1 ? `${cur.ep + 1}/${cur.eps.length}` : '');
+}
 function paintPl() {
-  const pl = cur?.pl; if (!pl) return;
-  setL('next', '下一部'); setL('list', '选集');
-  $('[data-act=next]').hidden = !plHasNext();
-  $('[data-act=list]').hidden = !(pl.items.length > 1 || (cur.eps || []).length > 1 || (pl.cat && !pl.end));
+  if (!cur?.pl) return;
+  paintNav();
   syncMedia();
 }
 // 从播放地址里的 ?pl=cat… 重建列表 (刷新 / 新标签页打开 / 别人发来的链接)
@@ -4519,10 +4532,12 @@ function renderPlist() {
     $$('.pitems button', box).forEach(b => { b.hidden = !!q && !cur.eps[+b.dataset.i].name.toLowerCase().includes(q) && String(+b.dataset.i + 1) !== q; });
   };
 }
-// 顺序播放的面板: 两个 tab —— 「选集」是当前这一部自己的集 (和普通播放器一样),
-// 「视频选择」是列表里的片子, 分类页那种卡片形式。顶栏的「下一部」/ 放完这一部 走列表, 换集在这一页点。
+// 顺序播放的面板: 两个 tab —— 「视频选择」是列表里的片子 (分类页那种卡片形式), 「选集」是当前这一部自己的集。
+// 有视频选择的数据 (列表里不止这一部) 就默认开在「视频选择」, 用户点过「选集」的话记住他的选择; 只有一部的片子没得选, 只出「选集」。
+// 顶栏的「下一部」/ 放完这一部 走列表, 换集在「选集」这一页点。
 function renderPlPlist(box, pl) {
-  const tab = pl.tab === 'vid' ? 'vid' : 'ep';
+  const canVid = pl.items.length > 1, canEp = (cur.eps || []).length > 1;
+  const tab = canVid ? (pl.tab === 'ep' && canEp ? 'ep' : 'vid') : 'ep';
   const eps = cur.eps || [], pm = prog.of(cur.d.site, cur.d.id);
   const more = !!pl.cat && !pl.end;
   box.dataset.mode = 'ep'; box.classList.remove('srcs', 'skipset', 'live'); box.classList.toggle('plvids', tab === 'vid');
@@ -4534,7 +4549,7 @@ function renderPlPlist(box, pl) {
     ? `<input class="pfind" type="search" enterkeyhint="search" autocomplete="off" placeholder="${tab === 'ep' ? '搜集数' : '搜片名'}">` : '';
   box.innerHTML = `<div class="phead"><i class="grab"></i><b>${esc(pl.name || '列表')}</b><span>${pl.idx + 1} / ${pl.items.length}${more ? '+' : ''}</span>
       <button class="icon sm" data-pclose title="关闭">✕</button></div>
-    <div class="ptabs"><button type="button" data-tab="ep" class="${tab === 'ep' ? 'on' : ''}">选集</button><button type="button" data-tab="vid" class="${tab === 'vid' ? 'on' : ''}">视频选择</button></div>
+    ${canVid && canEp ? `<div class="ptabs"><button type="button" data-tab="vid" class="${tab === 'vid' ? 'on' : ''}">视频选择</button><button type="button" data-tab="ep" class="${tab === 'ep' ? 'on' : ''}">选集</button></div>` : ''}
     ${find}
     ${tab === 'ep' ? `<div class="pitems">${epHtml}</div>`
       : `<div class="pvids">${pl.items.map(it => card(it)).join('')}${more ? '<button class="more" type="button" data-plmore>加载更多</button>' : ''}</div>`}`;
@@ -4568,6 +4583,7 @@ function togglePlist(open = $('.plist').hidden) {
   if (open) sysClose();
   box.hidden = !open;
   $('[data-act=list]').classList.toggle('on', open && box.dataset.mode === 'ep');
+  if (cur) paintNav();                                 // 按钮文字跟着变: 选集 ⇄ 收起
   player.classList.toggle('plopen', open);
   player.classList.toggle('srcopen', open && box.dataset.mode === 'src');
   if (open) {
@@ -4600,6 +4616,7 @@ player.addEventListener('click', e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'close') closeOverlay();
   if (act === 'next') step(1);
+  if (act === 'prev') step(-1);
   if (act === 'pip') togglePip();
   if (act === 'src') { $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false); return openSrcSheet(); }
   if (act === 'list') { if ($('.plist').dataset.mode !== 'ep') { renderPlist(); return togglePlist(true); } return togglePlist(); }
@@ -4660,9 +4677,11 @@ if (!fineCursor) {
   $('.pmore').prepend($('[data-act=star]'), $('[data-act=dl]'));
   $('.pmore').append($('[data-act=pip]'));
   pacts.insertBefore($('[data-act=rate]'), $('[data-act=fs]'));
+  pacts.insertBefore($('[data-act=prev]'), $('[data-act=next]'));   // 触屏: 上一集也在底下那排 (和下一集挨着)
+  $('.pnav').hidden = true;                                        // 上面那排空了 (按钮都挪到底下那排了)
 }
 else {
-  $('[data-c=rate]').before($('[data-act=next]'), $('[data-act=list]'));   // 大屏: 选集在播放器下面, 倍速左边
+  $('.pnav').append($('[data-act=next]'), $('[data-act=list]'));   // 大屏: 上一集 / 下一集 / 选集 都在播放器下面 (时间轴上边)
   $('[data-c=rate]').before($('[data-act=sub]'));   // 大屏: 字幕在右下角控制条里, 倍速左边 (触屏留在「更多」浮窗)
   // 下载 / 分享 / 自动跳过 不管窗口多宽都收进「更多」，顶栏只留 收藏 和 更多
   setTimeout(() => { const more = $('.pmore'); for (const x of ['dl', 'share', 'skipt']) more.insertBefore($(`[data-act=${x}]`), $('[data-act=rate]', more)); syncMore?.(); });   // syncMore 在下面才定义，等本段跑完再排
