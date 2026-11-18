@@ -804,10 +804,10 @@ const poolAdd = list => {
   for (const it of list) if (!F.keys.has(keyOf(it)) && !F.names.has(nameOf(it)) && !keys.has(keyOf(it)) && !names.has(nameOf(it))) { F.pool.push(it); keys.add(keyOf(it)); names.add(nameOf(it)); }
 };
 const drainPool = n => { const out = []; while (out.length < n && F.pool.length) out.push(out.length % 2 ? takeBest(F.pool) : takeRandom(F.pool)); return out; };
-// ---------- 随机: 整个资源库里完全随机 ----------
+// ---------- 随机: 当前这个源的整个库里完全随机 ----------
 // 和推荐 (rec) 的区别: 完全不看口味 —— 不加权、不挑演员的作品、也不刻意避开刚看过的类型, 抽到哪部算哪部。
-// 每批在所有点播源里随便挑两个源 → 每个源随便挑 2~3 个分类 → 每个分类随便翻一页, 抽到的片子打散后均匀随机地发下去。
-// 只保留两条必要的去重 (不是为了推荐): 同一部片不重复 (别的源上同名同年的也算同一部), 眼前刚刷过去的不重复。
+// 范围就是顶部选中的那一个源 (和推荐一样, 不跨源): 每批在这个源里随便挑 3~4 个分类 → 每个分类随便翻一页,
+// 抽到的片子打散后均匀随机地发下去。只保留两条必要的去重 (不是为了推荐): 同一部片不重复, 眼前刚刷过去的不重复。
 const randCat = new Map();                        // site → [{id,name}]: 随机模式自己的一份分类缓存 (和推荐模式的 F.cats 分开)
 async function randCatsOf(site) {
   if (randCat.has(site)) return randCat.get(site);
@@ -819,32 +819,27 @@ async function randCatsOf(site) {
   return v;
 }
 async function randMore(gen) {
-  const keys = state.sites.filter(s => !s.inGroup).map(s => s.key);   // 聚合成员的片子从聚合源那一个入口来, 成员本身不再单独抽
-  if (!keys.length) return [];
-  const jobs = [];
-  for (let i = 0; i < 2 && keys.length; i++) {
-    const site = keys.splice(Math.floor(Math.random() * keys.length), 1)[0];
-    const cats = await randCatsOf(site);
-    if (gen !== F.gen) return [];
-    if (!cats?.length) continue;
-    const bag = cats.slice(), n = 2 + Math.floor(Math.random() * 2);
-    for (let k = 0; k < n && bag.length; k++) {
-      const c = bag.splice(Math.floor(Math.random() * bag.length), 1)[0];
-      const pk = site + '|' + c.id, known = F.pcount[pk];
-      const pg = known ? 1 + Math.floor(Math.random() * Math.min(known, 80)) : 1;   // 头一回先看第 1 页, 顺便问到总页数
-      jobs.push(api('list', { site, t: c.id, pg }, null).then(j => { F.pcount[pk] = j.pagecount || 1; return j.list || []; }).catch(() => []));
-    }
+  const site = state.site;                        // 只随机当前源 (切了源就是新源; 缓存按源分开存, 不用清)
+  if (!site) return [];
+  const cats = await randCatsOf(site);
+  if (gen !== F.gen) return [];
+  if (!cats?.length) return [];
+  const bag = cats.slice(), n = 3 + Math.floor(Math.random() * 2), jobs = [];
+  for (let k = 0; k < n && bag.length; k++) {
+    const c = bag.splice(Math.floor(Math.random() * bag.length), 1)[0];
+    const pk = site + '|' + c.id, known = F.pcount[pk];
+    const pg = known ? 1 + Math.floor(Math.random() * Math.min(known, 80)) : 1;   // 头一回先看第 1 页, 顺便问到总页数
+    jobs.push(api('list', { site, t: c.id, pg }, null).then(j => { F.pcount[pk] = j.pagecount || 1; return j.list || []; }).catch(() => []));
   }
-  if (!jobs.length) return [];
   const res = await Promise.all(jobs);
   if (gen !== F.gen) return [];
   poolAdd(res.flat());
   if (F.pool.length > 160) F.pool.splice(0, F.pool.length - 160);
-  let bag = F.pool.filter(it => !seen.has(keyOf(it)));
-  if (!bag.length && F.pool.length) { seen.clear(); UD.set('feedSeen', '[]'); bag = F.pool.slice(); }   // 池子里全是看过的: 从头再来
+  let bagOut = F.pool.filter(it => !seen.has(keyOf(it)));
+  if (!bagOut.length && F.pool.length) { seen.clear(); UD.set('feedSeen', '[]'); bagOut = F.pool.slice(); }   // 池子里全是看过的: 从头再来
   const out = [];
-  while (out.length < 6 && bag.length) {
-    const it = bag.splice(Math.floor(Math.random() * bag.length), 1)[0];
+  while (out.length < 6 && bagOut.length) {
+    const it = bagOut.splice(Math.floor(Math.random() * bagOut.length), 1)[0];
     F.pool.splice(F.pool.indexOf(it), 1);
     out.push(it);
   }
@@ -992,8 +987,8 @@ function startMode(mode, extra) {
   pump();
 }
 function renderMenu() {
-  const x = F.extra, kids = kidsMode();
-  const entries = [['rec', '推荐 · ' + (state.sites.find(s => s.key === state.site)?.name || '')], ['rand', '随机 · 全部源']];
+  const x = F.extra, kids = kidsMode(), siteName = state.sites.find(s => s.key === state.site)?.name || '';
+  const entries = [['rec', '推荐 · ' + siteName], ['rand', '随机 · ' + siteName]];
   if (x && (x.mode === 'cat' || x.mode === 'search' || x.mode === 'list')) entries.push([x.mode, x.mode === 'cat' ? '分类 · ' + (x.name || '全部') : x.mode === 'search' ? '搜索 · ' + x.q : x.label || '列表']);
   if (!kids) entries.push(['fav', '我的收藏']);
   entries.push(['hist', '继续观看']);

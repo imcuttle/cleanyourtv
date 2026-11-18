@@ -5966,8 +5966,8 @@ async function renderSettings() {
         <button data-bulk="delbad">删除不通的</button>${kind === 'site' ? '<button data-bulk="delempty" title="删除能连上、但一部片都没有的点播源">删除 0 部的</button><button data-bulk="classify" title="按分类名自动判断：80% 以上分类是色情词 → 成人，80% 以上是少儿词 → 少儿，否则标准（不勾选）。只处理还没勾少儿 / 成人的源；勾选了源就只看选中的，否则看全部">自动分类</button>' : ''}</div></span>
       <span class="lan" data-bulk="count"></span></div>`;
   view.innerHTML = `<div class="page set"><h1>设置</h1>
-    <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。想完全随缘就用「随机看片」：不看口味，从全部点播源的整个库里随手抽，抽到哪部放哪部（进了沉浸页也能在顶部中间的下拉里切换）。</p>
-      <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button><button class="small ics" data-feed="rand" title="不看口味，从全部点播源的整个库里完全随机">${IC.dice}随机看片</button></div></section>
+    <section><h2>沉浸式看片</h2><p class="hint">像刷短视频一样看片：上下滑动切换，双击喜欢，系统会按你的口味推荐。想完全随缘就用「随机看片」：不看口味，在顶部选中的那个源的整个库里随手抽，抽到哪部放哪部（进了沉浸页也能在顶部中间的下拉里切换）。</p>
+      <div class="actions"><button class="small" data-feed="rec">▶ 开始沉浸观看</button><button class="small ics" data-feed="rand" title="不看口味，在当前选中源的整个库里完全随机">${IC.dice}随机看片</button></div></section>
     <section id="acctSec"><h2>账号管理</h2><p class="lan">加载中…</p></section>
     ${installSection()}
     <section><h2>安全级别</h2><p class="hint">儿童：只显示勾了「少儿」的源，关闭直播和豆瓣热门；标准：隐藏勾了「成人」的源以及伦理/写真等分类；全部：不过滤。安全级别属于账号：${levelHint}</p>
