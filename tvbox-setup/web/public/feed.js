@@ -809,7 +809,8 @@ const drainPool = n => { const out = []; while (out.length < n && F.pool.length)
 // 范围 = 顶部选中的那一个源的全部资源 (不跨源), 抽法上保证「整个库」都在池子里:
 //   · 分类: 把源的全部分类洗牌后排队轮着用, 一轮走完再洗一次 —— 不会老是那几个分类;
 //   · 页: 每个分类的页码在 1..pagecount 里均匀随机 (pagecount 用源自己报的值, 不封顶), 老片子 / 深页也能抽到;
-//   · 抓取: 池子见底才去抓新的一页, 抓来的一页基本都会被用掉 (不会抓 3~4 页只用掉 6 个、剩下的被挤掉)。
+//   · 抓取: 一次并行抓 3 页不同分类, 池子里留够余量再发, 抓来的一页基本都会被用掉;
+//   · 发放: 按分类分桶交错着出, 相邻两屏不撞同一个分类 —— 否则一批 6 屏全是同一页 (同一个分类) 的片子。
 // 只保留两条必要的去重 (不是为了推荐): 同一部片不重复, 眼前刚刷过去的不重复。
 const randCat = new Map();                        // site → [{id,name}]: 随机模式自己的一份分类缓存 (和推荐模式的 F.cats 分开)
 async function randCatsOf(site) {
@@ -829,6 +830,11 @@ function randNextCat(site, cats) {
   if (!st || st.key !== key || st.i >= st.queue.length) { st = { key, queue: shuffled(cats.slice()), i: 0 }; randSeq.set(site, st); }
   return st.queue[st.i++];
 }
+// 给抽回来的片子记上「它来自哪个分类」, 发的时候好混着发。
+// 挂在非枚举属性上: 不影响 keyOf / nameOf, 也不会被 JSON 序列化带到历史记录或详情请求里。
+const tagCat = (list, name) => {
+  for (const it of list) if (!it.__rc) { try { Object.defineProperty(it, '__rc', { value: name, enumerable: false, configurable: true }); } catch (e) {} }
+};
 // 抓一页: 分类按洗牌队列轮、页码在整个 pagecount 里均匀随机 (第一次先取第 1 页, 顺便问到 pagecount)
 async function randPage(gen, site, cats) {
   const c = randNextCat(site, cats);
@@ -839,13 +845,14 @@ async function randPage(gen, site, cats) {
   if (!j) return false;
   F.pcount[pk] = j.pagecount || 1;
   const got = j.list || [];
+  tagCat(got, c.name);
   poolAdd(got);
   if (got.length) return true;
   if (pg === 1) return false;
   // 源报了 pagecount、深页却是空的 (不少苹果CMS把页码封在几百页): 退回第 1 页, 这一趟别白跑
   const j2 = await api('list', { site, t: c.id, pg: 1 }, null).catch(() => null);
   if (gen !== F.gen) return false;
-  if (j2) { poolAdd(j2.list || []); return true; }
+  if (j2) { tagCat(j2.list || [], c.name); poolAdd(j2.list || []); return true; }
   return false;
 }
 async function randMore(gen) {
@@ -854,16 +861,40 @@ async function randMore(gen) {
   const cats = await randCatsOf(site);
   if (gen !== F.gen) return [];
   if (!cats?.length) return [];
-  // 池子够用就不再抓: 已经抓回来的片子先用完, 不浪费 (每页通常 20 部, 够抽 3 轮)
-  for (let guard = 0; F.pool.length < 6 && guard < 5; guard++) await randPage(gen, site, cats);
-  let bagOut = F.pool.filter(it => !seen.has(keyOf(it)));
-  if (!bagOut.length && F.pool.length) { seen.clear(); UD.set('feedSeen', '[]'); bagOut = F.pool.slice(); }   // 池子里全是看过的: 从头再来
+  const freshN = () => F.pool.reduce((n, it) => n + (seen.has(keyOf(it)) ? 0 : 1), 0);
+  if (freshN() === 0 && F.pool.length) { seen.clear(); UD.set('feedSeen', '[]'); }   // 池子里全是看过的: 从头再来
+  // 一批 6 屏, 而一页就是同一个分类的 20 部 —— 只抓一页的话整批都是同一个分类。
+  // 所以先并行抓 3 页 (分类队列会轮到 3 个不同分类), 池子里留够余量再发, 发的时候再按分类交错。
+  for (let round = 0; round < 2 && freshN() < 12; round++) {
+    const jobs = [];
+    for (let k = 0; k < 3; k++) jobs.push(randPage(gen, site, cats));
+    await Promise.all(jobs);
+    if (gen !== F.gen) return [];
+  }
+  // 按分类分桶, 出片时避开上一部所在的分桶 —— 池子里有几个分类就几个分类轮着出, 不会连着好几屏同一个分类
+  const bags = [], byCat = new Map();
+  for (const it of F.pool) {
+    if (seen.has(keyOf(it))) continue;
+    const k = it.__rc || '';
+    let b = byCat.get(k);
+    if (!b) { b = { cat: k, list: [] }; byCat.set(k, b); bags.push(b); }
+    b.list.push(it);
+  }
+  shuffled(bags);
   const out = [];
-  while (out.length < 6 && bagOut.length) {
-    const it = bagOut.splice(Math.floor(Math.random() * bagOut.length), 1)[0];
+  let last = F.rlast || '';
+  while (out.length < 6) {
+    const avail = bags.filter(b => b.list.length);
+    if (!avail.length) break;
+    const ok = avail.filter(b => b.cat !== last);
+    const from = ok.length ? ok : avail;
+    const b = from[Math.floor(Math.random() * from.length)];
+    const it = b.list.splice(Math.floor(Math.random() * b.list.length), 1)[0];
     F.pool.splice(F.pool.indexOf(it), 1);
     out.push(it);
+    last = b.cat;
   }
+  F.rlast = last;
   return out;
 }
 async function moreCands(gen) {
@@ -997,7 +1028,7 @@ function startMode(mode, extra) {
   F.names = new Set();
   ring.forEach(s => { teardown(s); Object.assign(s, { i: -1, it: null, d: null }); s.el.classList.add('empty'); });
   Object.assign(F, { gen: F.gen + 1, mode, items: [], cand: [], keys: new Set(), idx: 0, done: false, pumping: false, started: false, empties: 0,
-    pool: [], once: false, catUsed: new Set(), catCount: 1, userPaused: false, visited: new Set(), dir: 1, lastCats: new Set() });
+    pool: [], once: false, catUsed: new Set(), catCount: 1, userPaused: false, visited: new Set(), dir: 1, lastCats: new Set(), rlast: '' });
   if (extra) F.extra = extra;
   root.classList.add('booting'); bootEl.classList.remove('empty'); bootEl.querySelector('span').textContent = '正在为你挑选…';
   closeOverlays();
