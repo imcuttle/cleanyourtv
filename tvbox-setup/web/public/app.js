@@ -1439,7 +1439,10 @@ function setQuery(patch) {
   if (h !== location.hash) history.replaceState(history.state, '', h);
   pageHash = routeHash = h; noteTab(h);
 }
-const playUrl = () => !cur ? '' : cur.kind === 'vod' ? playHref(cur.d.site, cur.d.id, cur.line, cur.ep)
+// 顺序播放的地址: 普通播放 #/play/源/id/线路/集 不变, 后面加 ?pl=cat&ps=&pt=&pn= 才是「跨视频连播」。
+// 刷新 / 新标签页 / 别人打开同一个地址, 按这几个参数把整条列表重建出来 (见 attachCatPl)。
+const plQuery = () => { const pl = cur?.pl; return pl?.cat ? '?' + new URLSearchParams({ pl: 'cat', ps: pl.cat.site, pt: pl.cat.t || '', pn: pl.name || '' }) : ''; };
+const playUrl = () => !cur ? '' : cur.kind === 'vod' ? playHref(cur.d.site, cur.d.id, cur.line, cur.ep) + plQuery()
   : cur.kind === 'live' ? `#/tv/${encodeURIComponent(localStorage.live || '')}/${encodeURIComponent(cur.eps[cur.ep].url)}/${encodeURIComponent(cur.eps[cur.ep].name || '')}` : '';
 function overlayMatches(H) {
   const p = hashPage(H);
@@ -1488,7 +1491,7 @@ async function restoreOverlays(H) {
         else {
           try {
             const d = await api('detail', { site, id }, null);
-            if (d.lines?.length) play(d, d.lines[line] ? line : 0, d.lines[line]?.episodes[ep] ? ep : 0); else await openDetail(site, id, false, false, again);
+            if (d.lines?.length) { play(d, d.lines[line] ? line : 0, d.lines[line]?.episodes[ep] ? ep : 0); await attachCatPl(h, site, id); } else await openDetail(site, id, false, false, again);
           } catch (e) { if (!isAbort(e)) toast(e.message); }
         }
       } else if (p === 'tv') {
@@ -1664,6 +1667,8 @@ let lpT = 0, lpXY = null, lpFired = 0;
 // 菜单项: 影片播放 / (电脑) 新窗口播放 / 沉浸播放 / 分享, 继续观看 & 我的收藏里的卡片再多一项红色的删除 (卡片上不再放 ✕)
 function cardMenuItems(c, touch) {
   const items = [['play', IC.play, '影片播放']];
+  // 顺序播放: 把这张卡片所在的那一栏 / 那一格当成一份播放列表, 从这里开始一部接一部放 (分类页 = 整个分类)
+  if (canPlFrom(c)) items.push(['pl', IC.plist, '顺序播放']);
   if (!touch && c.dataset.site) items.push(['newwin', IC.win, '新窗口播放']);
   items.push(['feed', IC.feed, '沉浸播放']);
   if (!isLocalKey(c.dataset.site)) items.push(['share', IC.share, '分享']);
@@ -1678,10 +1683,33 @@ function removeCard(c) {
 }
 function runCardAction(k, c, name) {
   if (k === 'play') playDirect(c);
+  else if (k === 'pl') plFromCard(c);
   else if (k === 'newwin') openInNewWindow(c);
   else if (k === 'share') shareNow(c.getAttribute('href'), name);
   else if (k === 'rm') removeCard(c);
   else feedFromCard(c);
+}
+// 卡片所在的那一批卡片: 分类 / 搜索页是 #grid, 首页是横滑的 .scroller (只算真的能播的, 豆瓣卡片没站点 id)
+function cardListOf(c) {
+  const box = c.closest('.grid, .scroller'); if (!box) return [];
+  return [...box.querySelectorAll('.card')].filter(el => el.dataset.site && el.dataset.id);
+}
+// 这一批卡片能不能「顺序播放」: 多张就可以; 分类页哪怕只有一部也留着 (它后面的分页 / 选集仍然有用)
+function canPlFrom(c) {
+  const n = cardListOf(c).length;
+  return n > 1 || (n > 0 && $('#view [data-feed]')?.dataset.feed === 'cat');
+}
+// 右键 / 长按 →「顺序播放」: 从这张卡片开始, 按外面这一批卡片的顺序一部接一部往下放。
+// 分类页额外记住是哪个分类, 放到已加载卡片的末尾时再往下翻页接着拉 (见 plGrow), 所以整页 / 整个分类都能连播。
+function plFromCard(c) {
+  const els = cardListOf(c); if (!els.length) return;
+  const items = els.map(el => cardItems.get(el.dataset.site + '|' + el.dataset.id)
+    || { site: el.dataset.site, id: el.dataset.id, name: el.querySelector('.name')?.textContent || '' });
+  const at = Math.max(0, els.indexOf(c));
+  const feed = $('#view [data-feed]');
+  const cat = feed?.dataset.feed === 'cat' ? { site: feed.dataset.site || '', t: feed.dataset.t || '', name: feed.dataset.name || '' } : null;
+  const label = cat?.name || c.closest('.row')?.querySelector('h2')?.textContent.trim() || $('#view h1')?.textContent.trim() || '列表';
+  plStart(items, label, at, cat);
 }
 // 手机长按: 同 iOS 的上下文菜单 —— 背景虚化压暗, 被按的卡片原位放大浮在上面, 菜单贴在它下面 (放不下就在上面)
 let cardCtx = null;
@@ -3453,7 +3481,7 @@ function openPlayer(startAt) {
   setL('next', live ? '下一台' : '下一集'); setL('list', live ? '频道' : '选集');
   $('[data-act=next]').hidden = cur.ep >= cur.eps.length - 1;
   $('[data-act=list]').hidden = cur.eps.length <= 1;
-  if (cur.pl) { setL('next', '下一部'); setL('list', '合集'); $('[data-act=next]').hidden = !plHasNext(); $('[data-act=list]').hidden = cur.pl.items.length <= 1; }
+  if (cur.pl) paintPl();
   syncFs();
   $('[data-act=pip]').hidden = !pipSupported() || fineCursor;   // desktop has it in the control bar
   syncMedia();
@@ -3805,7 +3833,10 @@ video.addEventListener('ended', () => {
   if (cur.kind === 'vod' && vdur(video) > PROG_MIN) prog.put(cur.d.site, cur.d.id, cur.ep, vdur(video), vdur(video));   // 放完了: 记成「看完」, 再点开这一集从头播
   const m = pmode()[0], last = cur.ep >= cur.eps.length - 1;
   if (m === 'one') { seekTo(video, 0).then(() => video.play().catch(() => {})); return; }
-  if (cur.pl) { plStep(1); return; }                              // 合集顺序播放: 放完这一部接下一部 (顺序播放放完最后一部就停, 列表循环回到第一部)
+  if (cur.pl) {                                                   // 顺序播放: 这一部还有集就先放下一集, 最后一集放完接列表里的下一部
+    if (!last) { cur.ep++; openPlayer(epResume()); return; }
+    plStep(1); return;
+  }
   if (!last) return step(1);
   if (m === 'loop') { if (cur.eps.length > 1) { cur.ep = 0; openPlayer(0); } else { seekTo(video, 0).then(() => video.play().catch(() => {})); } }
 });
@@ -4382,19 +4413,49 @@ video.addEventListener('timeupdate', () => {
 });
 
 function step(n) { if (cur.pl) return plStep(n); cur.ep = Math.max(0, Math.min(cur.eps.length - 1, cur.ep + n)); openPlayer(epResume()); }
-// ---------- 合集顺序播放 (普通播放器): 一个合集里的片子当作一份「选集」, 一部接一部放 ----------
-// cur.pl = { items: 收藏条目, idx: 正在放第几部, name: 合集名 }; cur 本身还是正在放的那一部 (cur.eps 是它自己的集)。
-// 每部从上次看到的那一集接着放 (没看过就第一集); 「下一集」= 下一部, 「选集」= 合集列表, 播放模式 (顺序 / 列表循环 / 单集循环) 对整个合集生效。
-const plHasNext = () => cur.pl ? cur.pl.idx < cur.pl.items.length - 1 || (pmode()[0] === 'loop' && cur.pl.items.length > 1) : cur.ep < cur.eps.length - 1;
-function plStart(items, name, idx = 0) {
-  items = items.filter(it => state.sites.some(s => s.key === it.site));
+// ---------- 顺序播放 (普通播放器): 一批片子当作一份列表 (分类页 = 整个分类, 收藏页 = 一个合集), 一部接一部放 ----------
+// cur.pl = { items, idx, name, cat }; cur 本身还是正在放的那一部 (cur.eps 是它自己的集)。
+// cat = { site, t, name }: 从分类页进来的, 放到已加载列表的末尾会继续翻页 (plGrow); 没有 cat 就只放手上这些。
+// 每部从上次看到的那一集接着放 (没看过就第一集); 顶栏「下一部」= 列表的下一部, 换集在「选集」tab 里点;
+// 播放模式 (顺序 / 列表循环 / 单集循环) 对整个列表生效。地址用 ?pl=cat… 和普通播放区分 (见 plQuery / attachCatPl)。
+const plHasNext = () => cur.pl
+  ? cur.pl.idx < cur.pl.items.length - 1 || (!!cur.pl.cat && !cur.pl.end) || (pmode()[0] === 'loop' && cur.pl.items.length > 1)
+  : cur.ep < cur.eps.length - 1;
+function plStart(items, name, idx = 0, cat = null) {
+  items = items.filter(it => it.site && state.sites.some(s => s.key === it.site));
   if (!items.length) return toast('这里没有可以播放的片子');
-  plLoad({ items, idx, name }, Math.min(idx, items.length - 1), 1);
+  plLoad({ items, idx, name, cat, page: 1, end: false }, Math.min(idx, items.length - 1), 1);
 }
-function plStep(n) {
-  const pl = cur.pl, len = pl.items.length; let i = pl.idx + n;
+// 列表放到已加载卡片的末尾了: 分类页往下再翻一页接上 (别的页面没有 cat, 就到这里为止)
+async function plGrow(pl) {
+  if (!pl.cat || pl.end) return false;
+  if (pl.grow) return pl.grow;
+  pl.grow = (async () => {
+    const pg = (pl.page || 1) + 1;
+    try {
+      const j = await api('list', { site: pl.cat.site, t: pl.cat.t, pg });
+      pl.page = j.page || pg;
+      const seen = new Set(pl.items.map(it => it.site + '|' + it.id));
+      for (const it of j.list || []) if (!seen.has(it.site + '|' + it.id)) { seen.add(it.site + '|' + it.id); pl.items.push(it); }
+      if (pl.page >= (j.pagecount || 1)) pl.end = true;
+    } catch { pl.end = true; }
+    return pl.items.length > pl.idx || !pl.end;
+  })().finally(() => { pl.grow = null; });
+  const ok = await pl.grow;
+  // 面板正开着「视频选择」: 把新拉到的卡片补进去 (滚动位置留在原处)
+  if (cur?.pl === pl && !$('.plist').hidden && pl.tab === 'vid') {
+    const keep = $('.pvids')?.scrollTop || 0;
+    renderPlist();
+    const w = $('.pvids'); if (w) w.scrollTop = keep;
+  }
+  return ok;
+}
+async function plStep(n) {
+  const pl = cur.pl; if (!pl) return false;
+  let len = pl.items.length, i = pl.idx + n;
+  if (n > 0 && i >= len) { await plGrow(pl); len = pl.items.length; i = pl.idx + n; }
   if (i < 0 || i >= len) { if (!(n > 0 && pmode()[0] === 'loop' && len > 1)) return false; i = (i + len) % len; }
-  plLoad(pl, i, n > 0 ? 1 : -1); return true;
+  await plLoad(pl, i, n > 0 ? 1 : -1); return true;
 }
 async function plLoad(pl, i, dir, tries = 0) {
   const it = pl.items[i], t = toast(`正在打开「${it.name}」…`, true);
@@ -4414,23 +4475,39 @@ async function plLoad(pl, i, dir, tries = 0) {
     openPlayer(prog.resume(d, line, ep));
   } catch (err) { t.remove(); if (!isAbort(err)) skip('打开失败'); }
 }
+// 顶栏跟列表有关的三个按钮: 「下一部」(走列表) / 「选集」(开面板) / 系统媒体键
+function paintPl() {
+  const pl = cur?.pl; if (!pl) return;
+  setL('next', '下一部'); setL('list', '选集');
+  $('[data-act=next]').hidden = !plHasNext();
+  $('[data-act=list]').hidden = !(pl.items.length > 1 || (cur.eps || []).length > 1 || (pl.cat && !pl.end));
+  syncMedia();
+}
+// 从播放地址里的 ?pl=cat… 重建列表 (刷新 / 新标签页打开 / 别人发来的链接)
+async function attachCatPl(h, site, id) {
+  const q = new URLSearchParams((h || '').split('?')[1] || '');
+  if (q.get('pl') !== 'cat' || !cur || cur.kind !== 'vod') return;
+  const cs = q.get('ps') || site, ct = q.get('pt') || '', cname = q.get('pn') || '列表';
+  const pl = { items: [], idx: 0, name: cname, cat: { site: cs, t: ct, name: cname }, page: 0, end: false };
+  const seen = new Set();
+  for (let pg = 1; pg <= 6; pg++) {                            // 先把前几页拉出来, 够到正在播的这一部就停
+    let j; try { j = await api('list', { site: cs, t: ct, pg }); } catch { break; }
+    for (const it of j.list || []) if (!seen.has(it.site + '|' + it.id)) { seen.add(it.site + '|' + it.id); pl.items.push(it); }
+    pl.page = j.page || pg;
+    if (pg >= (j.pagecount || 1)) { pl.end = true; break; }
+    if (pl.items.some(it => it.site === cur?.d?.site && it.id === cur?.d?.id)) break;
+  }
+  if (!cur || cur.kind !== 'vod' || cur.d.id !== id) return;   // 拉的时候已经换片 / 退出去了
+  const at = pl.items.findIndex(it => it.site === cur.d.site && it.id === cur.d.id);
+  if (at >= 0) pl.idx = at;
+  else { pl.items.unshift({ site: cur.d.site, id: cur.d.id, name: cur.d.name, pic: cur.d.pic, year: cur.d.year }); pl.idx = 0; }
+  cur.pl = pl; paintPl(); renderPlist(); setOverlayUrl(playUrl());
+}
 // Episode / channel picker. Live: numbered single column with a filter; 点播: compact grid.
 // Picking closes the panel; click outside or Esc also closes it.
 function renderPlist() {
   const box = $('.plist'), live = cur.kind === 'live';
-  if (cur.pl) {                                                    // 合集顺序播放: 「选集」是这个合集里的片子
-    const pl = cur.pl;
-    box.dataset.mode = 'ep'; box.classList.remove('srcs', 'skipset'); box.classList.add('live');
-    box.innerHTML = `<div class="phead"><i class="grab"></i><b>${esc(pl.name || '合集')}</b><span>${pl.idx + 1} / ${pl.items.length}</span>
-        <button class="icon sm" data-pclose title="关闭">✕</button></div>
-      ${pl.items.length > 12 ? '<input class="pfind" type="search" enterkeyhint="search" autocomplete="off" placeholder="搜片名">' : ''}
-      <div class="pitems">${pl.items.map((it, i) => `<button data-i="${i}" class="${i === pl.idx ? 'on' : ''}"><em>${i + 1}</em><span>${esc(it.name)}</span></button>`).join('')}</div>`;
-    $('[data-pclose]', box).onclick = () => togglePlist(false);
-    $$('.pitems button', box).forEach(b => b.onclick = () => { togglePlist(false); if (+b.dataset.i !== pl.idx) plLoad(pl, +b.dataset.i, 1); });
-    const f = $('.pfind', box);
-    if (f) f.oninput = () => { const q = f.value.trim().toLowerCase(); $$('.pitems button', box).forEach(b => { b.hidden = !!q && !pl.items[+b.dataset.i].name.toLowerCase().includes(q); }); };
-    return;
-  }
+  if (cur.pl) return renderPlPlist(box, cur.pl);                     // 顺序播放: 选集 / 视频选择 两个 tab
   box.dataset.mode = 'ep'; box.classList.remove('srcs', 'skipset');
   const pm = !live && cur.kind === 'vod' ? prog.of(cur.d.site, cur.d.id) : null;
   box.classList.toggle('live', live);
@@ -4445,6 +4522,50 @@ function renderPlist() {
     const q = find.value.trim().toLowerCase();
     $$('.pitems button', box).forEach(b => { b.hidden = !!q && !cur.eps[+b.dataset.i].name.toLowerCase().includes(q) && String(+b.dataset.i + 1) !== q; });
   };
+}
+// 顺序播放的面板: 两个 tab —— 「选集」是当前这一部自己的集 (和普通播放器一样),
+// 「视频选择」是列表里的片子, 分类页那种卡片形式。顶栏的「下一部」/ 放完这一部 走列表, 换集在这一页点。
+function renderPlPlist(box, pl) {
+  const tab = pl.tab === 'vid' ? 'vid' : 'ep';
+  const eps = cur.eps || [], pm = prog.of(cur.d.site, cur.d.id);
+  const more = !!pl.cat && !pl.end;
+  box.dataset.mode = 'ep'; box.classList.remove('srcs', 'skipset', 'live'); box.classList.toggle('plvids', tab === 'vid');
+  const epHtml = eps.map((e, i) => {
+    const pg = prog.pct(pm?.get(i));
+    return `<button data-i="${i}" class="${i === cur.ep ? 'on' : ''}${pg === null ? '' : pg >= 100 ? ' watched' : ' wp'}"${pg !== null && pg < 100 ? ` style="--wp:${pg}%"` : ''}><span>${esc(e.name)}</span></button>`;
+  }).join('');
+  const find = (tab === 'ep' ? eps.length > 20 : pl.items.length > 12)
+    ? `<input class="pfind" type="search" enterkeyhint="search" autocomplete="off" placeholder="${tab === 'ep' ? '搜集数' : '搜片名'}">` : '';
+  box.innerHTML = `<div class="phead"><i class="grab"></i><b>${esc(pl.name || '列表')}</b><span>${pl.idx + 1} / ${pl.items.length}${more ? '+' : ''}</span>
+      <button class="icon sm" data-pclose title="关闭">✕</button></div>
+    <div class="ptabs"><button type="button" data-tab="ep" class="${tab === 'ep' ? 'on' : ''}">选集</button><button type="button" data-tab="vid" class="${tab === 'vid' ? 'on' : ''}">视频选择</button></div>
+    ${find}
+    ${tab === 'ep' ? `<div class="pitems">${epHtml}</div>`
+      : `<div class="pvids">${pl.items.map(it => card(it)).join('')}${more ? '<button class="more" type="button" data-plmore>加载更多</button>' : ''}</div>`}`;
+  $('[data-pclose]', box).onclick = () => togglePlist(false);
+  $$('.ptabs button', box).forEach(b => b.onclick = () => { const t = b.dataset.tab; if (t === tab) return; pl.tab = t; renderPlist(); });
+  if (tab === 'ep') {
+    $$('.pitems button', box).forEach(b => b.onclick = () => { cur.ep = +b.dataset.i; togglePlist(false); openPlayer(epResume()); });
+    const f = $('.pfind', box);
+    if (f) f.oninput = () => { const q = f.value.trim().toLowerCase(); $$('.pitems button', box).forEach(b => { b.hidden = !!q && !eps[+b.dataset.i].name.toLowerCase().includes(q) && String(+b.dataset.i + 1) !== q; }); };
+    const list = $('.pitems', box), on = $('.pitems .on', box);
+    if (list && on) list.scrollTop = on.offsetTop - list.offsetTop - (list.clientHeight - on.offsetHeight) / 2;
+    return;
+  }
+  const wrap = $('.pvids', box), cards = $$('.card', wrap);
+  const me = cards[pl.idx];
+  if (me) { me.classList.add('pl-on'); wrap.scrollTop = Math.max(0, me.offsetTop - wrap.offsetTop - (wrap.clientHeight - me.offsetHeight) / 2); }
+  wrap.onclick = e => {
+    if (e.target.closest('[data-plmore]')) return void plGrow(pl);
+    const a = e.target.closest('.card'); if (!a) return;
+    e.preventDefault();
+    const i = cards.indexOf(a); if (i < 0) return;
+    togglePlist(false);
+    if (i !== pl.idx) plLoad(pl, i, i > pl.idx ? 1 : -1);
+  };
+  if (more) wrap.onscroll = () => { if (wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 160) { wrap.onscroll = null; plGrow(pl); } };
+  const f = $('.pfind', box);
+  if (f) f.oninput = () => { const q = f.value.trim().toLowerCase(); cards.forEach((a, i) => { a.hidden = !!q && !String(pl.items[i]?.name || '').toLowerCase().includes(q); }); };
 }
 function togglePlist(open = $('.plist').hidden) {
   const box = $('.plist');
@@ -4490,7 +4611,7 @@ player.addEventListener('click', e => {
   if (act === 'share') {
     const c = cur.eps[cur.ep], live = cur.kind === 'live';
     const hash = live ? `#/tv/${encodeURIComponent(localStorage.live || '')}/${encodeURIComponent(c.url)}/${encodeURIComponent(c.name || '')}`
-      : playHref(cur.d.site, cur.d.id, cur.line, cur.ep);
+      : playUrl();   // 顺序播放时把 ?pl=cat… 一起分享出去, 别人打开也是整条列表
     $('.pmore').hidden = true; $('[data-act=more]').setAttribute('aria-expanded', false);
     const nm = live ? c.name || '' : [cur.d.name, cur.eps.length > 1 ? c.name : ''].filter(Boolean).join(' ');
     return shareNow(hash, nm);
