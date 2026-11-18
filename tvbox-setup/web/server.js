@@ -2763,7 +2763,10 @@ const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math
 // base '' = this web app (relative urls, HLS for what browsers can't play); 'http://host' = external CMS clients.
 function localCms(params, base, srcId) {
   const snap = localIndex();
-  const cats = localCfg.enabled ? snap.cats.filter(c => localCatOk(c) && (!srcId || (c.src || 'local') === srcId)) : [];
+  // 分类标签 (首页「全部分类」那一排 / 分类栏) 的顺序就在这里定: 返回前整体排一遍。
+  // 索引落盘时也排过, 但索引可能是老版本代码扫出来的 (或者刚升级还没重扫), 不排的话又是按目录扫描顺序 → 看着像没排序。
+  const cats = (localCfg.enabled ? snap.cats.filter(c => localCatOk(c) && (!srcId || (c.src || 'local') === srcId)) : [])
+    .sort((a, b) => CAT_CMP(a.name, b.name) || natural(a.name, b.name) || natural(a.src || '', b.src || ''));
   const ok = new Set(cats.map(c => c.id));
   const ids = str(params.ids).split(',').map(s => s.trim()).filter(Boolean);
   let list;
