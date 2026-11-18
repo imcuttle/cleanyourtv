@@ -428,25 +428,9 @@ html.touchui .pvids { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)
 
 /* player control bar (mouse devices) with hover frame preview */
 .ctrl { position: absolute; z-index: 2; left: 0; right: 0; bottom: 0; padding: 40px 22px 14px; background: linear-gradient(#0000, #000c 70%); transition: opacity .3s; }
-/* 播放器底部: 上一集 / 下一集 / 选集 (从顶栏挪下来的), 时间轴上边一排。屏幕够宽时带文字和进度 (3/24), 窄窗口只留图标 */
-.pnav { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; }
-.pnav[hidden] { display: none; }
-.pnav .pill { width: auto; height: 34px; padding: 0 13px; border-radius: 17px; gap: 7px; background: #ffffff1f; }
-.pnav .pill:hover { background: #ffffff33; }
-.pnav .pill[hidden] { display: none; }
-.pnav .pill svg { width: 19px; height: 19px; }
-.pnav .pill .l { display: block; font-size: 13px; font-weight: 600; white-space: nowrap; }
-.pnav .pill .n { font-style: normal; font-size: 12px; color: #ffffffa6; font-variant-numeric: tabular-nums; }
-/* 选集后面的进度 (1/9): 只在宽屏那排显示, 触屏底栏位置紧, 藏掉 */
+/* 播放器底部: 下一集 / 选集 跟 倍速 / 画中画 / 全屏 同一排 (见 index.html .cbar), 放不下时由 fitCbar 把倍速 / 画中画收进「更多」 */
 .pill .n { font-style: normal; font-size: 11px; color: #ffffffa6; margin-left: 3px; font-variant-numeric: tabular-nums; }
 html.touchui .pill .n { display: none; }
-.pnav .pill.on { background: #fff; color: #000; }
-.pnav .pill.on .n { color: #0000008c; }
-/* 窄窗口 (桌面 / 平板的小窗): 文字和进度收起来, 只留圆按钮, 免得挤 */
-@media (max-width: 640px) {
-  html:not(.touchui) .pnav .pill { width: 38px; padding: 0; border-radius: 50%; justify-content: center; gap: 0; }
-  html:not(.touchui) .pnav .pill .l, html:not(.touchui) .pnav .pill .n { display: none; }
-}
 #player.idle .ctrl { opacity: 0; }
 #player.idle { cursor: none; }
 .tl { --p: 0%; --b: 0%; --h: 0%; position: relative; height: 18px; display: flex; align-items: center; cursor: pointer; touch-action: none; }
@@ -477,6 +461,9 @@ html.touchui .pill .n { display: none; }
 /* 大屏控制条里的字幕按钮 (从「更多」浮窗挪过来的): 图标跟旁边几个一样大, 开着时是红的 (见 .pill[data-act=sub].on) */
 .cbar .pill { border-radius: 50%; }
 .cbar .pill svg { width: 26px; height: 26px; }
+/* 底栏是 40px 的圆按钮, 「选集 2/12」放不下 (数字会从按钮里挤出来、飘到屏幕上), 桌面上不显示, 只放进 title 提示 */
+html:not(.touchui) .cbar .pill .n { display: none; }
+.cbar > button { flex: 0 0 auto; }   /* 别让按钮被压扁: 挤不下时交给 fitCbar 收进「更多」 */
 #player .i-pause, #player.paused .i-play { display: inline; } #player .i-play, #player.paused .i-pause { display: none; }
 #player .i-x, #player.muted .i-wave { display: none; } #player.muted .i-x { display: inline; }
 .vol { width: 0; opacity: 0; transition: width .2s, opacity .2s; accent-color: #fff; }
@@ -1571,6 +1558,8 @@ html:not(.touchui) .pmore .pill { width: 100%; height: 40px; border-radius: 8px;
 html:not(.touchui) .pmore .pill .l { display: inline; font-size: 14px; }
 html:not(.touchui) .pmore .pill svg { width: 20px; height: 20px; }
 html:not(.touchui) .pmore [data-act=rate], html:not(.touchui) .pmore [data-act=pip] { display: none; }
+/* 底栏挤不下时这两个会被 fitCbar 收进「更多」(见 app.js), 此时才在浮窗里露出来 */
+html:not(.touchui) .pmore.show-rate [data-act=rate], html:not(.touchui) .pmore.show-pip [data-act=pip] { display: inline-flex; }
 
 /* 切换源：一行一个源，右边信号格 + 一个词 + 毫秒数 */
 .plist.srcs .pitems { display: flex; flex-direction: column; gap: 2px; }

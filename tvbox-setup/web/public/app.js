@@ -4482,7 +4482,11 @@ function paintNav() {
   const many = pl ? (pl.items.length > 1 || (cur.eps || []).length > 1 || (pl.cat && !pl.end)) : cur.eps.length > 1;
   $('[data-act=list]').hidden = !many;
   const n = $('[data-act=list] .n');
-  if (n) n.textContent = pl ? `${pl.idx + 1}/${pl.items.length}` : (cur.eps.length > 1 ? `${cur.ep + 1}/${cur.eps.length}` : '');
+  const cnt = pl ? `${pl.idx + 1}/${pl.items.length}` : (cur.eps.length > 1 ? `${cur.ep + 1}/${cur.eps.length}` : '');
+  if (n) n.textContent = cnt;
+  // 桌面底栏是圆按钮, 数字放不下 (样式里藏了), 挪到悬停提示里
+  if (cnt) $('[data-act=list]').title = `${open ? '收起' : live ? '频道' : '选集'} ${cnt}`;
+  fitCbar();
 }
 function paintPl() {
   if (!cur?.pl) return;
@@ -4674,20 +4678,48 @@ if (!fineCursor) {
   $('.pmore').prepend($('[data-act=star]'), $('[data-act=dl]'));
   $('.pmore').append($('[data-act=pip]'));
   pacts.insertBefore($('[data-act=rate]'), $('[data-act=fs]'));
-  $('.pnav').hidden = true;                                        // 上面那排空了 (按钮都挪到底下那排了)
 }
 else {
-  $('.pnav').append($('[data-act=next]'), $('[data-act=list]'));   // 大屏: 下一集 / 选集 都在播放器下面 (时间轴上边)
+  // 大屏: 下一集 / 选集 放底栏右侧 (倍速 / 画中画 / 全屏 那一排的左边), 不再单独占一行
+  $('[data-c=fs]').before($('[data-act=next]'), $('[data-act=list]'));
   $('[data-c=rate]').before($('[data-act=sub]'));   // 大屏: 字幕在右下角控制条里, 倍速左边 (触屏留在「更多」浮窗)
   // 下载 / 分享 / 自动跳过 不管窗口多宽都收进「更多」，顶栏只留 收藏 和 更多
   setTimeout(() => { const more = $('.pmore'); for (const x of ['dl', 'share', 'skipt']) more.insertBefore($(`[data-act=${x}]`), $('[data-act=rate]', more)); syncMore?.(); });   // syncMore 在下面才定义，等本段跑完再排
 }   // 右上角「更多」里放 下载 / 分享 / 自动跳过 / 切换源
 // 「更多」里一个能点的都没有 (本地文件、浏览器没有小窗…) 就不显示这个按钮
-const syncMore = () => { $('[data-act=more]').hidden = ![...$('.pmore').children].some(b => !b.hidden && !(fineCursor && b.dataset.act === 'rate')); };   // 大屏的倍速在控制条里，「更多」里只剩切换源
+const syncMore = () => {
+  const more = $('.pmore');
+  // 大屏的倍速 / 画中画平时在底栏里, 只有底栏挤不下才收进「更多」(见 fitCbar), 收进来了才算「更多」里有东西
+  const shown = [...more.children].filter(b => !b.hidden
+    && !(fineCursor && b.dataset.act === 'rate' && !more.classList.contains('show-rate'))
+    && !(fineCursor && b.dataset.act === 'pip' && !more.classList.contains('show-pip')));
+  $('[data-act=more]').hidden = !shown.length;
+};
+// 底栏放不下时, 把「画中画」「倍速」(从最不常用的开始) 收进「更多」, 保证 下一集 / 选集 / 全屏 始终在底栏上。
+// 窗口一宽就自动放回来; 触屏走底下那排 (pacts), 不归这段管。
+function fitCbar() {
+  if (!fineCursor) return;
+  const bar = $('.cbar'), more = $('.pmore'), pipC = $('[data-c=pip]'), rateC = $('[data-c=rate]');
+  const pipM = $('[data-act=pip]'), rateM = $('[data-act=rate]');
+  if (!bar || !more) return;
+  const over = () => bar.scrollWidth > bar.clientWidth + 1;
+  // 底栏里的画中画收起来时, 「更多」里得有一个对应的项, 不然就点不到了 (触屏那边也是这么挪的)
+  if (pipM && pipM.parentElement !== more) more.append(pipM);
+  more.classList.remove('show-pip', 'show-rate');
+  pipC.hidden = !pipSupported();
+  rateC.hidden = false;
+  if (pipM) pipM.hidden = true;      // 底栏有位置时「更多」里不重复列这两项
+  if (rateM) rateM.hidden = true;
+  syncMore();
+  if (!over()) return;
+  if (pipSupported()) { more.classList.add('show-pip'); pipC.hidden = true; if (pipM) pipM.hidden = false; syncMore(); }
+  if (over()) { more.classList.add('show-rate'); rateC.hidden = true; if (rateM) rateM.hidden = false; syncMore(); }
+}
+addEventListener('resize', () => fitCbar(), { passive: true });
 const syncFs = () => { const h = hideFs(); $('[data-act=fs]').hidden = h; $('[data-c=fs]').hidden = h; };
 $('[data-c=pip]').hidden = !pipSupported();
 syncFs();
-video.addEventListener('loadedmetadata', () => { if (cur) $('[data-act=pip]').hidden = !pipSupported() || fineCursor; syncFs(); syncMore(); });
+video.addEventListener('loadedmetadata', () => { if (cur) $('[data-act=pip]').hidden = !pipSupported(); syncFs(); syncMore(); fitCbar(); });
 video.addEventListener('resize', syncFs);
 // ---- 拖动 / 快进快退时的杂音处理 ----
 // 远程 HLS 切换进度后偶尔有「电流音」: 一是连续的 seek 把解码器冲得太快 (滚轮 / 连按快进 / 拖动进度条), 二是跳转瞬间新旧音频接缝处的爆音。
