@@ -1660,15 +1660,15 @@ document.addEventListener('click', e => {
   e.preventDefault();
   if (c.dataset.db !== undefined) openByName(c.dataset.db); else openDetail(c.dataset.site, c.dataset.id);
 });
-// ---------- 卡片菜单: 右键 (PC) / 长按 (手机) → 影片播放 (原模式) | 沉浸播放 (沉浸模式) ----------
+// ---------- 卡片菜单: 右键 (PC) / 长按 (手机) → 顺序播放 (普通播放模式, 一部接一部) | 沉浸播放 (沉浸模式) ----------
 // 沉浸播放从这张卡片开始, 按它所在列表 (一行 / 一个网格) 的顺序往下放; 分类 / 搜索页顶部的沉浸按钮才是随机 + 按喜好推荐。
 // 电脑右键 = 鼠标位置的小菜单; 手机长按 = 底部上拉浮窗 (同点播源 / 直播源的底部抽屉: 虚化遮罩, 点遮罩收起)
 let lpT = 0, lpXY = null, lpFired = 0;
-// 菜单项: 影片播放 / (电脑) 新窗口播放 / 沉浸播放 / 分享, 继续观看 & 我的收藏里的卡片再多一项红色的删除 (卡片上不再放 ✕)
+// 菜单项: 顺序播放 / (电脑) 新窗口播放 / 沉浸播放 / 分享, 继续观看 & 我的收藏里的卡片再多一项红色的删除 (卡片上不再放 ✕)
+// 「顺序播放」并掉了原来的「影片播放」: 都是进普通播放模式, 区别只在这张卡片所在的列表也一起带上;
+// 列表里只有它自己 (或者列表拉不出来) 时, 顺序播放就退化成放这一部, 和原来的影片播放一模一样。
 function cardMenuItems(c, touch) {
-  const items = [['play', IC.play, '影片播放']];
-  // 顺序播放: 把这张卡片所在的那一栏 / 那一格当成一份播放列表, 从这里开始一部接一部放 (分类页 = 整个分类)
-  if (canPlFrom(c)) items.push(['pl', IC.plist, '顺序播放']);
+  const items = [['pl', IC.play, '顺序播放']];
   if (!touch && c.dataset.site) items.push(['newwin', IC.win, '新窗口播放']);
   items.push(['feed', IC.feed, '沉浸播放']);
   if (!isLocalKey(c.dataset.site)) items.push(['share', IC.share, '分享']);
@@ -1682,8 +1682,8 @@ function removeCard(c) {
   if (sc && !sc.querySelector('.card')) sc.closest('.row, .page')?.querySelector('.hempty')?.removeAttribute('hidden'), sc.closest('.row')?.remove();
 }
 function runCardAction(k, c, name) {
-  if (k === 'play') playDirect(c);
-  else if (k === 'pl') plFromCard(c);
+  // 顺序播放: 这一批卡片不止一张才真的开列表; 只有它自己 (首页横滑到头 / 单部片的分类) 就退化成放这一部
+  if (k === 'play' || k === 'pl') { if (k === 'pl' && cardListOf(c).length > 1) plFromCard(c); else playDirect(c); }
   else if (k === 'newwin') openInNewWindow(c);
   else if (k === 'share') shareNow(c.getAttribute('href'), name);
   else if (k === 'rm') removeCard(c);
@@ -1693,11 +1693,6 @@ function runCardAction(k, c, name) {
 function cardListOf(c) {
   const box = c.closest('.grid, .scroller'); if (!box) return [];
   return [...box.querySelectorAll('.card')].filter(el => el.dataset.site && el.dataset.id);
-}
-// 这一批卡片能不能「顺序播放」: 多张就可以; 分类页哪怕只有一部也留着 (它后面的分页 / 选集仍然有用)
-function canPlFrom(c) {
-  const n = cardListOf(c).length;
-  return n > 1 || (n > 0 && $('#view [data-feed]')?.dataset.feed === 'cat');
 }
 // 右键 / 长按 →「顺序播放」: 从这张卡片开始, 按外面这一批卡片的顺序一部接一部往下放。
 // 分类页额外记住是哪个分类, 放到已加载卡片的末尾时再往下翻页接着拉 (见 plGrow), 所以整页 / 整个分类都能连播。
@@ -1859,7 +1854,7 @@ function openSortSheet(btn) {
 }
 document.addEventListener('click', e => { const b = e.target.closest('.ssort .sbtn'); if (b) openSortSheet(b); });
 const cardItems = new Map();
-// 卡片菜单「影片播放」: no detail sheet. Resumes where this title was left (or starts at the first episode).
+// 卡片菜单「顺序播放」(列表里只有它自己时 / 旧的「影片播放」): no detail sheet. Resumes where this title was left (or starts at the first episode).
 // 卡片自带第一集的地址 (it.p1, 列表 / 搜索接口一起给的): 从头播放时不等详情, 立刻起播, 选集 / 线路在后台补全 (upgradePlaying)。
 async function playDirect(c) {
   let site = c.dataset.site, id = c.dataset.id, it = cardItems.get(site + '|' + id);
