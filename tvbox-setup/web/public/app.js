@@ -4617,13 +4617,24 @@ function renderPlist() {
 // 面板还 hidden 的时候量不到 clientHeight / offsetTop, 所以只在显示之后调 (renderPlPlist 和 togglePlist 都会调)。
 function revealPl(box = $('.plist')) {
   if (!box || box.hidden) return;
-  const wrap = $('.pvids', box), on = $('.pvids .pl-on', box);
-  if (wrap && on) { wrap.scrollTop = Math.max(0, on.offsetTop - wrap.offsetTop - (wrap.clientHeight - on.offsetHeight) / 2); return; }
-  const list = $('.pitems', box), curEp = $('.pitems .on', box);
-  if (list && curEp) list.scrollTop = Math.max(0, curEp.offsetTop - list.offsetTop - (list.clientHeight - curEp.offsetHeight) / 2);
+  const wrap = $('.pvids', box) || $('.pitems', box);
+  const on = $('.pvids .pl-on', box) || $('.pitems .on', box);
+  if (!wrap || !on) return;
+  // 用视口坐标算相对位置: 不依赖两者 offsetParent 一致 (grid / 底部弹层都可能改 offsetTop),
+  // 而且手机上弹层滑入是 translate, 对 wrap 和当前项是一样的, 差值不受影响。
+  const r = on.getBoundingClientRect(), w = wrap.getBoundingClientRect();
+  const top = r.top - w.top + wrap.scrollTop;
+  wrap.scrollTop = Math.max(0, Math.round(top - (wrap.clientHeight - r.height) / 2));
+  // 海报 / 片名加载完可能改变行高, 回调里再校一次 (dataset.rv 防重复绑定)
+  wrap.querySelectorAll('img').forEach(img => {
+    if (img.dataset.rv || img.complete) return;
+    img.dataset.rv = '1';
+    img.addEventListener('load', () => revealPl(box), { once: true });
+  });
 }
 // 顺序播放的面板: 两个 tab —— 「视频选择」是列表里的片子 (分类页那种卡片形式), 「选集」是当前这一部自己的集。
-// 有视频选择的数据 (列表里不止这一部) 就默认开在「视频选择」, 用户点过「选集」的话记住他的选择; 只有一部的片子没得选, 只出「选集」。
+// 有视频选择的数据 (列表里不止这一部) 就默认开在「视频选择」并定位到正在播的那部; 手动切「选集」只在本次打开期间有效
+// (togglePlist 每次打开都会把 tab 重置回 vid), 只有一部的片子没得选, 只出「选集」。
 // 顶栏的「下一部」/ 放完这一部 走列表, 换集在「选集」这一页点。
 function renderPlPlist(box, pl) {
   // 刷新 / 分享链接重建出来的列表, 顺序可能和当时不一样: 以「现在正在放的这一部」为准校准 idx, 面板才不会高亮错片
@@ -4675,7 +4686,12 @@ function renderPlPlist(box, pl) {
 function togglePlist(open = $('.plist').hidden) {
   const box = $('.plist');
   if (open) sysClose();
-  if (open && cur?.pl) renderPlist();   // 删过片 / 换过片: 每次打开都按最新列表重画
+  if (open && cur?.pl) {
+    // 点「选集」进来, 默认永远是「视频选择」并停在正在播的这一部。上次手动切到「选集」tab
+    // 只在这次打开期间有效, 关掉再开要回到当前视频, 否则一打开只看到集数、找不到自己在看哪部。
+    if (cur.pl.items.length > 1) cur.pl.tab = 'vid';
+    renderPlist();                                     // 删过片 / 换过片: 每次打开都按最新列表重画
+  }
   box.hidden = !open;
   $('[data-act=list]').classList.toggle('on', open && box.dataset.mode === 'ep');
   if (cur) paintNav();                                 // 按钮文字跟着变: 选集 ⇄ 收起
@@ -4683,6 +4699,7 @@ function togglePlist(open = $('.plist').hidden) {
   player.classList.toggle('srcopen', open && box.dataset.mode === 'src');
   if (open) {
     revealPl(box);                                    // 顺序播放滚到当前这部, 普通播放滚到当前这一集
+    requestAnimationFrame(() => revealPl(box));        // 弹层滑入 / 布局稳定后再校一次
     player.scrollTop = 0; poke();
   }
 }
