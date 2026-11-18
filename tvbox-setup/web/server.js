@@ -3020,7 +3020,11 @@ async function scanLocal() {
     for (const it of items.values()) delete it._dir;
     const list = [...items.values()].sort((a, b) => b.mtime - a.mtime);
     const used = new Set(list.map(it => it.cat));
-    fs.writeFileSync(LOCAL_INDEX + '.tmp', JSON.stringify({ at: Date.now(), cats: [...cats.values()].filter(c => used.has(c.id)), items: list }));
+    // 分类整体按名字排一遍: 上面每个根目录内部是有序的, 但多个本地源 / 多个目录 / 目录里散落的片子这一档
+    // 是各自成段拼进来的, 不整体排就会「第一个目录的一堆 → 第二个目录的一堆」, 看着还是乱。
+    const catList = [...cats.values()].filter(c => used.has(c.id))
+      .sort((a, b) => CAT_CMP(a.name, b.name) || natural(a.name, b.name) || natural(a.src || '', b.src || ''));
+    fs.writeFileSync(LOCAL_INDEX + '.tmp', JSON.stringify({ at: Date.now(), cats: catList, items: list }));
     for (let i = 0; ; i++) { // Windows: EPERM/EBUSY while a web worker is reading the old index
       try { fs.renameSync(LOCAL_INDEX + '.tmp', LOCAL_INDEX); break; }
       catch (e) { if (i >= 8 || !/^(EPERM|EBUSY|EACCES)$/.test(e.code)) throw e; await new Promise(ok => setTimeout(ok, 60 * (i + 1))); }
